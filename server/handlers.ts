@@ -641,3 +641,312 @@ export async function handleDiagnosePath(
     recentActions: getRecentActionLogs(),
   };
 }
+
+export interface DaemonLabelBridge {
+  listWorkspaceLabels(): Promise<{
+    labels: Array<{ name: string; color: WorkspaceLabelColor }>;
+  }>;
+  fetchWorkspaces(options?: { limit?: number }): Promise<{
+    entries: Array<{
+      id: string;
+      name: string;
+      title?: string | null;
+      labels?: string[];
+      workspaceDirectory?: string | null;
+    }>;
+  }>;
+  setWorkspaceLabel(options: {
+    workspaceId: string;
+    label: { name: string; color?: WorkspaceLabelColor };
+    assigned: boolean;
+  }): Promise<unknown>;
+  updateWorkspaceLabel(options: {
+    name: string;
+    newName?: string;
+    color?: WorkspaceLabelColor;
+  }): Promise<unknown>;
+  deleteWorkspaceLabel(options: { name: string }): Promise<unknown>;
+  updateAgent(
+    agentId: string,
+    updates: { name?: string; labels?: Record<string, string> },
+  ): Promise<void>;
+}
+
+const VALID_LABEL_COLORS = new Set<string>(WORKSPACE_LABEL_COLORS);
+
+function normalizeLabelColor(color?: string | null): WorkspaceLabelColor {
+  if (color && VALID_LABEL_COLORS.has(color)) {
+    return color as WorkspaceLabelColor;
+  }
+  return "violet";
+}
+
+async function withLocalDaemonBridge<T>(
+  fn: (bridge: DaemonLabelBridge) => Promise<T>,
+  overrideBridge?: DaemonLabelBridge,
+): Promise<T> {
+  if (overrideBridge) {
+    return fn(overrideBridge);
+  }
+  const paseoDir = path.join(os.homedir(), ".paseo");
+  const credRaw = await fs.readFile(path.join(paseoDir, "local-credential"), "utf-8");
+  const password = credRaw.trim();
+  let listen = "127.0.0.1:6767";
+  try {
+    const cfgRaw = await fs.readFile(path.join(paseoDir, "config.json"), "utf-8");
+    const cfg = JSON.parse(cfgRaw) as { daemon?: { listen?: string } };
+    if (cfg.daemon?.listen) {
+      listen = cfg.daemon.listen;
+    }
+  } catch {
+    // Default loopback listen
+  }
+  const modPath = new URL(
+    "../node_modules/@getpaseo/client/dist/node/index.js",
+    import.meta.url,
+  ).href;
+  const { createHostClient } = (await import(modPath)) as {
+    createHostClient: (
+      url: string,
+      opts: { clientId: string; password?: string },
+    ) => DaemonLabelBridge & { connect(): Promise<void>; close(): Promise<void> };
+  };
+  const client = createHostClient(`ws://${listen}/ws`, {
+    clientId: `plugin-finder-bridge-${Date.now()}`,
+    password,
+  });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+async function resolveActiveWorkspaceId(
+  context: PluginHandlerContext,
+  explicitWorkspaceId?: string,
+): Promise<string> {
+  if (explicitWorkspaceId && explicitWorkspaceId.trim()) {
+    return explicitWorkspaceId.trim();
+  }
+  try {
+    const list = await context.paseo.workspaces.list();
+    if (list.entries[0]?.id) {
+      return list.entries[0].id;
+    }
+  } catch {
+    // Fallback
+  }
+  return "";
+}
+
+export async function handleRenameThread(
+  input: RpcInput<typeof renameWorkspaceOrAgentRpc>,
+  context: PluginHandlerContext,
+  options?: { bridge?: DaemonLabelBridge },
+) {
+  const startMs = Date.now();
+  const workspaceId = await resolveActiveWorkspaceId(context, input.workspaceId);
+  const rawTitle = input.title === null ? null : input.title.trim();
+  const normalizedTitle =
+    rawTitle === null || rawTitle === "" || rawTitle.toLowerCase() === "clear" || rawTitle.toLowerCase() === "reset"
+      ? null
+      : rawTitle;
+
+  if (!workspaceId && !input.agentId) {
+    return {
+      ok: false,
+      workspaceId: "",
+      title: normalizedTitle,
+      message: "No active workspaceId or agentId found to rename",
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  try {
+    if (workspaceId) {
+      const ref = context.paseo.workspaces.ref(workspaceId);
+      await ref.setTitle(normalizedTitle);
+    }
+    if (input.agentId && normalizedTitle) {
+      await withLocalDaemonBridge(
+        (bridge) => bridge.updateAgent(input.agentId!, { name: normalizedTitle }),
+        options?.bridge,
+      );
+    }
+    const durationMs = Date.now() - startMs;
+    const msg = normalizedTitle
+      ? `Renamed workspace (${workspaceId}) to "${normalizedTitle}"`
+      : `Cleared custom title for workspace (${workspaceId})`;
+    recordActionLog({
+      target: "finder-folder",
+      resolvedPath: workspaceId || input.agentId || "",
+      ok: true,
+      durationMs,
+      message: msg,
+    });
+    return {
+      ok: true,
+      workspaceId,
+      title: normalizedTitle,
+      message: msg,
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      workspaceId,
+      title: normalizedTitle,
+      message: msg,
+      durationMs,
+    };
+  }
+}
+
+export async function handleManageWorkspaceLabels(
+  input: RpcInput<typeof manageWorkspaceLabelsRpc>,
+  context: PluginHandlerContext,
+  options?: { bridge?: DaemonLabelBridge },
+) {
+  const startMs = Date.now();
+  const workspaceId = await resolveActiveWorkspaceId(context, input.workspaceId);
+  const action = input.action ?? "inspect";
+  const labelName = (input.labelName ?? "").trim();
+
+  try {
+    return await withLocalDaemonBridge(async (bridge) => {
+      const readState = async () => {
+        const [labelList, wsList] = await Promise.all([
+          bridge.listWorkspaceLabels(),
+          bridge.fetchWorkspaces({ limit: 200 }),
+        ]);
+        const catalog: WorkspaceLabelEntry[] = (labelList.labels ?? []).map((item) => ({
+          name: item.name,
+          color: normalizeLabelColor(item.color),
+        }));
+        const matchedWs =
+          wsList.entries.find((w) => w.id === workspaceId) ?? wsList.entries[0];
+        const resolvedWsId = matchedWs?.id ?? workspaceId;
+        const workspaceTitle = matchedWs?.title ?? matchedWs?.name ?? resolvedWsId;
+        const assignedLabels = Array.isArray(matchedWs?.labels)
+          ? [...matchedWs.labels]
+          : [];
+        return { catalog, resolvedWsId, workspaceTitle, assignedLabels };
+      };
+
+      const initial = await readState();
+      const targetWsId = initial.resolvedWsId;
+
+      if (action === "inspect" || !labelName) {
+        return {
+          ok: true,
+          workspaceId: targetWsId,
+          workspaceTitle: initial.workspaceTitle,
+          assignedLabels: initial.assignedLabels,
+          catalog: initial.catalog,
+          message: `Loaded ${initial.assignedLabels.length} assigned labels (${initial.catalog.length} in catalog)`,
+          durationMs: Date.now() - startMs,
+        };
+      }
+
+      if (action === "toggle" || action === "assign" || action === "unassign") {
+        const currentlyAssigned = initial.assignedLabels.includes(labelName);
+        const nextAssigned =
+          action === "toggle" ? !currentlyAssigned : action === "assign";
+        const existingInCatalog = initial.catalog.find((c) => c.name === labelName);
+        const color = normalizeLabelColor(input.color ?? existingInCatalog?.color ?? "violet");
+
+        await bridge.setWorkspaceLabel({
+          workspaceId: targetWsId,
+          label: { name: labelName, color },
+          assigned: nextAssigned,
+        });
+
+        const updated = await readState();
+        const durationMs = Date.now() - startMs;
+        const msg = nextAssigned
+          ? `Assigned label "${labelName}" (${color}) to workspace ${targetWsId}`
+          : `Removed label "${labelName}" from workspace ${targetWsId}`;
+        recordActionLog({
+          target: "finder-folder",
+          resolvedPath: `${targetWsId}#label:${labelName}`,
+          ok: true,
+          durationMs,
+          message: msg,
+        });
+        return {
+          ok: true,
+          workspaceId: targetWsId,
+          workspaceTitle: updated.workspaceTitle,
+          assignedLabels: updated.assignedLabels,
+          catalog: updated.catalog,
+          message: msg,
+          durationMs,
+        };
+      }
+
+      if (action === "update") {
+        const nextName = input.newName?.trim();
+        await bridge.updateWorkspaceLabel({
+          name: labelName,
+          ...(nextName ? { newName: nextName } : {}),
+          ...(input.color ? { color: normalizeLabelColor(input.color) } : {}),
+        });
+        const updated = await readState();
+        const durationMs = Date.now() - startMs;
+        const msg = `Updated label "${labelName}"${nextName ? ` -> "${nextName}"` : ""}${input.color ? ` (${input.color})` : ""}`;
+        return {
+          ok: true,
+          workspaceId: targetWsId,
+          workspaceTitle: updated.workspaceTitle,
+          assignedLabels: updated.assignedLabels,
+          catalog: updated.catalog,
+          message: msg,
+          durationMs,
+        };
+      }
+
+      if (action === "delete") {
+        await bridge.deleteWorkspaceLabel({ name: labelName });
+        const updated = await readState();
+        const durationMs = Date.now() - startMs;
+        const msg = `Deleted label "${labelName}" from catalog`;
+        return {
+          ok: true,
+          workspaceId: targetWsId,
+          workspaceTitle: updated.workspaceTitle,
+          assignedLabels: updated.assignedLabels,
+          catalog: updated.catalog,
+          message: msg,
+          durationMs,
+        };
+      }
+
+      return {
+        ok: true,
+        workspaceId: targetWsId,
+        workspaceTitle: initial.workspaceTitle,
+        assignedLabels: initial.assignedLabels,
+        catalog: initial.catalog,
+        message: "No-op",
+        durationMs: Date.now() - startMs,
+      };
+    }, options?.bridge);
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      workspaceId,
+      workspaceTitle: workspaceId,
+      assignedLabels: [],
+      catalog: [],
+      message: msg,
+      durationMs,
+    };
+  }
+}
+

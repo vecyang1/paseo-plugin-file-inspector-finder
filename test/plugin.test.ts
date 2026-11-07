@@ -7,19 +7,25 @@ import test from "node:test";
 import {
   type OpenerTarget,
   SUPPORTED_IMAGE_EXTENSIONS,
+  type WorkspaceLabelColor,
   diagnosePathRpc,
   inspectFileRpc,
   listWorkspaceMediaRpc,
+  manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   pluginSettings,
+  renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
+  type DaemonLabelBridge,
   buildCandidatePaths,
   handleDiagnosePath,
   handleInspectFile,
   handleListWorkspaceMedia,
+  handleManageWorkspaceLabels,
   handleOpenFileTarget,
+  handleRenameThread,
   resolveBestPath,
 } from "../server/handlers";
 import {
@@ -31,6 +37,7 @@ import {
   findActiveFileTabPath,
   injectIntoNativeTabMenus,
   isInsideFileExplorer,
+  isInsideWorkspaceHeaderTitle,
   isInsideWorkspaceTab,
   syncImagePanelAssociations,
 } from "../client/web";
@@ -39,7 +46,7 @@ import {
 const TINY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-function createMockContext(workspaceDirs: string[]) {
+function createMockContext(workspaceDirs: string[], titlesMap?: Map<string, string | null>) {
   return {
     log: {
       debug: () => {},
@@ -57,6 +64,9 @@ function createMockContext(workspaceDirs: string[]) {
         ref: (id: string) => ({
           id,
           directory: workspaceDirs[0] ?? os.tmpdir(),
+          setTitle: async (title: string | null) => {
+            titlesMap?.set(id, title);
+          },
           current: () => ({
             id,
             workspaceDirectory: workspaceDirs[0] ?? os.tmpdir(),
@@ -79,7 +89,14 @@ function createMockContext(workspaceDirs: string[]) {
 
 test("1. Contracts & RPC method names strictly obey @getpaseo/plugin lowercase regex", () => {
   const rpcRegex = /^[a-z][a-z0-9._-]*$/;
-  for (const rpc of [inspectFileRpc, openFileTargetRpc, listWorkspaceMediaRpc, diagnosePathRpc]) {
+  for (const rpc of [
+    inspectFileRpc,
+    openFileTargetRpc,
+    listWorkspaceMediaRpc,
+    diagnosePathRpc,
+    renameWorkspaceOrAgentRpc,
+    manageWorkspaceLabelsRpc,
+  ]) {
     assert.match(rpc.name, rpcRegex, `RPC name ${rpc.name} must be lowercase`);
   }
   assert.equal(pluginSettings.scope, "host");
@@ -475,3 +492,115 @@ test("9. Live Paseo daemon reports file-inspector-finder plugin running and enab
     // Skip if running in CI without local Paseo daemon
   }
 });
+
+test("10. Thread rename & workspace label management RPCs + header double-click helper work end-to-end", async () => {
+  const headerChild: MinimalElement = {
+    parentElement: {
+      getAttribute: (name: string) =>
+        name === "data-testid" ? "workspace-header-title" : null,
+    },
+  };
+  assert.equal(isInsideWorkspaceHeaderTitle(headerChild), true);
+  assert.equal(isInsideWorkspaceHeaderTitle({ getAttribute: () => "other" }), false);
+
+  const titlesMap = new Map<string, string | null>();
+  const ctx = createMockContext(["/tmp/ws_0"], titlesMap);
+
+  const renameRes = await handleRenameThread(
+    { workspaceId: "ws_0", title: "Paseo Shortcut & Label Refactor" },
+    ctx,
+  );
+  assert.equal(renameRes.ok, true);
+  assert.equal(renameRes.title, "Paseo Shortcut & Label Refactor");
+  assert.equal(titlesMap.get("ws_0"), "Paseo Shortcut & Label Refactor");
+
+  const clearRes = await handleRenameThread(
+    { workspaceId: "ws_0", title: "clear" },
+    ctx,
+  );
+  assert.equal(clearRes.ok, true);
+  assert.equal(clearRes.title, null);
+  assert.equal(titlesMap.get("ws_0"), null);
+
+  const catalogState: Array<{ name: string; color: WorkspaceLabelColor }> = [
+    { name: "⭐️", color: "amber" },
+    { name: "🤔", color: "violet" },
+  ];
+  const assignedSet = new Set<string>(["⭐️"]);
+
+  const mockBridge: DaemonLabelBridge = {
+    listWorkspaceLabels: async () => ({ labels: [...catalogState] }),
+    fetchWorkspaces: async () => ({
+      entries: [
+        {
+          id: "ws_0",
+          name: "Paseo Thread",
+          title: "Paseo Thread",
+          labels: Array.from(assignedSet),
+        },
+      ],
+    }),
+    setWorkspaceLabel: async ({ label, assigned }) => {
+      if (assigned) {
+        assignedSet.add(label.name);
+        if (!catalogState.some((c) => c.name === label.name)) {
+          catalogState.push({ name: label.name, color: label.color ?? "violet" });
+        }
+      } else {
+        assignedSet.delete(label.name);
+      }
+    },
+    updateWorkspaceLabel: async ({ name, newName, color }) => {
+      const item = catalogState.find((c) => c.name === name);
+      if (item) {
+        if (newName) {
+          if (assignedSet.has(name)) {
+            assignedSet.delete(name);
+            assignedSet.add(newName);
+          }
+          item.name = newName;
+        }
+        if (color) item.color = color;
+      }
+    },
+    deleteWorkspaceLabel: async ({ name }) => {
+      assignedSet.delete(name);
+      const idx = catalogState.findIndex((c) => c.name === name);
+      if (idx >= 0) catalogState.splice(idx, 1);
+    },
+    updateAgent: async () => {},
+  };
+
+  const inspectRes = await handleManageWorkspaceLabels(
+    { action: "inspect", workspaceId: "ws_0" },
+    ctx,
+    { bridge: mockBridge },
+  );
+  assert.equal(inspectRes.ok, true);
+  assert.deepEqual(inspectRes.assignedLabels, ["⭐️"]);
+  assert.equal(inspectRes.catalog.length, 2);
+
+  const toggleNewRes = await handleManageWorkspaceLabels(
+    { action: "toggle", workspaceId: "ws_0", labelName: "feat", color: "red" },
+    ctx,
+    { bridge: mockBridge },
+  );
+  assert.equal(toggleNewRes.ok, true);
+  assert.deepEqual(toggleNewRes.assignedLabels, ["⭐️", "feat"]);
+  assert.equal(toggleNewRes.catalog.length, 3);
+
+  const updateRes = await handleManageWorkspaceLabels(
+    {
+      action: "update",
+      workspaceId: "ws_0",
+      labelName: "feat",
+      newName: "feature",
+      color: "emerald",
+    },
+    ctx,
+    { bridge: mockBridge },
+  );
+  assert.equal(updateRes.ok, true);
+  assert.deepEqual(updateRes.assignedLabels, ["⭐️", "feature"]);
+});
+

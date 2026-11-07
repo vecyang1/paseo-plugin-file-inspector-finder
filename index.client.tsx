@@ -6,8 +6,12 @@ import { copyText } from "@getpaseo/plugin/client/ui";
 import {
   type OpenerTarget,
   SUPPORTED_IMAGE_EXTENSIONS,
+  WORKSPACE_LABEL_COLORS,
+  type WorkspaceLabelColor,
   listWorkspaceMediaRpc,
+  manageWorkspaceLabelsRpc,
   openFileTargetRpc,
+  renameWorkspaceOrAgentRpc,
 } from "./shared/contracts";
 import { pluginTranslations } from "./client/i18n";
 import { ImageInspectorFilePanel } from "./client/image-panel";
@@ -113,7 +117,29 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
-  // 6. Register Composer Slash Commands (/reveal and /finder)
+  client.addCommandCenterItem({
+    id: "quick-rename-workspace",
+    title: pluginTranslations.message("commands.quickRenameWorkspace"),
+    icon: "Edit3",
+    keywords: ["rename", "title", "thread", "workspace", "name", "f2"],
+    context: "workspace",
+    onSelect({ openPanel }) {
+      openPanel("finder-panel", { location: "explorer" });
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "quick-manage-labels",
+    title: pluginTranslations.message("commands.quickManageLabels"),
+    icon: "Tag",
+    keywords: ["label", "tag", "color", "thread", "workspace"],
+    context: "workspace",
+    onSelect({ openPanel }) {
+      openPanel("finder-panel", { location: "explorer" });
+    },
+  });
+
+  // 6. Register Composer Slash Commands (/reveal, /finder, /rename, /title, /label, /tag)
   for (const cmdName of ["reveal", "finder"] as const) {
     client.addSlashCommand({
       name: cmdName,
@@ -148,13 +174,96 @@ export default function contribute(client: PluginClientContext) {
     });
   }
 
+  for (const cmdName of ["rename", "title"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.renameSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.renameSlashHint"),
+      context: "workspace",
+      async onSubmit({ args, workspace, rpc }) {
+        const trimmed = args.trim();
+        if (!trimmed) return;
+        const normalized =
+          trimmed.toLowerCase() === "clear" || trimmed.toLowerCase() === "reset"
+            ? null
+            : trimmed;
+        await client.paseo.workspaces.ref(workspace.id).setTitle(normalized);
+        await rpc(renameWorkspaceOrAgentRpc, {
+          workspaceId: workspace.id,
+          title: normalized,
+        });
+      },
+    });
+  }
+
+  const validColorSet = new Set<string>(WORKSPACE_LABEL_COLORS);
+
+  for (const cmdName of ["label", "tag"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.labelSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.labelSlashHint"),
+      context: "workspace",
+      async onSubmit({ args, workspace, rpc }) {
+        const tokens = args.trim().split(/\s+/).filter(Boolean);
+        if (tokens.length === 0) return;
+
+        const firstLower = tokens[0].toLowerCase();
+        if (firstLower === "delete" || firstLower === "rm" || firstLower === "remove") {
+          const targetName = tokens.slice(1).join(" ");
+          if (!targetName) return;
+          await rpc(manageWorkspaceLabelsRpc, {
+            action: "delete",
+            workspaceId: workspace.id,
+            labelName: targetName,
+          });
+          return;
+        }
+
+        if (firstLower === "rename" || firstLower === "update") {
+          const oldName = tokens[1];
+          const newName = tokens[2];
+          const maybeColor = tokens[3]?.toLowerCase();
+          if (!oldName || !newName) return;
+          await rpc(manageWorkspaceLabelsRpc, {
+            action: "update",
+            workspaceId: workspace.id,
+            labelName: oldName,
+            newName,
+            color:
+              maybeColor && validColorSet.has(maybeColor)
+                ? (maybeColor as WorkspaceLabelColor)
+                : undefined,
+          });
+          return;
+        }
+
+        const lastTokenLower = tokens[tokens.length - 1].toLowerCase();
+        const hasTrailingColor = tokens.length >= 2 && validColorSet.has(lastTokenLower);
+        const color = hasTrailingColor ? (lastTokenLower as WorkspaceLabelColor) : undefined;
+        const labelName = hasTrailingColor
+          ? tokens.slice(0, -1).join(" ")
+          : tokens.join(" ");
+
+        await rpc(manageWorkspaceLabelsRpc, {
+          action: "toggle",
+          workspaceId: workspace.id,
+          labelName,
+          color,
+        });
+      },
+    });
+  }
+
   // 7. Dynamically register Top-Right Workspace Header Button
   const headerButtons = new Map<string, PluginButtonRegistration>();
   const lifetime = new AbortController();
+  let lastKnownWorkspaceId: string | undefined;
 
   const registerWorkspaceHeader = (workspace: { id: string }) => {
     if (lifetime.signal.aborted) return;
     const workspaceId = workspace.id;
+    lastKnownWorkspaceId = workspaceId;
     headerButtons.get(workspaceId)?.remove();
     headerButtons.set(
       workspaceId,
@@ -214,7 +323,7 @@ export default function contribute(client: PluginClientContext) {
     })
     .catch(() => {});
 
-  // 8. Extend Native Tab Context Menus In-Place + Chat File Link Menu + Option+Click + ⌘⇧R
+  // 8. Extend Native Tab Context Menus In-Place + Chat File Link Menu + Option+Click + ⌘⇧R + F2 / ⌘⇧E / ⌘⇧L
   const cleanupWebHelpers = installDesktopRevealHelpers({
     isEnabled: () => true,
     getLocale: () => client.i18n.locale,
@@ -226,6 +335,48 @@ export default function contribute(client: PluginClientContext) {
     },
     onCopyPath: async (path: string) => {
       await copyText(path);
+    },
+    onFetchThreadMetadata: async () => {
+      const res = await client.rpc(manageWorkspaceLabelsRpc, {
+        action: "inspect",
+        workspaceId: lastKnownWorkspaceId,
+      });
+      if (!res.ok) return null;
+      lastKnownWorkspaceId = res.workspaceId || lastKnownWorkspaceId;
+      return {
+        workspaceId: res.workspaceId,
+        workspaceTitle: res.workspaceTitle,
+        assignedLabels: res.assignedLabels,
+        catalog: res.catalog,
+      };
+    },
+    onRenameThread: async (newTitle: string | null) => {
+      if (lastKnownWorkspaceId) {
+        try {
+          await client.paseo.workspaces.ref(lastKnownWorkspaceId).setTitle(newTitle);
+        } catch {
+          // Fallback to RPC
+        }
+      }
+      await client.rpc(renameWorkspaceOrAgentRpc, {
+        workspaceId: lastKnownWorkspaceId,
+        title: newTitle,
+      });
+    },
+    onToggleLabel: async (labelName: string, color?: WorkspaceLabelColor) => {
+      const res = await client.rpc(manageWorkspaceLabelsRpc, {
+        action: "toggle",
+        workspaceId: lastKnownWorkspaceId,
+        labelName,
+        color,
+      });
+      if (!res.ok) return null;
+      return {
+        workspaceId: res.workspaceId,
+        workspaceTitle: res.workspaceTitle,
+        assignedLabels: res.assignedLabels,
+        catalog: res.catalog,
+      };
     },
   });
 

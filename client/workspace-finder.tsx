@@ -13,11 +13,16 @@ import { Pressable, Text, View } from "react-native";
 import {
   type FileMetadata,
   type OpenerTarget,
+  WORKSPACE_LABEL_COLORS,
+  type WorkspaceLabelColor,
   listWorkspaceMediaRpc,
+  manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   pluginSettings,
+  renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { pluginTranslations } from "./i18n";
+import { LABEL_COLOR_HEX } from "./web";
 
 interface SharedFinderBrowserProps {
   workspaceId: string;
@@ -36,6 +41,8 @@ function FinderBrowserView({
   const toast = useToast();
   const listMedia = useRpc(listWorkspaceMediaRpc);
   const openTarget = useRpc(openFileTargetRpc);
+  const renameThread = useRpc(renameWorkspaceOrAgentRpc);
+  const manageLabels = useRpc(manageWorkspaceLabelsRpc);
   const settingsState = useSettings(pluginSettings);
 
   const workspace = useWorkspace(workspaceId, (w) => ({
@@ -49,6 +56,59 @@ function FinderBrowserView({
   const [onlyImages, setOnlyImages] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [manualPath, setManualPath] = useState("");
+  const [titleDraft, setTitleDraft] = useState("");
+  const [newLabelName, setNewLabelName] = useState("");
+  const [newLabelColor, setNewLabelColor] = useState<WorkspaceLabelColor>("amber");
+
+  const labelsQuery = useQuery({
+    queryKey: ["finder.manageWorkspaceLabels", workspaceId],
+    queryFn: () =>
+      manageLabels({
+        action: "inspect",
+        workspaceId,
+      }),
+    staleTime: 3000,
+  });
+
+  const renameMutation = useMutation({
+    mutationFn: (nextTitle: string | null) =>
+      renameThread({
+        workspaceId,
+        title: nextTitle,
+      }),
+    onSuccess: (res) => {
+      void labelsQuery.refetch();
+      void mediaQuery.refetch();
+      if (res.ok) {
+        toast.show(res.message, { variant: "success" });
+      } else {
+        toast.error(res.message);
+      }
+    },
+  });
+
+  const labelMutation = useMutation({
+    mutationFn: (vars: {
+      action: "toggle" | "assign" | "unassign" | "update" | "delete";
+      labelName: string;
+      color?: WorkspaceLabelColor;
+    }) =>
+      manageLabels({
+        action: vars.action,
+        workspaceId,
+        labelName: vars.labelName,
+        color: vars.color,
+      }),
+    onSuccess: (res) => {
+      void labelsQuery.refetch();
+      void mediaQuery.refetch();
+      if (res.ok) {
+        toast.show(res.message, { variant: "success" });
+      } else {
+        toast.error(res.message);
+      }
+    },
+  });
 
   const mediaQuery = useQuery({
     queryKey: [
@@ -294,6 +354,116 @@ function FinderBrowserView({
               <Icon name="X" size={13} color={theme.colors.foreground} />
             </Pressable>
           ) : null}
+        </View>
+      </View>
+
+      <View style={styles.fileCard}>
+        <Text style={styles.auditTitle}>{t("browser.threadMetaTitle")}</Text>
+        <View style={styles.row}>
+          <TextInput
+            value={titleDraft || workspace?.name || labelsQuery.data?.workspaceTitle || ""}
+            onChangeText={setTitleDraft}
+            placeholder={t("browser.threadNamePlaceholder")}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={styles.inputBox}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("actions.saveTitle")}
+            onPress={() => {
+              const next = (
+                titleDraft ||
+                workspace?.name ||
+                labelsQuery.data?.workspaceTitle ||
+                ""
+              ).trim();
+              renameMutation.mutate(next || null);
+            }}
+            style={styles.accentBtn}
+          >
+            <Text style={styles.accentBtnText}>{t("actions.saveTitle")}</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.row}>
+          {(labelsQuery.data?.catalog ?? []).length === 0 ? (
+            <Text style={styles.mutedText}>{t("browser.noLabelsYet")}</Text>
+          ) : (
+            (labelsQuery.data?.catalog ?? []).map((entry) => {
+              const isAssigned = (labelsQuery.data?.assignedLabels ?? []).includes(entry.name);
+              const dotHex = LABEL_COLOR_HEX[entry.color] ?? LABEL_COLOR_HEX.violet;
+              return (
+                <Pressable
+                  key={entry.name}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${entry.name}`}
+                  onPress={() =>
+                    labelMutation.mutate({
+                      action: "toggle",
+                      labelName: entry.name,
+                      color: entry.color,
+                    })
+                  }
+                  style={isAssigned ? styles.activeChip : styles.inactiveChip}
+                >
+                  <View
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 99,
+                      backgroundColor: dotHex,
+                    }}
+                  />
+                  <Text style={styles.btnText}>
+                    {isAssigned ? `${entry.name} ✓` : entry.name}
+                  </Text>
+                </Pressable>
+              );
+            })
+          )}
+        </View>
+
+        <View style={styles.row}>
+          <TextInput
+            value={newLabelName}
+            onChangeText={setNewLabelName}
+            placeholder={t("browser.newLabelPlaceholder")}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={styles.inputBox}
+          />
+          {WORKSPACE_LABEL_COLORS.slice(0, 6).map((c) => (
+            <Pressable
+              key={c}
+              accessibilityRole="button"
+              accessibilityLabel={`Color ${c}`}
+              onPress={() => setNewLabelColor(c)}
+              style={{
+                width: 16,
+                height: 16,
+                borderRadius: 99,
+                backgroundColor: LABEL_COLOR_HEX[c],
+                borderWidth: newLabelColor === c ? 2 : 0,
+                borderColor: theme.colors.foreground,
+              }}
+            />
+          ))}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("actions.addLabel")}
+            onPress={() => {
+              const trimmed = newLabelName.trim();
+              if (!trimmed) return;
+              setNewLabelName("");
+              labelMutation.mutate({
+                action: "assign",
+                labelName: trimmed,
+                color: newLabelColor,
+              });
+            }}
+            style={styles.secondaryBtn}
+          >
+            <Text style={styles.btnText}>{t("actions.addLabel")}</Text>
+          </Pressable>
         </View>
       </View>
 

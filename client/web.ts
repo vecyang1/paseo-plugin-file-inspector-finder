@@ -1,6 +1,24 @@
 import { Platform } from "react-native";
-import { type OpenerTarget, SUPPORTED_IMAGE_EXTENSIONS } from "../shared/contracts";
+import {
+  type OpenerTarget,
+  SUPPORTED_IMAGE_EXTENSIONS,
+  WORKSPACE_LABEL_COLORS,
+  type WorkspaceLabelColor,
+} from "../shared/contracts";
 import { getCatalogForLocale } from "./i18n";
+
+export const LABEL_COLOR_HEX: Record<WorkspaceLabelColor, string> = {
+  violet: "#8b5cf6",
+  sky: "#0ea5e9",
+  emerald: "#10b981",
+  orange: "#f97316",
+  pink: "#ec4899",
+  indigo: "#6366f1",
+  teal: "#14b8a6",
+  red: "#ef4444",
+  amber: "#f59e0b",
+  blue: "#3b82f6",
+};
 
 interface MinimalStorage {
   readonly length: number;
@@ -14,6 +32,8 @@ export interface MinimalElement {
   textContent?: string | null;
   innerHTML?: string;
   className?: string;
+  value?: string;
+  placeholder?: string;
   parentElement?: MinimalElement | null;
   nextSibling?: MinimalElement | null;
   children?: ArrayLike<MinimalElement>;
@@ -27,6 +47,8 @@ export interface MinimalElement {
   insertBefore?(newNode: MinimalElement, referenceNode: MinimalElement | null): void;
   cloneNode?(deep?: boolean): MinimalElement;
   remove?(): void;
+  focus?(): void;
+  select?(): void;
   addEventListener?(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener?(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   contains?(other: MinimalElement | null): boolean;
@@ -50,6 +72,7 @@ export interface MinimalKeyboardEvent {
   ctrlKey?: boolean;
   shiftKey?: boolean;
   altKey?: boolean;
+  target?: MinimalElement | null;
   preventDefault(): void;
 }
 
@@ -202,6 +225,18 @@ export function isEditableInput(el: MinimalElement | null): boolean {
   return false;
 }
 
+export function isInsideWorkspaceHeaderTitle(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 8; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+    if (testId === "workspace-header-title") {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
 export function extractFilePathFromElement(
   el: MinimalElement | null,
   doc: MinimalDocument,
@@ -294,11 +329,24 @@ export function findActiveFileTabPath(doc: MinimalDocument): string | null {
   return null;
 }
 
+export interface ThreadMetadataSnapshot {
+  workspaceId: string;
+  workspaceTitle: string;
+  assignedLabels: string[];
+  catalog: Array<{ name: string; color: WorkspaceLabelColor }>;
+}
+
 export interface DesktopRevealHelperCallbacks {
   isEnabled(): boolean;
   getLocale?(): string;
   onOpenTarget(path: string, target: OpenerTarget): Promise<void>;
   onCopyPath(path: string): Promise<void>;
+  onFetchThreadMetadata?(): Promise<ThreadMetadataSnapshot | null>;
+  onRenameThread?(newTitle: string | null): Promise<void>;
+  onToggleLabel?(
+    labelName: string,
+    color?: WorkspaceLabelColor,
+  ): Promise<ThreadMetadataSnapshot | null>;
 }
 
 function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): void {
@@ -604,6 +652,296 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     activeMenuEl = container;
   };
 
+  const showQuickThreadMetadataBar = async (mode: "rename" | "labels") => {
+    removeMenu();
+    if (!doc.body || !callbacks.onFetchThreadMetadata) return;
+
+    const catalog = getCatalogForLocale(resolveLocale());
+    const snap = await callbacks.onFetchThreadMetadata().catch(() => null);
+    if (!snap || !doc.body) return;
+
+    const container = doc.createElement("div");
+    container.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar");
+    container.setAttribute?.("role", "dialog");
+    const winW = win.innerWidth ?? 1200;
+    const leftPx = Math.max(16, Math.floor((winW - 440) / 2));
+
+    if (container.style) {
+      container.style.position = "fixed";
+      container.style.left = `${leftPx}px`;
+      container.style.top = "56px";
+      container.style.width = "440px";
+      container.style.zIndex = "2147483647";
+      container.style.backgroundColor = "#161918";
+      container.style.border = "1px solid #2e3432";
+      container.style.borderRadius = "10px";
+      container.style.padding = "12px";
+      container.style.boxShadow = "0 14px 32px rgba(0, 0, 0, 0.56)";
+      container.style.display = "flex";
+      container.style.flexDirection = "column";
+      container.style.gap = "10px";
+      container.style.fontFamily =
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+    }
+
+    const headerTitle = doc.createElement("div");
+    headerTitle.textContent = catalog.browser.threadMetaTitle;
+    if (headerTitle.style) {
+      headerTitle.style.fontSize = "12px";
+      headerTitle.style.fontWeight = "600";
+      headerTitle.style.color = "#e5e7eb";
+    }
+    container.appendChild?.(headerTitle);
+
+    // 1. Rename Row
+    const renameRow = doc.createElement("div");
+    if (renameRow.style) {
+      renameRow.style.display = "flex";
+      renameRow.style.flexDirection = "row";
+      renameRow.style.gap = "6px";
+      renameRow.style.alignItems = "center";
+    }
+
+    const titleInput = doc.createElement("input");
+    titleInput.value = snap.workspaceTitle;
+    titleInput.placeholder = catalog.browser.threadNamePlaceholder;
+    if (titleInput.style) {
+      titleInput.style.flex = "1";
+      titleInput.style.backgroundColor = "#0f1211";
+      titleInput.style.border = "1px solid #2e3432";
+      titleInput.style.borderRadius = "6px";
+      titleInput.style.padding = "6px 10px";
+      titleInput.style.color = "#f3f4f6";
+      titleInput.style.fontSize = "13px";
+      titleInput.style.outline = "none";
+    }
+
+    const saveBtn = doc.createElement("div");
+    saveBtn.textContent = catalog.actions.saveTitle;
+    if (saveBtn.style) {
+      saveBtn.style.backgroundColor = "#10b981";
+      saveBtn.style.color = "#052e16";
+      saveBtn.style.fontWeight = "600";
+      saveBtn.style.fontSize = "12px";
+      saveBtn.style.padding = "6px 10px";
+      saveBtn.style.borderRadius = "6px";
+      saveBtn.style.cursor = "pointer";
+      saveBtn.style.userSelect = "none";
+    }
+
+    const triggerSaveTitle = () => {
+      const nextVal = (titleInput.value ?? "").trim();
+      removeMenu();
+      void callbacks.onRenameThread?.(nextVal || null);
+    };
+
+    saveBtn.addEventListener?.("click", (ev) => {
+      const me = ev as MinimalMouseEvent;
+      me.preventDefault?.();
+      me.stopPropagation?.();
+      triggerSaveTitle();
+    });
+
+    titleInput.addEventListener?.("keydown", (ev) => {
+      const ke = ev as MinimalKeyboardEvent;
+      if (ke.key === "Enter") {
+        ke.preventDefault?.();
+        triggerSaveTitle();
+      } else if (ke.key === "Escape") {
+        ke.preventDefault?.();
+        removeMenu();
+      }
+    });
+
+    renameRow.appendChild?.(titleInput);
+    renameRow.appendChild?.(saveBtn);
+    container.appendChild?.(renameRow);
+
+    // 2. Existing Label Chips Row
+    const chipsWrap = doc.createElement("div");
+    if (chipsWrap.style) {
+      chipsWrap.style.display = "flex";
+      chipsWrap.style.flexDirection = "row";
+      chipsWrap.style.flexWrap = "wrap";
+      chipsWrap.style.gap = "6px";
+    }
+
+    let currentAssigned = new Set<string>(snap.assignedLabels);
+    let currentCatalog = [...snap.catalog];
+
+    const renderChips = () => {
+      if (chipsWrap.innerHTML !== undefined) {
+        chipsWrap.innerHTML = "";
+      }
+      for (const entry of currentCatalog) {
+        const isAssigned = currentAssigned.has(entry.name);
+        const chip = doc.createElement("div");
+        const dotColor = LABEL_COLOR_HEX[entry.color] ?? LABEL_COLOR_HEX.violet;
+        if (chip.style) {
+          chip.style.display = "flex";
+          chip.style.flexDirection = "row";
+          chip.style.alignItems = "center";
+          chip.style.gap = "5px";
+          chip.style.padding = "4px 8px";
+          chip.style.borderRadius = "999px";
+          chip.style.fontSize = "12px";
+          chip.style.cursor = "pointer";
+          chip.style.userSelect = "none";
+          chip.style.backgroundColor = isAssigned ? "rgba(16, 185, 129, 0.16)" : "#222725";
+          chip.style.border = isAssigned ? `1px solid ${dotColor}` : "1px solid #2e3432";
+          chip.style.color = "#f3f4f6";
+        }
+        const dot = doc.createElement("span");
+        if (dot.style) {
+          dot.style.width = "8px";
+          dot.style.height = "8px";
+          dot.style.borderRadius = "999px";
+          dot.style.backgroundColor = dotColor;
+          dot.style.display = "inline-block";
+        }
+        const txt = doc.createElement("span");
+        txt.textContent = isAssigned ? `${entry.name} ✓` : entry.name;
+        chip.appendChild?.(dot);
+        chip.appendChild?.(txt);
+
+        chip.addEventListener?.("click", (ev) => {
+          const me = ev as MinimalMouseEvent;
+          me.preventDefault?.();
+          me.stopPropagation?.();
+          void callbacks.onToggleLabel?.(entry.name, entry.color).then((updated) => {
+            if (updated) {
+              currentAssigned = new Set(updated.assignedLabels);
+              currentCatalog = [...updated.catalog];
+              renderChips();
+            }
+          });
+        });
+        chipsWrap.appendChild?.(chip);
+      }
+    };
+
+    renderChips();
+    container.appendChild?.(chipsWrap);
+
+    // 3. New Label Row
+    const newLabelRow = doc.createElement("div");
+    if (newLabelRow.style) {
+      newLabelRow.style.display = "flex";
+      newLabelRow.style.flexDirection = "row";
+      newLabelRow.style.gap = "6px";
+      newLabelRow.style.alignItems = "center";
+    }
+
+    const labelInput = doc.createElement("input");
+    labelInput.placeholder = catalog.browser.newLabelPlaceholder;
+    if (labelInput.style) {
+      labelInput.style.flex = "1";
+      labelInput.style.backgroundColor = "#0f1211";
+      labelInput.style.border = "1px solid #2e3432";
+      labelInput.style.borderRadius = "6px";
+      labelInput.style.padding = "5px 10px";
+      labelInput.style.color = "#f3f4f6";
+      labelInput.style.fontSize = "12px";
+      labelInput.style.outline = "none";
+    }
+
+    let selectedColor: WorkspaceLabelColor = "amber";
+    const colorDotsWrap = doc.createElement("div");
+    if (colorDotsWrap.style) {
+      colorDotsWrap.style.display = "flex";
+      colorDotsWrap.style.flexDirection = "row";
+      colorDotsWrap.style.gap = "4px";
+      colorDotsWrap.style.alignItems = "center";
+    }
+
+    const renderColorDots = () => {
+      if (colorDotsWrap.innerHTML !== undefined) {
+        colorDotsWrap.innerHTML = "";
+      }
+      for (const c of WORKSPACE_LABEL_COLORS.slice(0, 6)) {
+        const dotBtn = doc.createElement("div");
+        if (dotBtn.style) {
+          dotBtn.style.width = "14px";
+          dotBtn.style.height = "14px";
+          dotBtn.style.borderRadius = "999px";
+          dotBtn.style.backgroundColor = LABEL_COLOR_HEX[c];
+          dotBtn.style.cursor = "pointer";
+          dotBtn.style.border = selectedColor === c ? "2px solid #ffffff" : "1px solid transparent";
+        }
+        dotBtn.addEventListener?.("click", (ev) => {
+          const me = ev as MinimalMouseEvent;
+          me.preventDefault?.();
+          me.stopPropagation?.();
+          selectedColor = c;
+          renderColorDots();
+        });
+        colorDotsWrap.appendChild?.(dotBtn);
+      }
+    };
+    renderColorDots();
+
+    const addLabelBtn = doc.createElement("div");
+    addLabelBtn.textContent = catalog.actions.addLabel;
+    if (addLabelBtn.style) {
+      addLabelBtn.style.backgroundColor = "#222725";
+      addLabelBtn.style.border = "1px solid #2e3432";
+      addLabelBtn.style.color = "#e5e7eb";
+      addLabelBtn.style.fontSize = "12px";
+      addLabelBtn.style.padding = "5px 8px";
+      addLabelBtn.style.borderRadius = "6px";
+      addLabelBtn.style.cursor = "pointer";
+      addLabelBtn.style.userSelect = "none";
+    }
+
+    const triggerAddLabel = () => {
+      const nameVal = (labelInput.value ?? "").trim();
+      if (!nameVal) return;
+      labelInput.value = "";
+      void callbacks.onToggleLabel?.(nameVal, selectedColor).then((updated) => {
+        if (updated) {
+          currentAssigned = new Set(updated.assignedLabels);
+          currentCatalog = [...updated.catalog];
+          renderChips();
+        }
+      });
+    };
+
+    addLabelBtn.addEventListener?.("click", (ev) => {
+      const me = ev as MinimalMouseEvent;
+      me.preventDefault?.();
+      me.stopPropagation?.();
+      triggerAddLabel();
+    });
+
+    labelInput.addEventListener?.("keydown", (ev) => {
+      const ke = ev as MinimalKeyboardEvent;
+      if (ke.key === "Enter") {
+        ke.preventDefault?.();
+        triggerAddLabel();
+      } else if (ke.key === "Escape") {
+        ke.preventDefault?.();
+        removeMenu();
+      }
+    });
+
+    newLabelRow.appendChild?.(labelInput);
+    newLabelRow.appendChild?.(colorDotsWrap);
+    newLabelRow.appendChild?.(addLabelBtn);
+    container.appendChild?.(newLabelRow);
+
+    doc.body.appendChild?.(container);
+    activeMenuEl = container;
+
+    setTimeout(() => {
+      if (mode === "labels") {
+        labelInput.focus?.();
+      } else {
+        titleInput.focus?.();
+        titleInput.select?.();
+      }
+    }, 10);
+  };
+
   const scheduleNativeTabMenuExtension = () => {
     injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
     win.requestAnimationFrame?.(() => {
@@ -674,6 +1012,16 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     showChatLinkContextMenu(me.clientX, me.clientY, detected);
   };
 
+  const onDblClickCapture = (ev: unknown) => {
+    if (!callbacks.isEnabled()) return;
+    const me = ev as MinimalMouseEvent;
+    if (isInsideWorkspaceHeaderTitle(me.target)) {
+      me.preventDefault();
+      me.stopPropagation();
+      void showQuickThreadMetadataBar("rename");
+    }
+  };
+
   const onKeyDownCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
     const ke = ev as MinimalKeyboardEvent;
@@ -688,10 +1036,26 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
         ke.preventDefault();
         void callbacks.onOpenTarget(activeFile, "finder-reveal");
       }
+      return;
+    }
+    // F2 or Cmd+Shift+E opens Quick Workspace Rename & Labels Bar (focused on title)
+    if (
+      (ke.key === "F2" && !isEditableInput(ke.target ?? null)) ||
+      ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "e")
+    ) {
+      ke.preventDefault();
+      void showQuickThreadMetadataBar("rename");
+      return;
+    }
+    // Cmd+Shift+L opens Quick Workspace Rename & Labels Bar (focused on labels)
+    if ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "l") {
+      ke.preventDefault();
+      void showQuickThreadMetadataBar("labels");
     }
   };
 
   doc.addEventListener("click", onClickCapture, true);
+  doc.addEventListener("dblclick", onDblClickCapture, true);
   doc.addEventListener("contextmenu", onContextMenuCapture, true);
   win.addEventListener("keydown", onKeyDownCapture, true);
 
@@ -699,6 +1063,7 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     removeMenu();
     observer?.disconnect();
     doc.removeEventListener("click", onClickCapture, true);
+    doc.removeEventListener("dblclick", onDblClickCapture, true);
     doc.removeEventListener("contextmenu", onContextMenuCapture, true);
     win.removeEventListener("keydown", onKeyDownCapture, true);
   };

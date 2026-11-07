@@ -222,6 +222,15 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSwitch
+            label={t("settings.quickRenameLabelShortcutsLabel")}
+            hint={t("settings.quickRenameLabelShortcutsHint")}
+            value={values.enableQuickRenameAndLabelShortcuts}
+            onValueChange={(next) => {
+              void save({ ...values, enableQuickRenameAndLabelShortcuts: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
             label={t("settings.showComposerPillLabel")}
             hint={t("settings.showComposerPillHint")}
             value={values.showComposerPill}
