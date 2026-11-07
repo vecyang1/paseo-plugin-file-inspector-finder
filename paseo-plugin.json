@@ -1,0 +1,9 @@
+{
+  "id": "file-inspector-finder",
+  "name": "File Inspector & Finder Reveal",
+  "description": "Reveal images and files in Finder, preview in macOS Preview/Editors, inspect image dimensions and metadata, and browse workspace media from tabs, headers, composer pills, ⌘K, and /reveal.",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.15.3"
+  }
+}
