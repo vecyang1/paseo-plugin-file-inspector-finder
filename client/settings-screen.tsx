@@ -2,6 +2,7 @@ import {
   type PluginSurfaceProps,
   useRpc,
   useSettings,
+  useTranslation,
 } from "@getpaseo/plugin/client";
 import {
   Icon,
@@ -21,14 +22,15 @@ import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   type OpenerTarget,
-  SUPPORTED_IMAGE_EXTENSIONS,
   diagnosePathRpc,
   openFileTargetRpc,
   pluginSettings,
 } from "../shared/contracts";
+import { pluginTranslations } from "./i18n";
 import { syncImagePanelAssociations } from "./web";
 
 export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps) {
+  const { t } = useTranslation(pluginTranslations);
   const settings = useSettings(pluginSettings);
   const toast = useToast();
   const diagnosePath = useRpc(diagnosePathRpc);
@@ -141,7 +143,9 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   if (settings.status === "error" || settings.status === "invalid") {
     return (
       <View style={styles.content}>
-        <Text style={styles.label}>配置加载异常: {settings.error}</Text>
+        <Text style={styles.label}>
+          {t("settings.loadError")} {settings.error}
+        </Text>
       </View>
     );
   }
@@ -150,18 +154,20 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
 
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content}>
-      <SettingsSection title="1. 核心打开行为与表面增强 (能调 · Live Config)">
+      <SettingsSection title={t("settings.sectionBehavior")}>
         <SettingsCard>
           <SettingsSelect
-            label="默认首选定位动作 (Default Primary Action)"
-            hint="点击快捷按钮或执行 /reveal 时的默认系统动作"
+            label={t("settings.defaultActionLabel")}
+            hint={t("settings.defaultActionHint")}
             value={values.defaultPrimaryAction}
             options={[
-              { label: "📂 在 Finder 中显示并选中文件 (open -R)", value: "finder-reveal" },
-              { label: "📁 打开所在父级文件夹 (open [dir])", value: "finder-folder" },
-              { label: "🖼️ 使用 macOS 系统预览打开 (Preview.app)", value: "system-preview" },
-              { label: "💻 使用 Antigravity IDE 打开", value: "antigravity" },
-              { label: "💻 使用 Cursor IDE 打开", value: "cursor" },
+              { label: t("settings.optFinderReveal"), value: "finder-reveal" },
+              { label: t("settings.optFinderFolder"), value: "finder-folder" },
+              { label: t("settings.optSystemPreview"), value: "system-preview" },
+              { label: t("settings.optAntigravity"), value: "antigravity" },
+              { label: t("settings.optCursor"), value: "cursor" },
+              { label: t("settings.optVscode"), value: "vscode" },
+              { label: t("settings.optTerminal"), value: "terminal" },
             ]}
             onValueChange={(next) => {
               void save({ ...values, defaultPrimaryAction: next }, revision);
@@ -169,8 +175,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSelect
-            label="首选代码编辑器 (Preferred Code Editor)"
-            hint="图片检查器工具栏上的代码编辑器直达按钮"
+            label={t("settings.preferredEditorLabel")}
+            hint={t("settings.preferredEditorHint")}
             value={values.preferredCodeEditor}
             options={[
               { label: "Antigravity IDE", value: "antigravity" },
@@ -183,13 +189,13 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSelect
-            label="图片预览默认画布底色 (Default Canvas Background)"
-            hint="方便查看透明背景 PNG / SVG 素材边缘"
+            label={t("settings.canvasBgLabel")}
+            hint={t("settings.canvasBgHint")}
             value={values.defaultCanvasBackground}
             options={[
-              { label: "深灰棋盘对比底 (Checker Contrast)", value: "checker" },
-              { label: "纯暗黑底 (Dark #090a0f)", value: "dark" },
-              { label: "浅灰亮底 (Light #f4f4f5)", value: "light" },
+              { label: t("settings.optBgChecker"), value: "checker" },
+              { label: t("settings.optBgDark"), value: "dark" },
+              { label: t("settings.optBgLight"), value: "light" },
             ]}
             onValueChange={(next) => {
               void save({ ...values, defaultCanvasBackground: next }, revision);
@@ -197,8 +203,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSwitch
-            label="自动将图片后缀关联至增强检查器 (Auto-Associate Image File Panel)"
-            hint={`自动将 ${SUPPORTED_IMAGE_EXTENSIONS.join(", ")} 关联到带 Finder 工具栏的面板`}
+            label={t("settings.autoAssocLabel")}
+            hint={t("settings.autoAssocHint")}
             value={values.autoAssociateImagePanels}
             onValueChange={(next) => {
               void save({ ...values, autoAssociateImagePanels: next }, revision);
@@ -207,21 +213,30 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSwitch
-            label="启用桌面端右键菜单与快捷键增强 (Desktop Right-Click & Option+Click)"
-            hint="支持对聊天内文件链接和文件标签页右键弹出「在 Finder 中显示」、Option+Click 秒开、⌘⇧R 快捷键"
+            label={t("settings.desktopHelperLabel")}
+            hint={t("settings.desktopHelperHint")}
             value={values.enableDesktopContextMenuHelper}
             onValueChange={(next) => {
               void save({ ...values, enableDesktopContextMenuHelper: next }, revision);
             }}
           />
 
+          <SettingsSwitch
+            label={t("settings.showComposerPillLabel")}
+            hint={t("settings.showComposerPillHint")}
+            value={values.showComposerPill}
+            onValueChange={(next) => {
+              void save({ ...values, showComposerPill: next }, revision);
+            }}
+          />
+
           <SettingsAction
-            label="立即同步图片面板默认关联 (Re-sync File Panel Associations)"
-            hint="确保所有图片标签页默认使用带 Finder 工具栏的 Image Inspector 打开"
-            actionLabel="立即同步关联"
+            label={t("settings.resyncLabel")}
+            hint={t("settings.resyncHint")}
+            actionLabel={t("settings.resyncAction")}
             onPress={() => {
               syncImagePanelAssociations("file-inspector-finder", "image-inspector", true);
-              toast.show("已将所有图片后缀关联至 Image Inspector & Finder", {
+              toast.show(t("settings.resyncSuccess"), {
                 variant: "success",
               });
             }}
@@ -229,27 +244,25 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="2. 路径解析与系统打开对账器 (能试 · Live Diagnostic Reconciler)">
+      <SettingsSection title={t("settings.sectionDiagnostic")}>
         <View style={styles.diagBox}>
-          <Text style={styles.label}>
-            输入任意相对路径、绝对路径或文件名以验算 Daemon 真实解析结果：
-          </Text>
+          <Text style={styles.label}>{t("settings.diagPrompt")}</Text>
           <View style={styles.row}>
             <TextInput
               value={testInput}
               onChangeText={setTestInput}
-              placeholder="例如: assets/preview.png 或 docs/architecture.svg"
+              placeholder={t("settings.diagPlaceholder")}
               placeholderTextColor={theme.colors.foregroundMuted}
               style={styles.input}
             />
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Run path diagnostic"
+              accessibilityLabel={t("settings.diagRunBtn")}
               onPress={() => diagMutation.mutate(testInput.trim() || ".")}
               style={styles.btn}
             >
               <Icon name="Activity" size={14} color={theme.colors.accentForeground} />
-              <Text style={styles.btnText}>运行诊断验算</Text>
+              <Text style={styles.btnText}>{t("settings.diagRunBtn")}</Text>
             </Pressable>
           </View>
 
@@ -257,37 +270,39 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             <View style={{ gap: 6, marginTop: 6 }}>
               <Text style={styles.label}>
                 {diagMutation.data.resolvedMetadata.exists
-                  ? "✅ 文件/目录存在 (Verified on Disk)"
-                  : "⚠️ 目标文件不存在 (将回退打开已存在的父级目录)"}
+                  ? t("settings.diagExists")
+                  : t("settings.diagMissing")}
               </Text>
               <Text style={styles.detail}>
-                • 解析绝对路径: {diagMutation.data.resolvedMetadata.absolutePath}
+                • {t("settings.diagResolvedPath")} {diagMutation.data.resolvedMetadata.absolutePath}
               </Text>
               <Text style={styles.detail}>
-                • 所在父级目录: {diagMutation.data.resolvedMetadata.parentDir}
+                • {t("settings.diagParentDir")} {diagMutation.data.resolvedMetadata.parentDir}
               </Text>
               <Text style={styles.detail}>
-                • 文件属性: {diagMutation.data.resolvedMetadata.sizeFormatted}
+                • {t("settings.diagFileMeta")} {diagMutation.data.resolvedMetadata.sizeFormatted}
                 {diagMutation.data.resolvedMetadata.width
                   ? ` · ${diagMutation.data.resolvedMetadata.width}×${diagMutation.data.resolvedMetadata.height} px`
                   : ""}{" "}
-                · 修改于 {diagMutation.data.resolvedMetadata.modifiedRelative}
+                · {t("settings.diagModified")} {diagMutation.data.resolvedMetadata.modifiedRelative}
               </Text>
               <View style={styles.row}>
-                {diagMutation.data.availableTargets.map((t) => (
+                {diagMutation.data.availableTargets.map((targetItem) => (
                   <Pressable
-                    key={t.target}
+                    key={targetItem.target}
                     accessibilityRole="button"
-                    accessibilityLabel={`Test ${t.label}`}
+                    accessibilityLabel={`${t("settings.diagTestPrefix")} ${targetItem.label}`}
                     onPress={() =>
                       openMutation.mutate({
                         path: diagMutation.data.resolvedMetadata.absolutePath,
-                        target: t.target,
+                        target: targetItem.target,
                       })
                     }
                     style={styles.secondaryBtn}
                   >
-                    <Text style={styles.secondaryBtnText}>实测: {t.label}</Text>
+                    <Text style={styles.secondaryBtnText}>
+                      {t("settings.diagTestPrefix")} {targetItem.label}
+                    </Text>
                   </Pressable>
                 ))}
               </View>
@@ -296,23 +311,23 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         </View>
       </SettingsSection>
 
-      <SettingsSection title="3. 生效契约与快捷键一览 (能读 · Active Surface Contract)">
+      <SettingsSection title={t("settings.sectionContract")}>
         <SettingsCard>
           <SettingsRow
-            label="图片标签页顶部工具栏 (Image File Panel)"
-            hint="打开任意 PNG/JPG/WebP/SVG 标签页，顶部自带「在 Finder 中显示 / 打开所在文件夹 / 系统预览 / 复制路径 / 缩放」"
+            label={t("settings.contractTabMenuLabel")}
+            hint={t("settings.contractTabMenuHint")}
           />
           <SettingsRow
-            label="右上角 Header 按钮与底部聊天栏胶囊 (Header & Composer Pill)"
-            hint="工作区右上角 📂 图标与聊天输入框下方「📂 Finder」按钮，一键弹出当前工作区最新生成的图片列表"
+            label={t("settings.contractImageToolbarLabel")}
+            hint={t("settings.contractImageToolbarHint")}
           />
           <SettingsRow
-            label="桌面端快捷交互 (Right-Click / Option+Click / ⌘⇧R)"
-            hint="对聊天中的文件链接或标签页按住 Option 左键点击直接定位 Finder；右键弹出快捷菜单；按 ⌘⇧R 定位当前激活文件"
+            label={t("settings.contractShortcutsLabel")}
+            hint={t("settings.contractShortcutsHint")}
           />
           <SettingsRow
-            label="命令中心与斜杠指令 (⌘K & /reveal)"
-            hint="在聊天框输入 /reveal [文件名] 或 /finder [路径]，或按 ⌘K 搜索 Finder"
+            label={t("settings.contractCommandsLabel")}
+            hint={t("settings.contractCommandsHint")}
           />
         </SettingsCard>
       </SettingsSection>

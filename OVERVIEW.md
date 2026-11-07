@@ -1,10 +1,11 @@
-File Inspector and Finder Reveal adds one-click folder reveal, system preview, editor launch, and media inspection across Paseo workspaces and image tabs.
+File Inspector and Finder Reveal extends Paseo with native Finder / Explorer reveal, system preview, editor launch, and image metadata inspection across file tabs, inline chat file links, and workspace headers.
 
 ## Capabilities
 
-- **Image and media file panel (`image-inspector`)**: Enhances `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.bmp`, `.ico`, `.avif`, `.heic`, `.tif`, and `.tiff` tabs with an interactive top toolbar (`Reveal in Finder`, `Open Parent Folder`, `Open in Preview`, `Open in Antigravity / Cursor`, `Copy Full Path`, `Copy Relative Path`), zoom and background controls (`Fit`, `50%` to `300%`, Dark/Checker/Light canvas), and a live metadata observability bar (pixel dimensions, file size, modification timestamp, resolved paths, and action status).
-- **Workspace header button and composer pill (`FolderOpen`)**: Adds a Finder quick-reveal popover to every workspace header and agent composer bar. Lists recently generated or modified images and files in the workspace with one-click Reveal, Preview, and Copy Path actions, plus direct path resolution.
-- **Workspace and Explorer panel (`finder-panel`)**: Provides a full media and file browser tab in the workspace or Explorer sidebar.
+- **Native file tab context menu extension**: Adds `Reveal in Finder`, `Open containing folder`, and `Open in Preview` directly inside Paseo's native file tab context menu right below `Copy file path`, with monochrome Lucide icons and zero overlapping menus.
+- **Inline chat file link actions & shortcuts**: Supports right-click context actions (while suppressing Electron's duplicate fallback menu), `Option+Click` (`Alt+Click`) instant Finder reveal on any file link or tab, and `⌘⇧R` to reveal the active file tab.
+- **Image Inspector file panel (`image-inspector`)**: Enhances `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.bmp`, `.ico`, `.avif`, `.heic`, `.tif`, and `.tiff` tabs with a top toolbar (`Reveal in Finder`, `Open containing folder`, `Open in Preview`, code editor launch, `Copy file path`, `Copy relative path`), zoom (`50%` to `300%`), Dark/Checker/Light canvas backgrounds, and a metadata bar showing pixel dimensions, file size, and modified time.
+- **Workspace header popover and Explorer panel (`finder-panel`)**: Lists recently generated or modified images and files in the workspace with one-click Reveal, Preview, and Copy Path actions without altering Paseo's project-wide preferred editor.
 - **Command Center (`⌘K`) and slash commands (`/reveal`, `/finder`)**: Reveals the latest workspace image, workspace root, or any relative/absolute file path directly from the keyboard or chat composer.
-- **Desktop web enhancements**: Supports `Option+Click` (`Alt+Click`) and right-click quick actions on inline chat file links and file tabs, plus `⌘⇧R` to reveal the active file tab in Finder.
-- **Settings and diagnostics (`Settings -> Plugins -> File Inspector & Finder`)**: Configure default opener target, scan limits, auto-association, and test path resolution with a live diagnostic reconciler.
+- **Native single-language localization**: Automatically follows Paseo's active UI language (`en` or `zh`) via `@getpaseo/plugin/client` translations.
+- **Settings and path reconciler (`Settings -> Plugins -> File Inspector & Finder`)**: Configure default opener target, preferred editor, canvas background, and test daemon path resolution interactively.

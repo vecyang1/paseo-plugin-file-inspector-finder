@@ -3,6 +3,7 @@ import {
   type PluginWorkspacePanelProps,
   useRpc,
   useSettings,
+  useTranslation,
   useWorkspace,
 } from "@getpaseo/plugin/client";
 import { Icon, Loading, ScrollView, TextInput, copyText, useToast } from "@getpaseo/plugin/client/ui";
@@ -16,6 +17,7 @@ import {
   openFileTargetRpc,
   pluginSettings,
 } from "../shared/contracts";
+import { pluginTranslations } from "./i18n";
 
 interface SharedFinderBrowserProps {
   workspaceId: string;
@@ -30,6 +32,7 @@ function FinderBrowserView({
   compact,
   onClosePopover,
 }: SharedFinderBrowserProps) {
+  const { t } = useTranslation(pluginTranslations);
   const toast = useToast();
   const listMedia = useRpc(listWorkspaceMediaRpc);
   const openTarget = useRpc(openFileTargetRpc);
@@ -150,6 +153,9 @@ function FinderBrowserView({
         borderColor: theme.colors.border,
       },
       activeChip: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        gap: 5,
         paddingHorizontal: 8,
         paddingVertical: 5,
         borderRadius: 6,
@@ -158,6 +164,9 @@ function FinderBrowserView({
         borderColor: theme.colors.accent,
       },
       inactiveChip: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        gap: 5,
         paddingHorizontal: 8,
         paddingVertical: 5,
         borderRadius: 6,
@@ -240,9 +249,9 @@ function FinderBrowserView({
   async function handleCopyPath(text: string) {
     try {
       await copyText(text);
-      toast.show(`已复制路径: ${text}`, { variant: "success" });
+      toast.show(`${t("actions.copiedFilePath")}: ${text}`, { variant: "success" });
     } catch {
-      toast.error("复制失败");
+      toast.error(t("actions.copyFailed"));
     }
   }
 
@@ -250,29 +259,30 @@ function FinderBrowserView({
     <View style={styles.container}>
       <View style={styles.headerRow}>
         <View style={styles.titleGroup}>
-          <Text style={styles.title}>📂 Finder & 媒体文件夹快开器</Text>
+          <Text style={styles.title}>{t("browser.title")}</Text>
           <Text style={styles.subtitle} numberOfLines={1}>
-            工作区: {workspace?.directory ?? mediaQuery.data?.workspaceRoot ?? "解析中..."}
+            {t("browser.workspacePrefix")}{" "}
+            {workspace?.directory ?? mediaQuery.data?.workspaceRoot ?? t("browser.resolving")}
           </Text>
         </View>
         <View style={styles.row}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Open workspace root in Finder"
+            accessibilityLabel={t("browser.openWorkspaceRoot")}
             onPress={() => openMutation.mutate({ path: ".", target: "finder-folder" })}
             style={styles.accentBtn}
           >
             <Icon name="FolderOpen" size={13} color={theme.colors.accentForeground} />
-            <Text style={styles.accentBtnText}>打开工作区根目录</Text>
+            <Text style={styles.accentBtnText}>{t("browser.openWorkspaceRoot")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Refresh workspace files"
+            accessibilityLabel={t("browser.refresh")}
             onPress={() => void mediaQuery.refetch()}
             style={styles.secondaryBtn}
           >
             <Icon name="RefreshCw" size={13} color={theme.colors.foreground} />
-            <Text style={styles.btnText}>刷新</Text>
+            <Text style={styles.btnText}>{t("browser.refresh")}</Text>
           </Pressable>
           {onClosePopover ? (
             <Pressable
@@ -291,13 +301,13 @@ function FinderBrowserView({
         <TextInput
           value={manualPath}
           onChangeText={setManualPath}
-          placeholder="粘贴任意相对/绝对路径或文件名 (如 00_mobile_ui...png) 一键定位"
+          placeholder={t("browser.pathPlaceholder")}
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.inputBox}
         />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Reveal typed path in Finder"
+          accessibilityLabel={t("browser.revealBtn")}
           onPress={() => {
             const p = manualPath.trim() || ".";
             openMutation.mutate({ path: p, target: "finder-reveal" });
@@ -305,18 +315,18 @@ function FinderBrowserView({
           style={styles.accentBtn}
         >
           <Icon name="Search" size={13} color={theme.colors.accentForeground} />
-          <Text style={styles.accentBtnText}>定位文件</Text>
+          <Text style={styles.accentBtnText}>{t("browser.revealBtn")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Preview typed path"
+          accessibilityLabel={t("browser.previewBtn")}
           onPress={() => {
             const p = manualPath.trim();
             if (p) openMutation.mutate({ path: p, target: "system-preview" });
           }}
           style={styles.secondaryBtn}
         >
-          <Text style={styles.btnText}>预览</Text>
+          <Text style={styles.btnText}>{t("browser.previewBtn")}</Text>
         </Pressable>
       </View>
 
@@ -324,25 +334,27 @@ function FinderBrowserView({
         <View style={styles.row}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Show images only"
+            accessibilityLabel={t("browser.imagesOnly")}
             onPress={() => setOnlyImages(true)}
             style={onlyImages ? styles.activeChip : styles.inactiveChip}
           >
-            <Text style={styles.btnText}>🖼️ 仅看图片</Text>
+            <Icon name="Image" size={12} color={theme.colors.foreground} />
+            <Text style={styles.btnText}>{t("browser.imagesOnly")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Show all recent files"
+            accessibilityLabel={t("browser.allRecentFiles")}
             onPress={() => setOnlyImages(false)}
             style={!onlyImages ? styles.activeChip : styles.inactiveChip}
           >
-            <Text style={styles.btnText}>📄 全部最近文件</Text>
+            <Icon name="FileText" size={12} color={theme.colors.foreground} />
+            <Text style={styles.btnText}>{t("browser.allRecentFiles")}</Text>
           </Pressable>
         </View>
         <TextInput
           value={searchQuery}
           onChangeText={setSearchQuery}
-          placeholder="过滤文件名或子目录..."
+          placeholder={t("browser.filterPlaceholder")}
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.inputBox}
         />
@@ -353,9 +365,7 @@ function FinderBrowserView({
       ) : (
         <ScrollView style={styles.cardList} contentContainerStyle={styles.cardListContent}>
           {(mediaQuery.data?.items ?? []).length === 0 ? (
-            <Text style={styles.mutedText}>
-              当前工作区暂无匹配文件。可直接点击上方「打开工作区根目录」或在输入框粘贴路径。
-            </Text>
+            <Text style={styles.mutedText}>{t("browser.emptyState")}</Text>
           ) : (
             (mediaQuery.data?.items ?? []).map((item: FileMetadata) => (
               <View key={item.absolutePath} style={styles.fileCard}>
@@ -369,53 +379,53 @@ function FinderBrowserView({
                   </Text>
                 </View>
                 <Text style={styles.filePath} numberOfLines={1}>
-                  📂 {item.relativePath}
+                  {item.relativePath}
                 </Text>
                 <View style={styles.row}>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Reveal ${item.fileName} in Finder`}
+                    accessibilityLabel={`${t("actions.revealInFinder")} ${item.fileName}`}
                     onPress={() =>
                       openMutation.mutate({ path: item.absolutePath, target: "finder-reveal" })
                     }
                     style={styles.accentBtn}
                   >
                     <Icon name="FolderOpen" size={12} color={theme.colors.accentForeground} />
-                    <Text style={styles.accentBtnText}>在 Finder 中显示</Text>
+                    <Text style={styles.accentBtnText}>{t("actions.revealInFinder")}</Text>
                   </Pressable>
 
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Open parent folder of ${item.fileName}`}
+                    accessibilityLabel={`${t("actions.openContainingFolder")} ${item.fileName}`}
                     onPress={() =>
                       openMutation.mutate({ path: item.absolutePath, target: "finder-folder" })
                     }
                     style={styles.secondaryBtn}
                   >
                     <Icon name="Folder" size={12} color={theme.colors.foreground} />
-                    <Text style={styles.btnText}>打开所在目录</Text>
+                    <Text style={styles.btnText}>{t("actions.openContainingFolder")}</Text>
                   </Pressable>
 
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Preview ${item.fileName}`}
+                    accessibilityLabel={`${t("actions.openInPreview")} ${item.fileName}`}
                     onPress={() =>
                       openMutation.mutate({ path: item.absolutePath, target: "system-preview" })
                     }
                     style={styles.secondaryBtn}
                   >
                     <Icon name="ExternalLink" size={12} color={theme.colors.foreground} />
-                    <Text style={styles.btnText}>系统预览</Text>
+                    <Text style={styles.btnText}>{t("actions.openInPreview")}</Text>
                   </Pressable>
 
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Copy path of ${item.fileName}`}
+                    accessibilityLabel={`${t("actions.copyFilePath")} ${item.fileName}`}
                     onPress={() => void handleCopyPath(item.absolutePath)}
                     style={styles.secondaryBtn}
                   >
                     <Icon name="Copy" size={12} color={theme.colors.foreground} />
-                    <Text style={styles.btnText}>复制路径</Text>
+                    <Text style={styles.btnText}>{t("actions.copyFilePath")}</Text>
                   </Pressable>
                 </View>
               </View>
@@ -426,10 +436,10 @@ function FinderBrowserView({
 
       {(mediaQuery.data?.recentActions ?? []).length > 0 ? (
         <View style={styles.auditBox}>
-          <Text style={styles.auditTitle}>最近操作对账回执 (UI Observability):</Text>
+          <Text style={styles.auditTitle}>{t("browser.recentAuditTitle")}</Text>
           {(mediaQuery.data?.recentActions ?? []).slice(0, 2).map((act) => (
             <Text key={act.id} style={styles.mutedText} numberOfLines={1}>
-              {act.ok ? "✅" : "❌"} [{act.target}] {act.message} ({act.durationMs}ms)
+              [{act.target}] {act.message} ({act.durationMs}ms)
             </Text>
           ))}
         </View>

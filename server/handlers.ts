@@ -8,10 +8,15 @@ import {
   type FileMetadata,
   type OpenerTarget,
   SUPPORTED_IMAGE_EXTENSIONS,
+  WORKSPACE_LABEL_COLORS,
+  type WorkspaceLabelColor,
+  type WorkspaceLabelEntry,
   type diagnosePathRpc,
   type inspectFileRpc,
   type listWorkspaceMediaRpc,
+  type manageWorkspaceLabelsRpc,
   type openFileTargetRpc,
+  type renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 
 const IMAGE_EXT_SET = new Set<string>(SUPPORTED_IMAGE_EXTENSIONS);
@@ -591,19 +596,19 @@ export async function handleDiagnosePath(
   }[] = [
     {
       target: "finder-reveal",
-      label: "Finder (Reveal File / 选中文件)",
+      label: "Reveal in Finder",
       available: true,
       commandPreview: `open -R "${resolvedPath}"`,
     },
     {
       target: "finder-folder",
-      label: "Finder (Open Folder / 打开父目录)",
+      label: "Open containing folder",
       available: true,
       commandPreview: `open "${metadata.parentDir}"`,
     },
     {
       target: "system-preview",
-      label: "macOS Preview (系统预览)",
+      label: "Open in Preview",
       available: true,
       commandPreview: `open -a Preview "${resolvedPath}"`,
     },

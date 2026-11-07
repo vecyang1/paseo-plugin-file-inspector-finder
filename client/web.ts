@@ -1,5 +1,6 @@
 import { Platform } from "react-native";
 import { type OpenerTarget, SUPPORTED_IMAGE_EXTENSIONS } from "../shared/contracts";
+import { getCatalogForLocale } from "./i18n";
 
 interface MinimalStorage {
   readonly length: number;
@@ -8,10 +9,14 @@ interface MinimalStorage {
   setItem(key: string, value: string): void;
 }
 
-interface MinimalElement {
+export interface MinimalElement {
   tagName?: string;
   textContent?: string | null;
+  innerHTML?: string;
+  className?: string;
   parentElement?: MinimalElement | null;
+  nextSibling?: MinimalElement | null;
+  children?: ArrayLike<MinimalElement>;
   style?: Record<string, string>;
   getAttribute?(name: string): string | null;
   setAttribute?(name: string, value: string): void;
@@ -19,13 +24,15 @@ interface MinimalElement {
   querySelector?(selector: string): MinimalElement | null;
   querySelectorAll?(selector: string): ArrayLike<MinimalElement>;
   appendChild?(child: MinimalElement): void;
+  insertBefore?(newNode: MinimalElement, referenceNode: MinimalElement | null): void;
+  cloneNode?(deep?: boolean): MinimalElement;
   remove?(): void;
   addEventListener?(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener?(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   contains?(other: MinimalElement | null): boolean;
 }
 
-interface MinimalMouseEvent {
+export interface MinimalMouseEvent {
   clientX: number;
   clientY: number;
   altKey?: boolean;
@@ -37,7 +44,7 @@ interface MinimalMouseEvent {
   stopPropagation(): void;
 }
 
-interface MinimalKeyboardEvent {
+export interface MinimalKeyboardEvent {
   key: string;
   metaKey?: boolean;
   ctrlKey?: boolean;
@@ -46,22 +53,32 @@ interface MinimalKeyboardEvent {
   preventDefault(): void;
 }
 
-interface MinimalDocument {
+export interface MinimalDocument {
   body?: MinimalElement | null;
+  documentElement?: MinimalElement | null;
   createElement(tag: string): MinimalElement;
   querySelector(selector: string): MinimalElement | null;
   querySelectorAll(selector: string): ArrayLike<MinimalElement>;
   addEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
+  dispatchEvent?(event: unknown): boolean;
 }
 
 interface MinimalWindow {
   localStorage?: MinimalStorage;
   document?: MinimalDocument;
+  navigator?: { language?: string };
   innerWidth?: number;
   innerHeight?: number;
+  MutationObserver?: new (callback: () => void) => {
+    observe(target: unknown, options: Record<string, boolean>): void;
+    disconnect(): void;
+  };
+  KeyboardEvent?: new (type: string, init?: Record<string, unknown>) => unknown;
+  requestAnimationFrame?(cb: () => void): number;
   addEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
+  dispatchEvent?(event: unknown): boolean;
 }
 
 function getWebWindow(): MinimalWindow | null {
@@ -69,6 +86,17 @@ function getWebWindow(): MinimalWindow | null {
   const g = globalThis as unknown as { window?: MinimalWindow };
   return g.window ?? null;
 }
+
+const LUCIDE_SVGS: Record<"FolderOpen" | "Folder" | "ExternalLink" | "Copy", string> = {
+  FolderOpen:
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>',
+  Folder:
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>',
+  ExternalLink:
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+  Copy:
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
+};
 
 export function syncImagePanelAssociations(
   pluginId: string,
@@ -136,6 +164,44 @@ export function decodeTabCloseTestId(testId: string): string | null {
   }
 }
 
+export function isInsideWorkspaceTab(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 10; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+    if (
+      (testId.startsWith("workspace-tab-") && !testId.startsWith("workspace-tab-context-")) ||
+      testId.startsWith("workspace-file-close-")
+    ) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export function isInsideFileExplorer(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 10; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+    if (testId.startsWith("file-explorer-") || testId.startsWith("workspace-tab-context-")) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export function isEditableInput(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 6; depth += 1) {
+    const tag = (curr.tagName ?? "").toUpperCase();
+    if (tag === "INPUT" || tag === "TEXTAREA") return true;
+    if (curr.getAttribute?.("contenteditable") === "true") return true;
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
 export function extractFilePathFromElement(
   el: MinimalElement | null,
   doc: MinimalDocument,
@@ -145,6 +211,11 @@ export function extractFilePathFromElement(
     const testId = curr.getAttribute?.("data-testid") ?? "";
     const fromClose = decodeTabCloseTestId(testId);
     if (fromClose) return fromClose;
+
+    if (testId.startsWith("workspace-tab-file_")) {
+      const fromTabId = testId.slice("workspace-tab-file_".length);
+      if (fromTabId) return fromTabId;
+    }
 
     const childClose = curr.querySelector?.('[data-testid^="workspace-file-close-"]');
     if (childClose) {
@@ -162,7 +233,6 @@ export function extractFilePathFromElement(
     if (text && text.length < 260) {
       const match = text.match(FILE_PATH_TOKEN_REGEX);
       if (match) {
-        // Also check if a tooltip is currently visible in the DOM with a fuller relative path
         const tooltips = doc.querySelectorAll('[data-testid*="tooltip"]');
         for (let i = 0; i < tooltips.length; i += 1) {
           const tipText = (tooltips[i]?.textContent ?? "").trim();
@@ -177,6 +247,33 @@ export function extractFilePathFromElement(
     curr = curr.parentElement ?? null;
   }
   return null;
+}
+
+export function extractFilePathFromCopyMenuItem(
+  copyItem: MinimalElement,
+  doc: MinimalDocument,
+  fallbackPath?: string | null,
+): string | null {
+  const testId = copyItem.getAttribute?.("data-testid") ?? "";
+  const prefix = "workspace-tab-context-";
+  const suffix = "-copy-file-path";
+  if (testId.startsWith(prefix) && testId.endsWith(suffix)) {
+    const tabId = testId.slice(prefix.length, testId.length - suffix.length);
+    if (tabId.startsWith("file_")) {
+      const directPath = tabId.slice("file_".length);
+      if (directPath) return directPath;
+    }
+    const tabEl = doc.querySelector(`[data-testid="workspace-tab-${tabId}"]`);
+    if (tabEl) {
+      const closeBtn = tabEl.querySelector?.('[data-testid^="workspace-file-close-"]');
+      if (closeBtn) {
+        const closeId = closeBtn.getAttribute?.("data-testid") ?? "";
+        const decoded = decodeTabCloseTestId(closeId);
+        if (decoded) return decoded;
+      }
+    }
+  }
+  return fallbackPath ?? findActiveFileTabPath(doc);
 }
 
 export function findActiveFileTabPath(doc: MinimalDocument): string | null {
@@ -199,8 +296,157 @@ export function findActiveFileTabPath(doc: MinimalDocument): string | null {
 
 export interface DesktopRevealHelperCallbacks {
   isEnabled(): boolean;
+  getLocale?(): string;
   onOpenTarget(path: string, target: OpenerTarget): Promise<void>;
   onCopyPath(path: string): Promise<void>;
+}
+
+function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): void {
+  try {
+    if (win?.KeyboardEvent) {
+      const escDown = new win.KeyboardEvent("keydown", {
+        key: "Escape",
+        code: "Escape",
+        keyCode: 27,
+        bubbles: true,
+        cancelable: true,
+      });
+      doc.dispatchEvent?.(escDown);
+      win.dispatchEvent?.(escDown);
+    }
+  } catch {
+    // Ignore if synthetic KeyboardEvent is unsupported
+  }
+}
+
+function createNativeStyledMenuItem(
+  doc: MinimalDocument,
+  templateItem: MinimalElement,
+  testId: string,
+  label: string,
+  iconKey: keyof typeof LUCIDE_SVGS,
+  onSelect: () => void,
+): MinimalElement {
+  const row = templateItem.cloneNode ? templateItem.cloneNode(true) : doc.createElement("div");
+  row.setAttribute?.("data-testid", testId);
+  row.setAttribute?.("data-paseo-finder-injected", "true");
+  row.setAttribute?.("role", "menuitem");
+
+  // Update leading icon slot and label text if cloned from Paseo's native MenuItem
+  const children = row.children;
+  if (children && children.length >= 2) {
+    const leadingSlot = children[0];
+    const contentSlot = children[1];
+    if (leadingSlot) {
+      leadingSlot.innerHTML = LUCIDE_SVGS[iconKey];
+    }
+    const textLeaf = contentSlot?.children?.[0] ?? contentSlot;
+    if (textLeaf) {
+      textLeaf.textContent = label;
+    }
+  } else {
+    // Fallback construction if template had no deep child structure
+    row.textContent = label;
+  }
+
+  if (row.style) {
+    row.style.cursor = "pointer";
+  }
+
+  row.addEventListener?.("mouseenter", () => {
+    if (row.style) row.style.backgroundColor = "rgba(255, 255, 255, 0.06)";
+  });
+  row.addEventListener?.("mouseleave", () => {
+    if (row.style) row.style.backgroundColor = "";
+  });
+  row.addEventListener?.("click", (ev) => {
+    const me = ev as MinimalMouseEvent;
+    me.preventDefault?.();
+    me.stopPropagation?.();
+    onSelect();
+  });
+
+  return row;
+}
+
+export function injectIntoNativeTabMenus(
+  doc: MinimalDocument,
+  callbacks: DesktopRevealHelperCallbacks,
+  fallbackPath?: string | null,
+  win: MinimalWindow | null = null,
+): number {
+  if (!callbacks.isEnabled()) return 0;
+  const copyItems = doc.querySelectorAll(
+    '[data-testid^="workspace-tab-context-"][data-testid$="-copy-file-path"]',
+  );
+  if (!copyItems || copyItems.length === 0) return 0;
+
+  const catalog = getCatalogForLocale(callbacks.getLocale?.());
+  let injectedCount = 0;
+
+  for (let i = 0; i < copyItems.length; i += 1) {
+    const copyItem = copyItems[i];
+    if (!copyItem) continue;
+    if (copyItem.getAttribute?.("data-paseo-finder-extended") === "true") continue;
+    const parent = copyItem.parentElement;
+    if (!parent) continue;
+
+    const filePath = extractFilePathFromCopyMenuItem(copyItem, doc, fallbackPath);
+    if (!filePath) continue;
+
+    copyItem.setAttribute?.("data-paseo-finder-extended", "true");
+    const copyTestId = copyItem.getAttribute?.("data-testid") ?? "workspace-tab-context-file";
+    const baseTestId = copyTestId.replace(/-copy-file-path$/, "");
+
+    const itemsToInject: {
+      key: string;
+      label: string;
+      icon: keyof typeof LUCIDE_SVGS;
+      target: OpenerTarget;
+    }[] = [
+      {
+        key: "reveal-in-finder",
+        label: catalog.actions.revealInFinder,
+        icon: "FolderOpen",
+        target: "finder-reveal",
+      },
+      {
+        key: "open-containing-folder",
+        label: catalog.actions.openContainingFolder,
+        icon: "Folder",
+        target: "finder-folder",
+      },
+      {
+        key: "open-in-preview",
+        label: catalog.actions.openInPreview,
+        icon: "ExternalLink",
+        target: "system-preview",
+      },
+    ];
+
+    let anchor: MinimalElement | null = copyItem.nextSibling ?? null;
+    for (const spec of itemsToInject) {
+      const itemEl = createNativeStyledMenuItem(
+        doc,
+        copyItem,
+        `${baseTestId}-${spec.key}`,
+        spec.label,
+        spec.icon,
+        () => {
+          dismissNativeMenu(win, doc);
+          void callbacks.onOpenTarget(filePath, spec.target);
+        },
+      );
+      if (parent.insertBefore) {
+        parent.insertBefore(itemEl, anchor);
+      } else {
+        parent.appendChild?.(itemEl);
+      }
+      injectedCount += 1;
+    }
+  }
+
+  return injectedCount;
 }
 
 export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallbacks): () => void {
@@ -210,6 +456,13 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
   if (!win || !doc) return () => {};
 
   let activeMenuEl: MinimalElement | null = null;
+  let lastRightClickedTabPath: string | null = null;
+
+  const resolveLocale = (): string => {
+    const fromCallback = callbacks.getLocale?.();
+    if (fromCallback) return fromCallback;
+    return win.navigator?.language ?? "en";
+  };
 
   const removeMenu = () => {
     if (activeMenuEl) {
@@ -218,66 +471,117 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     }
   };
 
-  const showFloatingQuickMenu = (x: number, y: number, filePath: string) => {
+  const showChatLinkContextMenu = (x: number, y: number, filePath: string) => {
     removeMenu();
     if (!doc.body) return;
 
+    const catalog = getCatalogForLocale(resolveLocale());
     const container = doc.createElement("div");
     container.setAttribute?.("data-testid", "paseo-finder-quick-menu");
-    const maxX = Math.max(16, Math.min(x, (win.innerWidth ?? 1200) - 340));
-    const maxY = Math.max(16, Math.min(y + 8, (win.innerHeight ?? 800) - 200));
+    container.setAttribute?.("role", "menu");
+    const maxX = Math.max(12, Math.min(x, (win.innerWidth ?? 1200) - 240));
+    const maxY = Math.max(12, Math.min(y + 4, (win.innerHeight ?? 800) - 180));
 
     if (container.style) {
       container.style.position = "fixed";
       container.style.left = `${maxX}px`;
       container.style.top = `${maxY}px`;
       container.style.zIndex = "2147483647";
-      container.style.backgroundColor = "#18181b";
-      container.style.border = "1px solid #3f3f46";
-      container.style.borderRadius = "10px";
-      container.style.padding = "6px";
-      container.style.boxShadow = "0 12px 28px rgba(0, 0, 0, 0.55)";
+      container.style.backgroundColor = "#1b1f1e";
+      container.style.border = "1px solid #2e3432";
+      container.style.borderRadius = "8px";
+      container.style.padding = "4px";
+      container.style.boxShadow = "0 10px 24px rgba(0, 0, 0, 0.48)";
       container.style.display = "flex";
       container.style.flexDirection = "column";
-      container.style.gap = "4px";
-      container.style.minWidth = "270px";
-      container.style.fontFamily = "-apple-system, BlinkMacSystemFont, sans-serif";
+      container.style.gap = "2px";
+      container.style.minWidth = "210px";
+      container.style.fontFamily =
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
     }
 
-    const header = doc.createElement("div");
-    header.textContent = `📍 ${filePath.split("/").pop() ?? filePath}`;
-    if (header.style) {
-      header.style.fontSize = "11px";
-      header.style.color = "#a1a1aa";
-      header.style.padding = "4px 8px";
-      header.style.borderBottom = "1px solid #27272a";
-      header.style.whiteSpace = "nowrap";
-      header.style.overflow = "hidden";
-      header.style.textOverflow = "ellipsis";
-      header.style.maxWidth = "310px";
-    }
-    container.appendChild?.(header);
-
-    const actions: { label: string; target?: OpenerTarget; copy?: boolean }[] = [
-      { label: "📂 在 Finder 中显示 (Reveal in Finder)", target: "finder-reveal" },
-      { label: "📁 打开所在文件夹 (Open Folder)", target: "finder-folder" },
-      { label: "🖼️ 系统预览打开 (Open in Preview)", target: "system-preview" },
-      { label: "💻 在 Antigravity 中打开", target: "antigravity" },
-      { label: "📋 复制路径 (Copy Path)", copy: true },
+    const actions: {
+      key: string;
+      label: string;
+      icon: keyof typeof LUCIDE_SVGS;
+      target?: OpenerTarget;
+      copy?: boolean;
+      separatorBefore?: boolean;
+    }[] = [
+      {
+        key: "reveal-in-finder",
+        label: catalog.actions.revealInFinder,
+        icon: "FolderOpen",
+        target: "finder-reveal",
+      },
+      {
+        key: "open-containing-folder",
+        label: catalog.actions.openContainingFolder,
+        icon: "Folder",
+        target: "finder-folder",
+      },
+      {
+        key: "open-in-preview",
+        label: catalog.actions.openInPreview,
+        icon: "ExternalLink",
+        target: "system-preview",
+      },
+      {
+        key: "copy-file-path",
+        label: catalog.actions.copyFilePath,
+        icon: "Copy",
+        copy: true,
+        separatorBefore: true,
+      },
     ];
 
     for (const act of actions) {
+      if (act.separatorBefore) {
+        const sep = doc.createElement("div");
+        if (sep.style) {
+          sep.style.height = "1px";
+          sep.style.backgroundColor = "#2e3432";
+          sep.style.margin = "3px 4px";
+        }
+        container.appendChild?.(sep);
+      }
+
       const item = doc.createElement("div");
-      item.textContent = act.label;
+      item.setAttribute?.("data-testid", `paseo-finder-quick-menu-${act.key}`);
+      item.setAttribute?.("role", "menuitem");
       if (item.style) {
-        item.style.fontSize = "12.5px";
-        item.style.color = "#f4f4f5";
-        item.style.padding = "6px 10px";
+        item.style.display = "flex";
+        item.style.flexDirection = "row";
+        item.style.alignItems = "center";
+        item.style.gap = "8px";
+        item.style.fontSize = "13px";
+        item.style.lineHeight = "18px";
+        item.style.color = "#e5e7eb";
+        item.style.padding = "6px 8px";
         item.style.borderRadius = "6px";
         item.style.cursor = "pointer";
+        item.style.userSelect = "none";
       }
+
+      const iconWrap = doc.createElement("span");
+      iconWrap.innerHTML = LUCIDE_SVGS[act.icon];
+      if (iconWrap.style) {
+        iconWrap.style.display = " inline-flex";
+        iconWrap.style.alignItems = "center";
+        iconWrap.style.justifyContent = "center";
+        iconWrap.style.width = "16px";
+        iconWrap.style.height = "16px";
+        iconWrap.style.color = "#9ca3af";
+        iconWrap.style.flexShrink = "0";
+      }
+      item.appendChild?.(iconWrap);
+
+      const labelSpan = doc.createElement("span");
+      labelSpan.textContent = act.label;
+      item.appendChild?.(labelSpan);
+
       item.addEventListener?.("mouseenter", () => {
-        if (item.style) item.style.backgroundColor = "#27272a";
+        if (item.style) item.style.backgroundColor = "rgba(255, 255, 255, 0.06)";
       });
       item.addEventListener?.("mouseleave", () => {
         if (item.style) item.style.backgroundColor = "transparent";
@@ -300,6 +604,27 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     activeMenuEl = container;
   };
 
+  const scheduleNativeTabMenuExtension = () => {
+    injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+    win.requestAnimationFrame?.(() => {
+      injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+    });
+    setTimeout(() => {
+      injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+    }, 20);
+  };
+
+  const observer =
+    win.MutationObserver && doc.body
+      ? new win.MutationObserver(() => {
+          injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+        })
+      : null;
+
+  if (observer && doc.body) {
+    observer.observe(doc.body, { childList: true, subtree: true });
+  }
+
   const onClickCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
     const me = ev as MinimalMouseEvent;
@@ -320,12 +645,33 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
   const onContextMenuCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
     const me = ev as MinimalMouseEvent;
+
+    // 1. Inside Paseo's File Explorer or existing context menu: let Paseo's native menu handle it
+    if (isInsideFileExplorer(me.target) || isEditableInput(me.target)) {
+      removeMenu();
+      return;
+    }
+
+    // 2. Inside a Paseo Workspace Tab: DO NOT pop up a second floating menu!
+    // Instead, extend Paseo's official native tab context menu in-place right below "Copy file path".
+    if (isInsideWorkspaceTab(me.target)) {
+      removeMenu();
+      lastRightClickedTabPath = extractFilePathFromElement(me.target, doc);
+      scheduleNativeTabMenuExtension();
+      return;
+    }
+
+    // 3. Inline file path in chat / markdown / tool output (where Paseo has no native context menu):
     const detected = extractFilePathFromElement(me.target, doc);
     if (!detected) {
       removeMenu();
       return;
     }
-    showFloatingQuickMenu(me.clientX, me.clientY, detected);
+
+    // Prevent Electron's fallback "Copy / Paste / Select All" OS menu from overlapping!
+    me.preventDefault();
+    me.stopPropagation();
+    showChatLinkContextMenu(me.clientX, me.clientY, detected);
   };
 
   const onKeyDownCapture = (ev: unknown) => {
@@ -335,7 +681,7 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
       removeMenu();
       return;
     }
-    // Cmd+Shift+R or Cmd+Alt+R reveals active file tab in Finder
+    // Cmd+Shift+R reveals active file tab in Finder
     if ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "r") {
       const activeFile = findActiveFileTabPath(doc);
       if (activeFile) {
@@ -351,6 +697,7 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
 
   return () => {
     removeMenu();
+    observer?.disconnect();
     doc.removeEventListener("click", onClickCapture, true);
     doc.removeEventListener("contextmenu", onContextMenuCapture, true);
     win.removeEventListener("keydown", onKeyDownCapture, true);

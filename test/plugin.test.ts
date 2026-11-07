@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import {
+  type OpenerTarget,
   SUPPORTED_IMAGE_EXTENSIONS,
   diagnosePathRpc,
   inspectFileRpc,
@@ -12,6 +13,7 @@ import {
   openFileTargetRpc,
   pluginSettings,
 } from "../shared/contracts";
+import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
   buildCandidatePaths,
   handleDiagnosePath,
@@ -21,9 +23,15 @@ import {
   resolveBestPath,
 } from "../server/handlers";
 import {
+  type MinimalDocument,
+  type MinimalElement,
   decodeTabCloseTestId,
+  extractFilePathFromCopyMenuItem,
   extractFilePathFromElement,
   findActiveFileTabPath,
+  injectIntoNativeTabMenus,
+  isInsideFileExplorer,
+  isInsideWorkspaceTab,
   syncImagePanelAssociations,
 } from "../client/web";
 
@@ -118,7 +126,6 @@ test("3. Multi-workspace relative path & basename resolution works across worksp
     const targetImg = path.join(deepDir, "panoramic_00.png");
     await fs.writeFile(targetImg, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-    // Even when primary root is ws1, resolveBestPath finds the file in ws2 via relative path or basename
     const byRelative = await resolveBestPath("reports/ui/panoramic_00.png", ws1, [ws1, ws2]);
     assert.equal(byRelative.metadata.exists, true);
     assert.equal(byRelative.resolvedPath, targetImg);
@@ -127,7 +134,6 @@ test("3. Multi-workspace relative path & basename resolution works across worksp
     assert.equal(byBasename.metadata.exists, true);
     assert.equal(byBasename.resolvedPath, targetImg);
 
-    // Also verify line suffix stripping (#L12 or :15:2)
     const cands = buildCandidatePaths("reports/ui/panoramic_00.png#L10", ws2);
     assert.equal(cands[0], targetImg);
   } finally {
@@ -181,7 +187,6 @@ test("5. handleOpenFileTarget & handleDiagnosePath execute and record observabil
     assert.equal(openRes.resolvedPath, imgPath);
     assert.equal(openRes.parentDir, tmpRoot);
 
-    // Fallback to parent directory when file does not exist
     const fallbackRes = await handleOpenFileTarget(
       { path: "missing_file.png", workspaceRoot: tmpRoot, target: "finder-folder" },
       ctx,
@@ -196,6 +201,7 @@ test("5. handleOpenFileTarget & handleDiagnosePath execute and record observabil
     );
     assert.equal(diagRes.resolvedMetadata.exists, true);
     assert.equal(diagRes.availableTargets.length, 6);
+    assert.equal(diagRes.availableTargets[0].label, "Reveal in Finder");
     assert.ok(diagRes.recentActions.length >= 2);
   } finally {
     await fs.rm(tmpRoot, { recursive: true, force: true });
@@ -208,8 +214,7 @@ test("6. Client DOM & localStorage helpers extract file paths from chat links, t
     "reports/mobile_ui_series/00_showcase.png",
   );
 
-  // Mock DOM document with a tooltip and an active tab
-  const mockDoc = {
+  const mockDoc: MinimalDocument = {
     querySelector: () => null,
     querySelectorAll: (selector: string) => {
       if (selector.includes("tooltip")) {
@@ -233,7 +238,6 @@ test("6. Client DOM & localStorage helpers extract file paths from chat links, t
     removeEventListener: () => {},
   };
 
-  // Inline chat link element whose visible text is just the basename, while tooltip has full relative path
   const inlineChatLink = {
     textContent: "00_mobile_ui_5screen_panoramic_showcase.png",
     getAttribute: () => null,
@@ -244,13 +248,11 @@ test("6. Client DOM & localStorage helpers extract file paths from chat links, t
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
   );
 
-  // Active tab detection (for Cmd+Shift+R)
   assert.equal(
     findActiveFileTabPath(mockDoc),
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
   );
 
-  // Also test localStorage auto-association for all 12 image extensions
   const store = new Map<string, string>([["@paseo:app-settings", JSON.stringify({})]]);
   (globalThis as unknown as { window?: unknown }).window = {
     localStorage: {
@@ -280,7 +282,187 @@ test("6. Client DOM & localStorage helpers extract file paths from chat links, t
   );
 });
 
-test("7. Live Paseo daemon reports file-inspector-finder plugin running and enabled", () => {
+test("7. In-place extension of Paseo's official native tab context menu (zero duplicate menu conflict)", async () => {
+  // Verify workspace tab and file explorer boundary detection
+  const tabHeaderChild: MinimalElement = {
+    parentElement: {
+      getAttribute: (name: string) =>
+        name === "data-testid" ? "workspace-tab-file_docs/file_inspector_finder_plugin.md" : null,
+    },
+  };
+  assert.equal(isInsideWorkspaceTab(tabHeaderChild), true);
+  assert.equal(isInsideFileExplorer(tabHeaderChild), false);
+
+  const explorerItem: MinimalElement = {
+    getAttribute: (name: string) => (name === "data-testid" ? "file-explorer-row-1" : null),
+  };
+  assert.equal(isInsideFileExplorer(explorerItem), true);
+
+  // Build a mock Paseo native tab menu containing `Copy file path` and `Close`
+  const menuChildren: MinimalElement[] = [];
+  const createMockElement = (initialTestId?: string, initialText?: string): MinimalElement => {
+    const attrs = new Map<string, string>();
+    if (initialTestId) attrs.set("data-testid", initialTestId);
+    const listeners = new Map<string, ((ev: unknown) => void)[]>();
+    const iconSlot: MinimalElement = { innerHTML: "<svg></svg>" };
+    const textLeaf: MinimalElement = { textContent: initialText ?? "" };
+    const contentSlot: MinimalElement = { children: [textLeaf], textContent: initialText ?? "" };
+    const el: MinimalElement = {
+      textContent: initialText ?? "",
+      style: {},
+      children: [iconSlot, contentSlot],
+      getAttribute: (name: string) => attrs.get(name) ?? null,
+      setAttribute: (name: string, val: string) => {
+        attrs.set(name, val);
+      },
+      addEventListener: (type: string, fn: (ev: unknown) => void) => {
+        const list = listeners.get(type) ?? [];
+        list.push(fn);
+        listeners.set(type, list);
+      },
+      cloneNode: () => createMockElement(attrs.get("data-testid"), textLeaf.textContent ?? ""),
+    };
+    (el as unknown as { triggerClick: () => void }).triggerClick = () => {
+      for (const fn of listeners.get("click") ?? []) {
+        fn({ preventDefault: () => {}, stopPropagation: () => {} });
+      }
+    };
+    (el as unknown as { getLabel: () => string }).getLabel = () => textLeaf.textContent ?? "";
+    return el;
+  };
+
+  const copyItem = createMockElement(
+    "workspace-tab-context-file_docs/file_inspector_finder_plugin.md-copy-file-path",
+    "Copy file path",
+  );
+  const closeItem = createMockElement(
+    "workspace-tab-context-file_docs/file_inspector_finder_plugin.md-close",
+    "Close",
+  );
+
+  const nativeMenuContainer: MinimalElement = {
+    children: menuChildren,
+    insertBefore: (newNode: MinimalElement, refNode: MinimalElement | null) => {
+      const idx = refNode ? menuChildren.indexOf(refNode) : -1;
+      if (idx >= 0) {
+        menuChildren.splice(idx, 0, newNode);
+      } else {
+        menuChildren.push(newNode);
+      }
+    },
+    appendChild: (newNode: MinimalElement) => {
+      menuChildren.push(newNode);
+    },
+  };
+  copyItem.parentElement = nativeMenuContainer;
+  copyItem.nextSibling = closeItem;
+  closeItem.parentElement = nativeMenuContainer;
+  menuChildren.push(copyItem, closeItem);
+
+  const mockDoc: MinimalDocument = {
+    createElement: () => createMockElement(),
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("-copy-file-path")) return [copyItem];
+      return [];
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  assert.equal(
+    extractFilePathFromCopyMenuItem(copyItem, mockDoc),
+    "docs/file_inspector_finder_plugin.md",
+  );
+
+  const triggeredCalls: { path: string; target: OpenerTarget }[] = [];
+  const count = injectIntoNativeTabMenus(mockDoc, {
+    isEnabled: () => true,
+    getLocale: () => "en",
+    onOpenTarget: async (p, t) => {
+      triggeredCalls.push({ path: p, target: t });
+    },
+    onCopyPath: async () => {},
+  });
+
+  assert.equal(count, 3);
+  // Menu order must be: Copy file path -> Reveal in Finder -> Open containing folder -> Open in Preview -> Close
+  assert.equal(menuChildren.length, 5);
+  assert.equal(
+    menuChildren[1].getAttribute?.("data-testid"),
+    "workspace-tab-context-file_docs/file_inspector_finder_plugin.md-reveal-in-finder",
+  );
+  assert.equal(
+    (menuChildren[1] as unknown as { getLabel: () => string }).getLabel(),
+    "Reveal in Finder",
+  );
+  assert.equal(
+    (menuChildren[2] as unknown as { getLabel: () => string }).getLabel(),
+    "Open containing folder",
+  );
+  assert.equal(
+    (menuChildren[3] as unknown as { getLabel: () => string }).getLabel(),
+    "Open in Preview",
+  );
+
+  // Re-running injection on the same menu must be idempotent (0 duplicates)
+  const secondCount = injectIntoNativeTabMenus(mockDoc, {
+    isEnabled: () => true,
+    getLocale: () => "en",
+    onOpenTarget: async () => {},
+    onCopyPath: async () => {},
+  });
+  assert.equal(secondCount, 0);
+  assert.equal(menuChildren.length, 5);
+
+  // Clicking "Reveal in Finder" triggers the exact path and target
+  (menuChildren[1] as unknown as { triggerClick: () => void }).triggerClick();
+  assert.deepEqual(triggeredCalls, [
+    { path: "docs/file_inspector_finder_plugin.md", target: "finder-reveal" },
+  ]);
+});
+
+test("8. Single-Language Output Contract: English catalog has zero Chinese or bilingual glosses, Chinese catalog has pure Chinese", () => {
+  const cjkRegex = /[\u4e00-\u9fff]/;
+
+  function collectStrings(obj: Record<string, unknown>): string[] {
+    const out: string[] = [];
+    for (const val of Object.values(obj)) {
+      if (typeof val === "string") {
+        out.push(val);
+      } else if (val && typeof val === "object") {
+        out.push(...collectStrings(val as Record<string, unknown>));
+      }
+    }
+    return out;
+  }
+
+  const enStrings = collectStrings(enMessages as unknown as Record<string, unknown>);
+  for (const s of enStrings) {
+    assert.equal(
+      cjkRegex.test(s),
+      false,
+      `English UI string must not contain Chinese characters: "${s}"`,
+    );
+  }
+
+  const zhCatalog = getCatalogForLocale("zh-CN");
+  assert.equal(zhCatalog.actions.revealInFinder, "在 Finder 中显示");
+  assert.equal(zhCatalog.actions.openContainingFolder, "打开所在文件夹");
+  assert.equal(zhCatalog.actions.openInPreview, "在预览中打开");
+  assert.equal(zhCatalog.actions.copyFilePath, "复制文件路径");
+
+  const enCatalog = getCatalogForLocale("en-US");
+  assert.equal(enCatalog.actions.revealInFinder, "Reveal in Finder");
+  assert.equal(enCatalog.actions.openContainingFolder, "Open containing folder");
+  assert.equal(enCatalog.actions.openInPreview, "Open in Preview");
+  assert.equal(enCatalog.actions.copyFilePath, "Copy file path");
+
+  // Ensure both catalogs have identical key structure
+  assert.deepEqual(Object.keys(enMessages), Object.keys(zhMessages));
+});
+
+test("9. Live Paseo daemon reports file-inspector-finder plugin running and enabled", () => {
   try {
     const raw = execFileSync("paseo", ["plugin", "ls", "--json"], { encoding: "utf-8" });
     const list = JSON.parse(raw) as Array<{ id: string; status: string; enabled: boolean }>;

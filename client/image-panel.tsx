@@ -3,6 +3,7 @@ import {
   useFileUrl,
   useRpc,
   useSettings,
+  useTranslation,
   useWorkspace,
 } from "@getpaseo/plugin/client";
 import { Icon, Loading, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/ui";
@@ -15,6 +16,7 @@ import {
   openFileTargetRpc,
   pluginSettings,
 } from "../shared/contracts";
+import { pluginTranslations } from "./i18n";
 
 type CanvasBg = "dark" | "checker" | "light";
 
@@ -27,6 +29,7 @@ export function ImageInspectorFilePanel({
   theme,
   layout,
 }: PluginFilePanelProps) {
+  const { t } = useTranslation(pluginTranslations);
   const urlState = useFileUrl(file);
   const toast = useToast();
   const inspectFile = useRpc(inspectFileRpc);
@@ -64,16 +67,16 @@ export function ImageInspectorFilePanel({
       }),
     onSuccess: (res) => {
       if (res.ok) {
-        setLastReceipt(`✅ ${res.message} (${res.durationMs}ms)`);
+        setLastReceipt(`${res.message} (${res.durationMs}ms)`);
         toast.show(res.message, { variant: "success" });
       } else {
-        setLastReceipt(`❌ ${res.message}`);
+        setLastReceipt(res.message);
         toast.error(res.message);
       }
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : String(err);
-      setLastReceipt(`❌ ${msg}`);
+      setLastReceipt(msg);
       toast.error(msg);
     },
   });
@@ -229,12 +232,12 @@ export function ImageInspectorFilePanel({
         <Text style={styles.errorText}>{urlState.error.message}</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Reveal missing or broken file in Finder"
+          accessibilityLabel={t("imagePanel.revealMissingDir")}
           onPress={() => openMutation.mutate("finder-reveal")}
           style={styles.primaryBtn}
         >
           <Icon name="FolderOpen" size={14} color={theme.colors.accentForeground} />
-          <Text style={styles.primaryBtnText}>在 Finder 中定位所在目录</Text>
+          <Text style={styles.primaryBtnText}>{t("imagePanel.revealMissingDir")}</Text>
         </Pressable>
       </View>
     );
@@ -248,13 +251,14 @@ export function ImageInspectorFilePanel({
   const displayW = Math.round(baseW * zoom);
   const displayH = Math.round(baseH * zoom);
 
-  async function handleCopy(text: string, label: string) {
+  async function handleCopy(text: string, isRelative: boolean) {
     try {
       await copyText(text);
-      setLastReceipt(`📋 已复制${label}: ${text}`);
-      toast.show(`已复制${label}`, { variant: "success" });
+      const msg = isRelative ? t("actions.copiedRelativePath") : t("actions.copiedFilePath");
+      setLastReceipt(`${msg}: ${text}`);
+      toast.show(msg, { variant: "success" });
     } catch {
-      toast.error("复制失败");
+      toast.error(t("actions.copyFailed"));
     }
   }
 
@@ -264,40 +268,46 @@ export function ImageInspectorFilePanel({
         <View style={styles.buttonGroup}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Reveal in Finder"
+            accessibilityLabel={t("actions.revealInFinder")}
             onPress={() => openMutation.mutate("finder-reveal")}
             disabled={openMutation.isPending}
             style={styles.primaryBtn}
           >
             <Icon name="FolderOpen" size={14} color={theme.colors.accentForeground} />
-            <Text style={styles.primaryBtnText}>在 Finder 中显示</Text>
+            <Text style={styles.primaryBtnText}>{t("actions.revealInFinder")}</Text>
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Open containing folder in Finder"
+            accessibilityLabel={t("actions.openContainingFolder")}
             onPress={() => openMutation.mutate("finder-folder")}
             disabled={openMutation.isPending}
             style={styles.secondaryBtn}
           >
             <Icon name="Folder" size={14} color={theme.colors.foreground} />
-            <Text style={styles.btnText}>打开所在文件夹</Text>
+            <Text style={styles.btnText}>{t("actions.openContainingFolder")}</Text>
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Open in macOS Preview"
+            accessibilityLabel={t("actions.openInPreview")}
             onPress={() => openMutation.mutate("system-preview")}
             disabled={openMutation.isPending}
             style={styles.secondaryBtn}
           >
             <Icon name="ExternalLink" size={14} color={theme.colors.foreground} />
-            <Text style={styles.btnText}>系统预览</Text>
+            <Text style={styles.btnText}>{t("actions.openInPreview")}</Text>
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Open in ${preferredEditor}`}
+            accessibilityLabel={
+              preferredEditor === "antigravity"
+                ? t("actions.openInAntigravity")
+                : preferredEditor === "cursor"
+                  ? t("actions.openInCursor")
+                  : t("actions.openInVscode")
+            }
             onPress={() => openMutation.mutate(preferredEditor)}
             disabled={openMutation.isPending}
             style={styles.secondaryBtn}
@@ -314,22 +324,22 @@ export function ImageInspectorFilePanel({
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Copy absolute file path"
-            onPress={() => handleCopy(meta?.absolutePath ?? params.path, "绝对路径")}
+            accessibilityLabel={t("actions.copyFilePath")}
+            onPress={() => void handleCopy(meta?.absolutePath ?? params.path, false)}
             style={styles.secondaryBtn}
           >
             <Icon name="Copy" size={13} color={theme.colors.foreground} />
-            <Text style={styles.btnText}>复制绝对路径</Text>
+            <Text style={styles.btnText}>{t("actions.copyFilePath")}</Text>
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Copy relative file path"
-            onPress={() => handleCopy(meta?.relativePath ?? params.path, "相对路径")}
+            accessibilityLabel={t("actions.copyRelativePath")}
+            onPress={() => void handleCopy(meta?.relativePath ?? params.path, true)}
             style={styles.secondaryBtn}
           >
             <Icon name="FileText" size={13} color={theme.colors.foreground} />
-            <Text style={styles.btnText}>复制相对路径</Text>
+            <Text style={styles.btnText}>{t("actions.copyRelativePath")}</Text>
           </Pressable>
         </View>
 
@@ -357,7 +367,11 @@ export function ImageInspectorFilePanel({
               style={canvasBg === bg ? styles.activeChipBtn : styles.chipBtn}
             >
               <Text style={canvasBg === bg ? styles.btnText : styles.mutedBtnText}>
-                {bg === "dark" ? "暗底" : bg === "checker" ? "灰格" : "亮底"}
+                {bg === "dark"
+                  ? t("imagePanel.bgDark")
+                  : bg === "checker"
+                    ? t("imagePanel.bgChecker")
+                    : t("imagePanel.bgLight")}
               </Text>
             </Pressable>
           ))}
@@ -368,17 +382,17 @@ export function ImageInspectorFilePanel({
         <View style={styles.metaRow}>
           <Text style={styles.metaTag}>
             {meta?.width && meta?.height
-              ? `📐 ${meta.width} × ${meta.height} px`
-              : `🖼️ ${meta?.extension?.toUpperCase() || "IMAGE"}`}
+              ? `${meta.width} × ${meta.height} px`
+              : meta?.extension?.toUpperCase() || t("imagePanel.imageFallback")}
           </Text>
           <Text style={styles.metaDetail}>
-            📦 {meta?.sizeFormatted ?? `${Math.round(file.size / 1024)} KB`}
+            {meta?.sizeFormatted ?? `${Math.round(file.size / 1024)} KB`}
           </Text>
           {meta?.modifiedRelative ? (
-            <Text style={styles.metaDetail}>🕒 {meta.modifiedRelative}</Text>
+            <Text style={styles.metaDetail}>{meta.modifiedRelative}</Text>
           ) : null}
           <Text style={styles.metaDetail} numberOfLines={1}>
-            📍 {meta?.absolutePath ?? params.path}
+            {meta?.absolutePath ?? params.path}
           </Text>
         </View>
         {lastReceipt ? <Text style={styles.receiptText}>{lastReceipt}</Text> : null}

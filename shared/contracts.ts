@@ -29,6 +29,30 @@ export const OpenerTargetSchema = z.enum([
 
 export type OpenerTarget = z.infer<typeof OpenerTargetSchema>;
 
+export const WORKSPACE_LABEL_COLORS = [
+  "violet",
+  "sky",
+  "emerald",
+  "orange",
+  "pink",
+  "indigo",
+  "teal",
+  "red",
+  "amber",
+  "blue",
+] as const;
+
+export const WorkspaceLabelColorSchema = z.enum(WORKSPACE_LABEL_COLORS);
+
+export type WorkspaceLabelColor = z.infer<typeof WorkspaceLabelColorSchema>;
+
+export const WorkspaceLabelEntrySchema = z.object({
+  name: z.string(),
+  color: WorkspaceLabelColorSchema,
+});
+
+export type WorkspaceLabelEntry = z.infer<typeof WorkspaceLabelEntrySchema>;
+
 export const pluginSettings = defineSettings({
   id: "finder-settings",
   scope: "host",
@@ -39,6 +63,8 @@ export const pluginSettings = defineSettings({
     maxRecentFiles: z.number().int().min(5).max(100).default(24),
     autoAssociateImagePanels: z.boolean().default(true),
     enableDesktopContextMenuHelper: z.boolean().default(true),
+    enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
+    showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),
   }),
 });
@@ -143,3 +169,42 @@ export const diagnosePathRpc = defineRpc({
     recentActions: z.array(ActionLogEntrySchema),
   }),
 });
+
+export const renameWorkspaceOrAgentRpc = defineRpc({
+  name: "finder.rename_thread",
+  input: z.object({
+    workspaceId: z.string().optional(),
+    agentId: z.string().optional(),
+    title: z.string().nullable(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    workspaceId: z.string(),
+    title: z.string().nullable(),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+
+export const manageWorkspaceLabelsRpc = defineRpc({
+  name: "finder.manage_labels",
+  input: z.object({
+    action: z
+      .enum(["inspect", "toggle", "assign", "unassign", "update", "delete"])
+      .default("inspect"),
+    workspaceId: z.string().optional(),
+    labelName: z.string().optional(),
+    newName: z.string().optional(),
+    color: WorkspaceLabelColorSchema.optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    workspaceId: z.string(),
+    workspaceTitle: z.string(),
+    assignedLabels: z.array(z.string()),
+    catalog: z.array(WorkspaceLabelEntrySchema),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+

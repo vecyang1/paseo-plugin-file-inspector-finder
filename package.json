@@ -2,7 +2,7 @@
   "name": "file-inspector-finder",
   "type": "module",
   "private": false,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Paseo plugin to reveal images and files in Finder/Explorer, preview in macOS Preview or Code Editors, inspect image dimensions & metadata, and browse workspace media from tabs, headers, composer pills, right-click/Option+Click, ⌘K, and /reveal.",
   "license": "MIT",
   "repository": {
