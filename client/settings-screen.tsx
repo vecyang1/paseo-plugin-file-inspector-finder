@@ -59,6 +59,13 @@ import {
   syncDictationSendBehavior,
 } from "./dictation-guard-web";
 import {
+  MODEL_QUICK_SWITCH_EVENT,
+  type ModelQuickSwitchStatus,
+  getModelQuickSwitchStatus,
+  runModelQuickSwitchSelfTest,
+  syncModelQuickSwitchPrefs,
+} from "./model-quick-switch-web";
+import {
   applyInlineInputCaret,
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
@@ -124,6 +131,14 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     window.addEventListener(DICTATION_GUARD_EVENT, onReceipt);
     return () => window.removeEventListener(DICTATION_GUARD_EVENT, onReceipt);
   }, []);
+  const [modelSwitchStatus, setModelSwitchStatus] = useState<ModelQuickSwitchStatus | null>(null);
+  useEffect(() => {
+    setModelSwitchStatus(getModelQuickSwitchStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setModelSwitchStatus(getModelQuickSwitchStatus());
+    window.addEventListener(MODEL_QUICK_SWITCH_EVENT, onReceipt);
+    return () => window.removeEventListener(MODEL_QUICK_SWITCH_EVENT, onReceipt);
+  }, []);
   const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
   const [agentHistorySnapData, setAgentHistorySnapData] = useState<
     Awaited<ReturnType<typeof manageAgentHistory>> | null
@@ -161,6 +176,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       syncDictationSendBehavior(
         normalizeDictationSendBehavior(settings.values.dictationSendBehavior),
       );
+      syncModelQuickSwitchPrefs({
+        enabled: settings.values.enableModelQuickSwitch,
+        digitMode: settings.values.modelQuickSwitchDigits,
+      });
     }
   }, [settings]);
 
@@ -708,6 +727,29 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               syncDictationSendBehavior(behavior);
               setDictationGuardStatus(getDictationGuardStatus());
               void save({ ...values, dictationSendBehavior: behavior }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.modelQuickSwitchLabel")}
+            hint={t("settings.modelQuickSwitchHint")}
+            value={values.enableModelQuickSwitch}
+            onValueChange={(next) => {
+              syncModelQuickSwitchPrefs({ enabled: next });
+              setModelSwitchStatus(getModelQuickSwitchStatus());
+              void save({ ...values, enableModelQuickSwitch: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.modelQuickSwitchDigitsLabel")}
+            hint={t("settings.modelQuickSwitchDigitsHint")}
+            value={values.modelQuickSwitchDigits !== "modifier-only"}
+            onValueChange={(next) => {
+              const digitMode = next ? "empty-search" : "modifier-only";
+              syncModelQuickSwitchPrefs({ digitMode });
+              setModelSwitchStatus(getModelQuickSwitchStatus());
+              void save({ ...values, modelQuickSwitchDigits: digitMode }, revision);
             }}
           />
 
@@ -1334,6 +1376,35 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               ))}
             </View>
           ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionModelQuickSwitch")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {t("settings.modelQuickSwitchStatusPrefix")}{" "}
+            {modelSwitchStatus
+              ? `${modelSwitchStatus.prefs.enabled ? "on" : "off"} · digits=${modelSwitchStatus.prefs.digitMode} · installed=${modelSwitchStatus.installed}`
+              : "-"}
+          </Text>
+          <View style={styles.row}>
+            <Pressable
+              style={styles.btn}
+              onPress={() => setModelSwitchStatus(runModelQuickSwitchSelfTest())}
+            >
+              <Text style={styles.btnText}>{t("settings.modelQuickSwitchSelfTestBtn")}</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.detail}>{t("settings.modelQuickSwitchReceiptsTitle")}</Text>
+          {modelSwitchStatus && modelSwitchStatus.receipts.length > 0 ? (
+            modelSwitchStatus.receipts.slice(0, 6).map((r) => (
+              <Text key={`${r.at}-${r.trigger}`} style={styles.detail}>
+                • {r.ok ? "✓" : "✕"} {r.at.slice(11, 19)} [{r.trigger}] {r.outcome}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settings.modelQuickSwitchNoReceipts")}</Text>
+          )}
         </View>
       </SettingsSection>
 

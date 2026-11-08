@@ -117,6 +117,8 @@ export const pluginSettings = defineSettings({
     enableScheduleRunsInspector: z.boolean().default(true),
     enableVoiceCustomModelHelper: z.boolean().default(true),
     dictationSendBehavior: z.enum(["insert-only", "native"]).default("insert-only"),
+    enableModelQuickSwitch: z.boolean().default(true),
+    modelQuickSwitchDigits: z.enum(["empty-search", "modifier-only"]).default("empty-search"),
     enableAgentHistoryAutoHeal: z.boolean().default(true),
     showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),

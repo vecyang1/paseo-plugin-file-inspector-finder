@@ -43,6 +43,7 @@ import {
   installDesktopScheduleRunsEnhancer,
   triggerScheduleRunsDrawer,
 } from "./client/schedule-runs-web";
+import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
 
 export default function contribute(client: PluginClientContext) {
   // 1. Pre-associate image extensions with our Image Inspector file panel & materialize default inline rename prefs
@@ -190,6 +191,18 @@ export default function contribute(client: PluginClientContext) {
     context: "workspace",
     onSelect({ openPanel }) {
       openPanel("finder-panel", { location: "explorer" });
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "change-model",
+    title: pluginTranslations.message("commands.changeModel"),
+    icon: "Cpu",
+    keywords: ["model", "profile", "switch", "change", "provider", "llm"],
+    context: "global",
+    onSelect() {
+      // Let the Command Center close and hand focus back to the composer first.
+      setTimeout(() => openModelQuickSwitch(), 160);
     },
   });
 
@@ -1035,6 +1048,8 @@ export default function contribute(client: PluginClientContext) {
     getLocale: () => client.i18n.locale,
   });
 
+  const cleanupModelQuickSwitch = installModelQuickSwitch();
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -1044,6 +1059,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupWebHelpers();
     cleanupScheduleRunsEnhancer();
     cleanupVoiceSttEnhancer();
+    cleanupModelQuickSwitch();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
   };

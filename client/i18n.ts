@@ -17,6 +17,7 @@ export const enMessages = {
     quickManageLabels: "Finder: Quick Toggle or Create Workspace Label",
     importFolderWorkspace: "Finder: Open or Import Folder as Workspace",
     quickJumpWorkspace: "Finder: Quick Switch Project Workspace (Cmd+J)",
+    changeModel: "Change model (⌘/)",
     jumpToProjectPrefix: "Jump to Workspace:",
     slashDescription: "Reveal a file or image in Finder (leave empty for latest image)",
     slashHint: "[file path or filename, or empty for latest image]",
@@ -230,6 +231,16 @@ export const enMessages = {
     dictationGuardSelfTestBtn: "Run guard self-test",
     dictationGuardReceiptsTitle: "Recent guard receipts",
     dictationGuardNoReceipts: "No receipts yet. Dictate once, then stop with Enter or Cmd+D.",
+    sectionModelQuickSwitch: "Model quick switch",
+    modelQuickSwitchLabel: "Change model with ⌘/ and 1–9",
+    modelQuickSwitchHint:
+      "⌘/ opens the model selector of the focused chat. 1–9 picks the numbered row: profiles first, then models. A provider row opens its models, numbered again. ⌘1–⌘9 also picks while you search.",
+    modelQuickSwitchDigitsLabel: "Plain 1–9 picks when search is empty",
+    modelQuickSwitchDigitsHint: "Off: only ⌘1–⌘9 pick, and plain digits always go into search.",
+    modelQuickSwitchStatusPrefix: "Model quick switch:",
+    modelQuickSwitchSelfTestBtn: "Run self-test",
+    modelQuickSwitchReceiptsTitle: "Recent receipts",
+    modelQuickSwitchNoReceipts: "No receipts yet. Press ⌘/ in a chat, then a number.",
     voiceSttDiagPrompt:
       "Inspect Paseo's active Speech-to-text configuration, switch to SiliconFlow free/SOTA models or any custom model ID, or run a live audio transcription probe:",
     voiceSttModelPlaceholder:
@@ -294,6 +305,7 @@ export const zhMessages: PluginMessageCatalog = {
     quickManageLabels: "Finder：快速切换或新建工作区标签",
     importFolderWorkspace: "Finder：打开或导入文件夹为工作区",
     quickJumpWorkspace: "Finder：快速切换项目工作区 (Cmd+J)",
+    changeModel: "切换模型（⌘/）",
     jumpToProjectPrefix: "跳转工作区：",
     slashDescription: "在 Finder 中显示文件或图片（留空则定位最新图片）",
     slashHint: "[文件路径或文件名，留空定位最新图片]",
@@ -498,6 +510,16 @@ export const zhMessages: PluginMessageCatalog = {
     dictationGuardSelfTestBtn: "运行守卫自检",
     dictationGuardReceiptsTitle: "最近守卫回执",
     dictationGuardNoReceipts: "暂无回执。先听写一次，再用回车或 Cmd+D 结束。",
+    sectionModelQuickSwitch: "快速切换模型",
+    modelQuickSwitchLabel: "用 ⌘/ 和 1–9 切换模型",
+    modelQuickSwitchHint:
+      "⌘/ 打开当前对话的模型选择器，按 1–9 选中对应编号的行：先是预设，再是模型。选中服务商行会进入它的模型列表并重新编号。搜索时也可以用 ⌘1–⌘9 选择。",
+    modelQuickSwitchDigitsLabel: "搜索框为空时直接按 1–9 选择",
+    modelQuickSwitchDigitsHint: "关闭后只有 ⌘1–⌘9 能选择，单独的数字始终输入到搜索框。",
+    modelQuickSwitchStatusPrefix: "快速切换模型：",
+    modelQuickSwitchSelfTestBtn: "运行自检",
+    modelQuickSwitchReceiptsTitle: "最近回执",
+    modelQuickSwitchNoReceipts: "暂无回执。在对话中按 ⌘/，再按数字。",
     voiceSttDiagPrompt:
       "实时读取 Paseo 当前生效的语音转文字配置，一键切换硅基流动免费/高精模型或任意自定义模型 ID，并发送真实音频执行端到端转录验收：",
     voiceSttModelPlaceholder:
