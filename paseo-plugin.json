@@ -1,7 +1,7 @@
 {
   "id": "file-inspector-finder",
   "name": "File Inspector & Finder Reveal",
-  "description": "Schedule Runs History & 1-Click Session Drill-Down (⌘⇧H & inline Runs pills), Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O), zero-popup double-click & F2 inline workspace/tab rename, sidebar folder drag-and-drop workspace import (auto-dedupe), colored thread labels, Finder reveal, macOS Preview/Editor launch, and workspace media inspection.",
+  "description": "Custom Voice & STT Models (SiliconFlow Free SenseVoiceSmall / OpenWhispr Qwen3-ASR / Gemini 6-Key Pool), Schedule Runs History & 1-Click Session Drill-Down (⌘⇧H & inline Runs pills), Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O), zero-popup double-click & F2 inline workspace/tab rename, sidebar folder drag-and-drop workspace import (auto-dedupe), colored thread labels, Finder reveal, macOS Preview/Editor launch, and workspace media inspection.",
   "media": [],
   "requirements": {
     "paseo": ">=0.15.3"
