@@ -223,6 +223,13 @@ export const enMessages = {
     voiceHelperEnabledHint:
       "Inject 1-click SiliconFlow free ASR presets (SenseVoiceSmall, TeleSpeechASR), OpenWhispr Qwen3-ASR-1.7B, Gemini 6-Key Pool, and custom model input into Settings -> Voice",
     sectionVoiceSttDiag: "Voice & Custom STT Model Reconciler (SiliconFlow / OpenWhispr / Audio Pool :8787)",
+    dictationGuardLabel: "Keep dictation in the composer (never auto-send)",
+    dictationGuardHint:
+      "When dictation stops (Enter, Cmd+D, or the send arrow), the transcript is inserted into the message box so you can review and edit it before pressing Send. Turn off to restore Paseo's native insert-and-send.",
+    dictationGuardStatusPrefix: "Dictation send guard:",
+    dictationGuardSelfTestBtn: "Run guard self-test",
+    dictationGuardReceiptsTitle: "Recent guard receipts",
+    dictationGuardNoReceipts: "No receipts yet. Dictate once, then stop with Enter or Cmd+D.",
     voiceSttDiagPrompt:
       "Inspect Paseo's active Speech-to-text configuration, switch to SiliconFlow free/SOTA models or any custom model ID, or run a live audio transcription probe:",
     voiceSttModelPlaceholder:
@@ -484,6 +491,13 @@ export const zhMessages: PluginMessageCatalog = {
     voiceHelperEnabledHint:
       "在 Paseo 原生语音设置弹窗中直接注入 SenseVoiceSmall（免费）、TeleSpeechASR（免费）、OpenWhispr 同款 Qwen3-ASR-1.7B、Gemini 6-Key 轮询池与任意自定义模型输入框",
     sectionVoiceSttDiag: "自定义语音识别 (STT) 模型对账与调优器 (SiliconFlow / OpenWhispr / :8787)",
+    dictationGuardLabel: "听写结果只放入输入框（不自动发送）",
+    dictationGuardHint:
+      "结束听写时（回车、Cmd+D 或发送箭头），转写文字只会插入输入框，方便你先检查和修改再手动发送。关闭后恢复 Paseo 原生的插入并发送。",
+    dictationGuardStatusPrefix: "听写发送守卫：",
+    dictationGuardSelfTestBtn: "运行守卫自检",
+    dictationGuardReceiptsTitle: "最近守卫回执",
+    dictationGuardNoReceipts: "暂无回执。先听写一次，再用回车或 Cmd+D 结束。",
     voiceSttDiagPrompt:
       "实时读取 Paseo 当前生效的语音转文字配置，一键切换硅基流动免费/高精模型或任意自定义模型 ID，并发送真实音频执行端到端转录验收：",
     voiceSttModelPlaceholder:

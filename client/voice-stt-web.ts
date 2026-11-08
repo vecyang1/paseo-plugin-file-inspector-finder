@@ -5,6 +5,7 @@ import {
   type VoiceSttPreset,
   manageVoiceSttRpc,
 } from "../shared/contracts";
+import { installDictationSendGuard } from "./dictation-guard-web";
 import { isChineseLocale } from "./i18n";
 import { syncPaseoThemeCssVariables } from "./theme-web";
 
@@ -436,6 +437,9 @@ export function installDesktopVoiceSttEnhancer(
   const doc = docOverride ?? (typeof document !== "undefined" ? document : null);
   if (!doc || !doc.body) return () => {};
 
+  // Keep finished dictation in the composer for review instead of auto-sending.
+  const cleanupDictationGuard = installDictationSendGuard(doc);
+
   let rafId: number | null = null;
   let observer: MutationObserver | null = null;
   const runInjectPass = () => {
@@ -472,6 +476,7 @@ export function installDesktopVoiceSttEnhancer(
       cancelAnimationFrame(rafId);
     }
     observer?.disconnect();
+    cleanupDictationGuard();
     doc
       .querySelectorAll(
         '[data-testid="paseo-finder-voice-stt-sheet-enhancer"], [data-testid="paseo-finder-voice-settings-card"]',

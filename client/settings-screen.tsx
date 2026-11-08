@@ -51,6 +51,14 @@ import {
 } from "./schedule-runs-web";
 import { syncVoiceCustomModelPreferences } from "./voice-stt-web";
 import {
+  DICTATION_GUARD_EVENT,
+  type DictationGuardStatus,
+  getDictationGuardStatus,
+  normalizeDictationSendBehavior,
+  runDictationGuardSelfTest,
+  syncDictationSendBehavior,
+} from "./dictation-guard-web";
+import {
   applyInlineInputCaret,
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
@@ -105,6 +113,17 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [voiceSnapData, setVoiceSnapData] = useState<
     Awaited<ReturnType<typeof manageVoiceStt>> | null
   >(null);
+  const [dictationGuardStatus, setDictationGuardStatus] = useState<DictationGuardStatus | null>(
+    null,
+  );
+
+  useEffect(() => {
+    setDictationGuardStatus(getDictationGuardStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setDictationGuardStatus(getDictationGuardStatus());
+    window.addEventListener(DICTATION_GUARD_EVENT, onReceipt);
+    return () => window.removeEventListener(DICTATION_GUARD_EVENT, onReceipt);
+  }, []);
   const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
   const [agentHistorySnapData, setAgentHistorySnapData] = useState<
     Awaited<ReturnType<typeof manageAgentHistory>> | null
@@ -139,6 +158,9 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       );
       setScheduleDomHealth(getScheduleRunsDomHealthSnapshot());
       syncVoiceCustomModelPreferences(settings.values.enableVoiceCustomModelHelper);
+      syncDictationSendBehavior(
+        normalizeDictationSendBehavior(settings.values.dictationSendBehavior),
+      );
     }
   }, [settings]);
 
@@ -674,6 +696,18 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             onValueChange={(next) => {
               syncVoiceCustomModelPreferences(next);
               void save({ ...values, enableVoiceCustomModelHelper: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.dictationGuardLabel")}
+            hint={t("settings.dictationGuardHint")}
+            value={values.dictationSendBehavior !== "native"}
+            onValueChange={(next) => {
+              const behavior = next ? "insert-only" : "native";
+              syncDictationSendBehavior(behavior);
+              setDictationGuardStatus(getDictationGuardStatus());
+              void save({ ...values, dictationSendBehavior: behavior }, revision);
             }}
           />
 
@@ -1304,6 +1338,32 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       </SettingsSection>
 
       <SettingsSection title={t("settings.sectionVoiceSttDiag")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {t("settings.dictationGuardStatusPrefix")}{" "}
+            {dictationGuardStatus
+              ? `${dictationGuardStatus.policy} · installed=${dictationGuardStatus.installed} · overlay=${dictationGuardStatus.overlayState} · autoSendRef=${dictationGuardStatus.autoSendRefBound ? "bound" : "not-found"}`
+              : "-"}
+          </Text>
+          <View style={styles.row}>
+            <Pressable
+              style={styles.btn}
+              onPress={() => setDictationGuardStatus(runDictationGuardSelfTest())}
+            >
+              <Text style={styles.btnText}>{t("settings.dictationGuardSelfTestBtn")}</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.detail}>{t("settings.dictationGuardReceiptsTitle")}</Text>
+          {dictationGuardStatus && dictationGuardStatus.receipts.length > 0 ? (
+            dictationGuardStatus.receipts.slice(0, 5).map((r) => (
+              <Text key={`${r.at}-${r.trigger}`} style={styles.detail}>
+                • {r.ok ? "✓" : "✕"} {r.at.slice(11, 19)} [{r.trigger}] {r.outcome}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settings.dictationGuardNoReceipts")}</Text>
+          )}
+        </View>
         <View style={styles.diagBox}>
           <Text style={styles.label}>{t("settings.voiceSttDiagPrompt")}</Text>
 
