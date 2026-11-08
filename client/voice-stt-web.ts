@@ -6,6 +6,7 @@ import {
   manageVoiceSttRpc,
 } from "../shared/contracts";
 import { isChineseLocale } from "./i18n";
+import { syncPaseoThemeCssVariables } from "./theme-web";
 
 export interface VoiceSttWebClient {
   call(
@@ -115,15 +116,16 @@ function buildVoiceEnhancerCard(
   testId: string,
 ): HTMLElement {
   const { copy, zh } = getCopy(client.getLocale?.());
+  const theme = syncPaseoThemeCssVariables(doc);
   const container = doc.createElement("div");
   container.setAttribute("data-testid", testId);
   container.style.cssText = [
     "margin-top: 12px",
     "margin-bottom: 8px",
     "padding: 12px 14px",
-    "border-radius: 10px",
-    "background: rgba(16, 185, 129, 0.06)",
-    "border: 1px solid rgba(16, 185, 129, 0.28)",
+    "border-radius: 8px",
+    `background: ${theme.surface1}`,
+    `border: 1px solid ${theme.border}`,
     "display: flex",
     "flex-direction: column",
     "gap: 10px",
@@ -137,7 +139,7 @@ function buildVoiceEnhancerCard(
 
   const titleEl = doc.createElement("div");
   titleEl.textContent = copy.panelTitle;
-  titleEl.style.cssText = "font-size: 12.5px; font-weight: 600; color: #10b981;";
+  titleEl.style.cssText = `font-size: 12.5px; font-weight: 600; color: ${theme.foreground};`;
 
   const statusBadge = doc.createElement("div");
   statusBadge.setAttribute("data-testid", `${testId}-status-badge`);
@@ -147,9 +149,9 @@ function buildVoiceEnhancerCard(
     "font-weight: 500",
     "padding: 2px 8px",
     "border-radius: 999px",
-    "background: rgba(16, 185, 129, 0.14)",
-    "color: #34d399",
-    "border: 1px solid rgba(16, 185, 129, 0.3)",
+    `background: ${theme.surface2}`,
+    `color: ${theme.statusSuccess}`,
+    `border: 1px solid ${theme.border}`,
   ].join(";");
 
   headerRow.appendChild(titleEl);
@@ -159,7 +161,7 @@ function buildVoiceEnhancerCard(
   // 2. Subtitle
   const subEl = doc.createElement("div");
   subEl.textContent = copy.panelSubtitle;
-  subEl.style.cssText = "font-size: 11.5px; color: #9ca3af; line-height: 1.4;";
+  subEl.style.cssText = `font-size: 11.5px; color: ${theme.foregroundMuted}; line-height: 1.4;`;
   container.appendChild(subEl);
 
   // 3. Preset Chips Row
@@ -175,9 +177,9 @@ function buildVoiceEnhancerCard(
       const btn = presetButtons.get(preset.id);
       if (!btn) continue;
       const isSelected = preset.model.toLowerCase() === modelId.trim().toLowerCase();
-      btn.style.background = isSelected ? "rgba(16, 185, 129, 0.22)" : "rgba(24, 28, 27, 0.85)";
-      btn.style.borderColor = isSelected ? "#10b981" : "rgba(255, 255, 255, 0.12)";
-      btn.style.color = isSelected ? "#ecfdf5" : "#d1d5db";
+      btn.style.background = isSelected ? theme.primary : theme.surface0;
+      btn.style.borderColor = isSelected ? theme.primary : theme.border;
+      btn.style.color = isSelected ? theme.primaryForeground : theme.foregroundMuted;
     }
   };
 
@@ -195,9 +197,9 @@ function buildVoiceEnhancerCard(
     "min-width: 210px",
     "padding: 6px 10px",
     "border-radius: 6px",
-    "background: rgba(12, 15, 14, 0.9)",
-    "border: 1px solid rgba(255, 255, 255, 0.16)",
-    "color: #f3f4f6",
+    `background: ${theme.surface0}`,
+    `border: 1px solid ${theme.border}`,
+    `color: ${theme.foreground}`,
     "font-size: 12px",
     "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     "outline: none",
@@ -210,8 +212,8 @@ function buildVoiceEnhancerCard(
   applyBtn.style.cssText = [
     "padding: 6px 12px",
     "border-radius: 6px",
-    "background: #10b981",
-    "color: #052e16",
+    `background: ${theme.primary}`,
+    `color: ${theme.primaryForeground}`,
     "font-size: 12px",
     "font-weight: 600",
     "border: none",
@@ -225,11 +227,11 @@ function buildVoiceEnhancerCard(
   testBtn.style.cssText = [
     "padding: 6px 10px",
     "border-radius: 6px",
-    "background: rgba(31, 36, 35, 0.9)",
-    "color: #e5e7eb",
+    `background: ${theme.surface2}`,
+    `color: ${theme.foreground}`,
     "font-size: 12px",
     "font-weight: 500",
-    "border: 1px solid rgba(255, 255, 255, 0.14)",
+    `border: 1px solid ${theme.border}`,
     "cursor: pointer",
   ].join(";");
 
@@ -240,20 +242,18 @@ function buildVoiceEnhancerCard(
     "display: none",
     "padding: 7px 10px",
     "border-radius: 6px",
-    "background: rgba(10, 13, 12, 0.85)",
-    "border: 1px solid rgba(255, 255, 255, 0.1)",
+    `background: ${theme.surface0}`,
+    `border: 1px solid ${theme.border}`,
     "font-size: 11.5px",
-    "color: #d1d5db",
+    `color: ${theme.foreground}`,
     "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     "line-height: 1.4",
   ].join(";");
 
   const showReceipt = (text: string, isError = false) => {
     receiptBox.style.display = "block";
-    receiptBox.style.borderColor = isError
-      ? "rgba(239, 68, 68, 0.5)"
-      : "rgba(16, 185, 129, 0.45)";
-    receiptBox.style.color = isError ? "#fca5a5" : "#a7f3d0";
+    receiptBox.style.borderColor = isError ? theme.statusDanger : theme.statusSuccess;
+    receiptBox.style.color = isError ? theme.statusDanger : theme.statusSuccess;
     receiptBox.textContent = text;
   };
 
@@ -346,9 +346,9 @@ function buildVoiceEnhancerCard(
       "border-radius: 999px",
       "font-size: 11.5px",
       "font-weight: 500",
-      "background: rgba(24, 28, 27, 0.85)",
-      "border: 1px solid rgba(255, 255, 255, 0.12)",
-      "color: #d1d5db",
+      `background: ${theme.surface0}`,
+      `border: 1px solid ${theme.border}`,
+      `color: ${theme.foregroundMuted}`,
       "cursor: pointer",
       "transition: all 0.12s ease",
     ].join(";");
@@ -467,21 +467,28 @@ export function installDesktopVoiceSttEnhancer(
   if (!doc || !doc.body) return () => {};
 
   let rafId: number | null = null;
+  let observer: MutationObserver | null = null;
+  const runInjectPass = () => {
+    const injected = injectVoiceSttEnhancersIntoDom(doc, client);
+    if (injected > 0) {
+      observer?.takeRecords();
+    }
+  };
   const schedulePass = () => {
     if (rafId !== null) return;
     if (typeof requestAnimationFrame === "function") {
       rafId = requestAnimationFrame(() => {
         rafId = null;
-        injectVoiceSttEnhancersIntoDom(doc, client);
+        runInjectPass();
       });
     } else {
-      injectVoiceSttEnhancersIntoDom(doc, client);
+      runInjectPass();
     }
   };
 
-  injectVoiceSttEnhancersIntoDom(doc, client);
+  runInjectPass();
 
-  const observer =
+  observer =
     typeof MutationObserver !== "undefined"
       ? new MutationObserver(() => {
           schedulePass();

@@ -25,6 +25,18 @@ import {
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
+  PASEO_IDENTITY_BG_HEX,
+  PASEO_THEMES,
+  derivePaseoIdentityColorHex,
+  derivePaseoIdentityColorName,
+  deriveProjectIconInitial,
+  normalizePaseoThemeName,
+} from "../shared/paseo-theme";
+import {
+  resolveActivePaseoTheme,
+  syncPaseoThemeCssVariables,
+} from "../client/theme-web";
+import {
   type DaemonLabelBridge,
   buildCandidatePaths,
   handleDiagnosePath,
@@ -75,6 +87,16 @@ import {
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
 } from "../client/web";
+import {
+  type MinimalScheduleDomDocument,
+  type MinimalScheduleDomElement,
+  decorateSchedulesDomOnDocument,
+  isSelfInjectedMutationBatch,
+  readScheduleRunsPreferences,
+  runScheduleRunsDomIdempotencySelfTest,
+  setTextContentIfChanged,
+  syncScheduleRunsPreferences,
+} from "../client/schedule-runs-web";
 
 // Minimal valid 1x1 PNG buffer
 const TINY_PNG_BASE64 =
@@ -2082,5 +2104,272 @@ test("19. Custom Voice & STT Model Reconciler (handleManageVoiceStt: inspect, ap
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("20. Centralized Paseo 7-Theme & 10-Identity-Color System (shared/paseo-theme & client/theme-web)", () => {
+  // 1) Normalize Paseo theme names
+  assert.equal(normalizePaseoThemeName("light"), "light");
+  assert.equal(normalizePaseoThemeName("darkZinc"), "zinc");
+  assert.equal(normalizePaseoThemeName("darkClaude"), "claude");
+  assert.equal(normalizePaseoThemeName("pure-black"), "pureBlack");
+  assert.equal(normalizePaseoThemeName("unknown"), null);
+
+  // 2) Exact Paseo ProjectIconView identity color hash & initial
+  const colorName = derivePaseoIdentityColorName("dir:/Users/dev/Cowork/2026-11-08 Meta harness");
+  const colorHex = derivePaseoIdentityColorHex("dir:/Users/dev/Cowork/2026-11-08 Meta harness");
+  assert.equal(colorHex, PASEO_IDENTITY_BG_HEX[colorName]);
+  assert.equal(deriveProjectIconInitial("2026-11-08 Meta harness"), "2");
+  assert.equal(deriveProjectIconInitial("Seller Browser"), "S");
+  assert.equal(deriveProjectIconInitial("life-os"), "L");
+
+  // 3) Resolve Light theme from DOM computed background rgb(255, 255, 255)
+  const docElAttrs = new Map<string, string>();
+  const docElProps = new Map<string, string>();
+  const lightDoc = {
+    documentElement: {
+      className: "",
+      getAttribute: (k: string) => docElAttrs.get(k) ?? null,
+      setAttribute: (k: string, v: string) => {
+        docElAttrs.set(k, v);
+      },
+      style: {
+        setProperty: (k: string, v: string) => {
+          docElProps.set(k, v);
+        },
+      },
+    },
+    body: { tagName: "BODY" },
+    querySelector: () => null,
+  };
+  const lightWin = {
+    localStorage: {
+      getItem: () => null,
+      length: 0,
+      key: () => null,
+    },
+    getComputedStyle: () => ({
+      backgroundColor: "rgb(255, 255, 255)",
+      color: "rgb(26, 26, 30)",
+    }),
+  };
+
+  const resolvedLight = syncPaseoThemeCssVariables(lightDoc as never, lightWin as never);
+  assert.equal(resolvedLight.name, "light");
+  assert.equal(resolvedLight.colorScheme, "light");
+  assert.equal(resolvedLight.surface0, PASEO_THEMES.light.surface0);
+  assert.equal(resolvedLight.surface2, "#f4f4f5");
+  assert.equal(resolvedLight.border, "#e4e4e7");
+  assert.equal(resolvedLight.primary, "#18181b");
+  assert.equal(docElAttrs.get("data-paseo-finder-theme"), "light");
+  assert.equal(docElProps.get("--paseo-finder-surface-0"), "#ffffff");
+
+  // 4) Resolve Claude dark theme from localStorage setting
+  const claudeWin = {
+    localStorage: {
+      getItem: (k: string) =>
+        k === "@paseo:app-settings" ? JSON.stringify({ theme: "claude" }) : null,
+      length: 1,
+      key: () => "@paseo:app-settings",
+    },
+  };
+  const resolvedClaude = resolveActivePaseoTheme(lightDoc as never, claudeWin as never);
+  assert.equal(resolvedClaude.name, "claude");
+  assert.equal(resolvedClaude.colorScheme, "dark");
+  assert.equal(resolvedClaude.surface0, "#1f1f1e");
+  assert.equal(resolvedClaude.accent, "#d97757");
+});
+
+test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver idempotency across 135 rows, safe internal toolbar mounting, and preference persistence", () => {
+  // 1) Built-in live self-test proves 0 infinite loop under W3C textContent childList semantics
+  const selfTest = runScheduleRunsDomIdempotencySelfTest();
+  assert.equal(selfTest.ok, true, selfTest.summary);
+  assert.ok(selfTest.pass1DomWrites > 0);
+  assert.equal(selfTest.pass2DomWrites, 0);
+  assert.equal(selfTest.pass3DomWrites, 0);
+  assert.equal(selfTest.simulatedObserverCallbacks, 0);
+  assert.equal(selfTest.infiniteLoopPrevented, true);
+
+  // 2) setTextContentIfChanged mutates only when value differs
+  let textSetterCalls = 0;
+  let currentVal: string | null = "Runs (5)";
+  const watchedEl = {
+    get textContent() {
+      return currentVal;
+    },
+    set textContent(next: string | null) {
+      textSetterCalls += 1;
+      currentVal = next;
+    },
+  };
+  assert.equal(setTextContentIfChanged(watchedEl, "Runs (5)"), false);
+  assert.equal(textSetterCalls, 0);
+  assert.equal(setTextContentIfChanged(watchedEl, "Runs (6)"), true);
+  assert.equal(textSetterCalls, 1);
+
+  // 3) Scale test: 135 schedule rows mount toolbar inside `[data-testid="schedules-table"]` (not parentElement!)
+  interface TestNode extends MinimalScheduleDomElement {
+    childrenList: TestNode[];
+  }
+  const makeTestNode = (tag: string, attrs: Record<string, string> = {}): TestNode => {
+    const map = new Map<string, string>(Object.entries(attrs));
+    const n: TestNode = {
+      id: attrs.id,
+      textContent: "",
+      style: {},
+      childrenList: [],
+      parentElement: null,
+      get firstChild() {
+        return n.childrenList[0] ?? null;
+      },
+      getAttribute: (k) => (k === "id" ? n.id ?? null : map.get(k) ?? null),
+      setAttribute: (k, v) => {
+        if (k === "id") n.id = v;
+        map.set(k, v);
+      },
+      hasAttribute: (k) => (k === "id" ? Boolean(n.id) : map.has(k)),
+      appendChild: (c) => {
+        const child = c as TestNode;
+        child.parentElement = n;
+        n.childrenList.push(child);
+      },
+      insertBefore: (newNode, refNode) => {
+        const child = newNode as TestNode;
+        child.parentElement = n;
+        const idx = refNode ? n.childrenList.indexOf(refNode as TestNode) : -1;
+        if (idx >= 0) n.childrenList.splice(idx, 0, child);
+        else n.childrenList.push(child);
+      },
+      addEventListener: () => {},
+      querySelector: <T = MinimalScheduleDomElement>(sel: string): T | null =>
+        (queryTree(n, sel)[0] as unknown as T) ?? null,
+    };
+    return n;
+  };
+
+  const queryTree = (root: TestNode, selector: string): TestNode[] => {
+    const out: TestNode[] = [];
+    const s = selector.trim();
+    const exact = s.match(/^\[data-testid="([^"]+)"\]$/);
+    const prefix = s.match(/^\[data-testid\^="([^"]+)"\]$/);
+    const walk = (cur: TestNode) => {
+      if (exact && cur.getAttribute("data-testid") === exact[1]) out.push(cur);
+      else if (prefix && (cur.getAttribute("data-testid") ?? "").startsWith(prefix[1])) {
+        out.push(cur);
+      }
+      for (const ch of cur.childrenList) walk(ch);
+    };
+    walk(root);
+    return out;
+  };
+
+  const findId = (root: TestNode, id: string): TestNode | null => {
+    if (root.id === id) return root;
+    for (const ch of root.childrenList) {
+      const f = findId(ch, id);
+      if (f) return f;
+    }
+    return null;
+  };
+
+  const scrollParent = makeTestNode("div", { "data-testid": "schedules-list" });
+  const tableEl = makeTestNode("div", { "data-testid": "schedules-table" });
+  const cardEl = makeTestNode("div");
+  for (let i = 0; i < 135; i += 1) {
+    const id = `sched_${i}`;
+    const row = makeTestNode("div", { "data-testid": `schedule-row-${id}` });
+    const actions = makeTestNode("div");
+    const kebab = makeTestNode("button", { "data-testid": `schedule-kebab-${id}` });
+    actions.appendChild(kebab);
+    row.appendChild(actions);
+    cardEl.appendChild(row);
+  }
+  tableEl.appendChild(cardEl);
+  scrollParent.appendChild(tableEl);
+
+  const doc: MinimalScheduleDomDocument = {
+    createElement: (tag) => makeTestNode(tag),
+    getElementById: (id) => findId(scrollParent, id),
+    querySelector: (sel) => (queryTree(scrollParent, sel)[0] as never) ?? null,
+    querySelectorAll: (sel) => queryTree(scrollParent, sel) as never,
+  };
+
+  const map = new Map([
+    [
+      "sched_0",
+      {
+        id: "sched_0",
+        name: "Morning Brief",
+        cron: "0 8 * * *",
+        enabled: true,
+        isStandbyTwin: false,
+        workspaceDirectory: "/tmp",
+        provider: "claude",
+        model: "sonnet",
+        prompt: "hi",
+        archiveOnComplete: true,
+        totalRuns: 3,
+        succeededRuns: 3,
+        failedRuns: 0,
+        runningRuns: 0,
+        lastRunAt: null,
+        lastRunStatus: "succeeded" as const,
+        nextRunAt: null,
+        runs: [],
+      },
+    ],
+  ]);
+
+  const first = decorateSchedulesDomOnDocument(doc, {
+    schedulesById: map,
+    totals: { totalSchedules: 135, schedulesWithRuns: 1, totalRuns: 3 },
+    isZh: false,
+    onOpenDrawer: () => {},
+  });
+  assert.equal(first.rowCount, 135);
+  assert.ok(first.domWrites > 135);
+
+  // Verify toolbar was mounted INSIDE schedules-table (first child), NOT in scrollParent!
+  assert.equal(scrollParent.childrenList.length, 1);
+  assert.equal(scrollParent.childrenList[0], tableEl);
+  assert.equal(tableEl.childrenList[0]?.id, "paseo-finder-all-runs-toolbar");
+
+  // Second pass with identical state performs ZERO DOM writes across all 135 rows!
+  const second = decorateSchedulesDomOnDocument(doc, {
+    schedulesById: map,
+    totals: { totalSchedules: 135, schedulesWithRuns: 1, totalRuns: 3 },
+    isZh: false,
+    onOpenDrawer: () => {},
+  });
+  assert.equal(second.rowCount, 135);
+  assert.equal(second.domWrites, 0);
+
+  // Verify self-mutation batch classifier distinguishes injected nodes vs external React rows
+  const pill0 = queryTree(scrollParent, '[data-testid="schedule-runs-pill-sched_0"]')[0];
+  assert.ok(pill0);
+  assert.equal(
+    isSelfInjectedMutationBatch([{ target: pill0, addedNodes: [], removedNodes: [] }]),
+    true,
+  );
+  const externalRow = makeTestNode("div", { "data-testid": "schedule-row-sched_999" });
+  assert.equal(
+    isSelfInjectedMutationBatch([
+      { target: cardEl, addedNodes: [externalRow], removedNodes: [] },
+    ]),
+    false,
+  );
+
+  // 4) Preference sync & read round-trip
+  const mem = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      mem.set(k, v);
+    },
+  };
+  syncScheduleRunsPreferences(false, "plugin-settings", mockStorage);
+  const readBack = readScheduleRunsPreferences(mockStorage);
+  assert.equal(readBack.enabled, false);
+  assert.equal(readBack.sourceBadge, "plugin-settings");
+});
+
 
 

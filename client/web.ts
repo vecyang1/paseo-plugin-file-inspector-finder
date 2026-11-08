@@ -10,20 +10,14 @@ import {
   type WorkspaceLabelColor,
   scoreProjectJumpQuery,
 } from "../shared/contracts";
+import { PASEO_IDENTITY_BG_HEX } from "../shared/paseo-theme";
 import { getCatalogForLocale } from "./i18n";
+import {
+  resolveSidebarProjectVisual,
+  syncPaseoThemeCssVariables,
+} from "./theme-web";
 
-export const LABEL_COLOR_HEX: Record<WorkspaceLabelColor, string> = {
-  violet: "#8b5cf6",
-  sky: "#0ea5e9",
-  emerald: "#10b981",
-  orange: "#f97316",
-  pink: "#ec4899",
-  indigo: "#6366f1",
-  teal: "#14b8a6",
-  red: "#ef4444",
-  amber: "#f59e0b",
-  blue: "#3b82f6",
-};
+export const LABEL_COLOR_HEX: Record<WorkspaceLabelColor, string> = PASEO_IDENTITY_BG_HEX;
 
 interface MinimalStorage {
   readonly length: number;
@@ -169,10 +163,12 @@ export interface MinimalWindow {
   MutationObserver?: new (callback: () => void) => {
     observe(target: unknown, options: Record<string, boolean>): void;
     disconnect(): void;
+    takeRecords?(): unknown[];
   };
   KeyboardEvent?: new (type: string, init?: Record<string, unknown>) => unknown;
   PopStateEvent?: new (type: string, init?: Record<string, unknown>) => unknown;
   requestAnimationFrame?(cb: () => void): number;
+  cancelAnimationFrame?(id: number): void;
   addEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   dispatchEvent?(event: unknown): boolean;
@@ -747,7 +743,8 @@ export interface ActiveInlineRenameSession {
   markOutsidePointerDown(): void;
 }
 
-function ensureInlineRenameStyleTag(doc: MinimalDocument): void {
+function ensureInlineRenameStyleTag(doc: MinimalDocument, win?: MinimalWindow | null): void {
+  syncPaseoThemeCssVariables(doc, win);
   const existing = doc.querySelector('style[data-paseo-finder-inline-rename-style="true"]');
   if (existing) return;
   const host = doc.head ?? doc.documentElement ?? doc.body;
@@ -763,21 +760,25 @@ input[data-testid="paseo-finder-inline-rename-input"] {
   margin: 0 0 0 -3px;
   padding: 0 4px;
   border-radius: 4px;
-  border: 1px solid rgba(59, 130, 246, 0.72);
-  background-color: rgba(59, 130, 246, 0.10);
+  border: 1px solid var(--paseo-finder-running, #268ae0);
+  background-color: var(--paseo-finder-surface-0, #ffffff);
+  color: var(--paseo-finder-fg, inherit);
   outline: none;
   min-width: 56px;
   width: 100%;
   flex: 1 1 auto;
 }
 input[data-testid="paseo-finder-inline-rename-input"]::selection {
-  background-color: rgba(37, 99, 235, 0.40);
+  background-color: rgba(38, 138, 224, 0.24);
 }
 [data-paseo-inline-rename-row="true"] [data-testid="sidebar-workspace-trailing-scrim"],
 [data-paseo-inline-rename-row="true"] [data-testid^="sidebar-workspace-kebab-"],
 [data-paseo-inline-rename-row="true"] [data-testid^="sidebar-workspace-archive-"] {
   opacity: 0 !important;
   pointer-events: none !important;
+}
+input[data-testid="paseo-finder-quick-jump-input"]::placeholder {
+  color: var(--paseo-finder-fg-muted, #71717a);
 }
 `;
   host.appendChild(styleEl);
@@ -798,7 +799,7 @@ export function mountInlineTitleInput(
     return null;
   }
 
-  ensureInlineRenameStyleTag(doc);
+  ensureInlineRenameStyleTag(doc, win);
 
   const computed = win?.getComputedStyle?.(target.titleEl) ?? null;
   const inputEl = doc.createElement("input");
@@ -1410,14 +1411,15 @@ export function locateProjectInSidebar(
   }
 
   if (options.highlightFlash !== false) {
+    const tokens = syncPaseoThemeCssVariables(doc, win);
     matchedRow.setAttribute?.("data-paseo-project-jump-flash", "true");
     if (matchedRow.style) {
       const prevBg = matchedRow.style.backgroundColor ?? "";
       const prevOutline = matchedRow.style.outline ?? "";
       const prevRadius = matchedRow.style.borderRadius ?? "";
-      matchedRow.style.backgroundColor = "rgba(16, 185, 129, 0.18)";
-      matchedRow.style.outline = "1px solid rgba(16, 185, 129, 0.65)";
-      matchedRow.style.borderRadius = "8px";
+      matchedRow.style.backgroundColor = tokens.surfaceSidebarSelected;
+      matchedRow.style.outline = `1px solid ${tokens.border}`;
+      matchedRow.style.borderRadius = "6px";
       setTimeout(() => {
         if (matchedRow?.style) {
           matchedRow.style.backgroundColor = prevBg;
@@ -1712,8 +1714,13 @@ export async function openQuickWorkspaceSwitcherModal(
   const allCandidates = await options.onListJumpProjects("").catch(() => []);
   if (!doc.body) return null;
 
+  ensureInlineRenameStyleTag(doc, win);
+  const tokens = syncPaseoThemeCssVariables(doc, win);
+  const isLight = tokens.colorScheme === "light";
+
   const backdrop = doc.createElement("div");
   backdrop.setAttribute?.("data-testid", "paseo-finder-quick-jump-modal");
+  backdrop.setAttribute?.("data-paseo-theme", tokens.name);
   backdrop.setAttribute?.("role", "dialog");
   if (backdrop.style) {
     backdrop.style.position = "fixed";
@@ -1722,26 +1729,25 @@ export async function openQuickWorkspaceSwitcherModal(
     backdrop.style.width = "100vw";
     backdrop.style.height = "100vh";
     backdrop.style.zIndex = "2147483647";
-    backdrop.style.backgroundColor = "rgba(8, 10, 10, 0.56)";
-    backdrop.style.backdropFilter = "blur(3px)";
+    backdrop.style.backgroundColor = tokens.backdrop;
     backdrop.style.display = "flex";
     backdrop.style.flexDirection = "column";
     backdrop.style.alignItems = "center";
-    backdrop.style.paddingTop = "68px";
+    backdrop.style.paddingTop = "48px";
     backdrop.style.boxSizing = "border-box";
     backdrop.style.fontFamily =
-      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+      'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
   }
 
   const card = doc.createElement("div");
   card.setAttribute?.("data-testid", "paseo-finder-quick-jump-card");
   if (card.style) {
-    card.style.width = "min(580px, calc(100vw - 32px))";
-    card.style.maxHeight = "min(520px, calc(100vh - 120px))";
-    card.style.backgroundColor = "#141716";
-    card.style.border = "1px solid #2b312f";
-    card.style.borderRadius = "12px";
-    card.style.boxShadow = "0 20px 48px rgba(0, 0, 0, 0.65)";
+    card.style.width = "min(640px, calc(100vw - 32px))";
+    card.style.maxHeight = "min(560px, calc(100vh - 96px))";
+    card.style.backgroundColor = tokens.surface0;
+    card.style.border = `1px solid ${tokens.border}`;
+    card.style.borderRadius = "8px";
+    card.style.boxShadow = tokens.shadowLg;
     card.style.display = "flex";
     card.style.flexDirection = "column";
     card.style.overflow = "hidden";
@@ -1764,47 +1770,33 @@ export async function openQuickWorkspaceSwitcherModal(
     }
   });
 
-  // Top Header + Search Input
+  // Top Header + Search Input (matching Paseo CommandCenter `Me.header` & `Me.searchRow`)
   const headerBox = doc.createElement("div");
   if (headerBox.style) {
-    headerBox.style.padding = "12px 14px 10px 14px";
-    headerBox.style.borderBottom = "1px solid #232826";
+    headerBox.style.padding = "12px 16px";
+    headerBox.style.borderBottom = `1px solid ${tokens.border}`;
     headerBox.style.display = "flex";
-    headerBox.style.flexDirection = "column";
+    headerBox.style.flexDirection = "row";
+    headerBox.style.alignItems = "center";
     headerBox.style.gap = "8px";
-  }
-
-  const titleRow = doc.createElement("div");
-  if (titleRow.style) {
-    titleRow.style.display = "flex";
-    titleRow.style.flexDirection = "row";
-    titleRow.style.alignItems = "center";
-    titleRow.style.justifyContent = "space-between";
+    headerBox.style.backgroundColor = tokens.surface0;
   }
 
   const titleLabel = doc.createElement("div");
   titleLabel.textContent = catalog.actions.quickJumpTitle;
   if (titleLabel.style) {
+    titleLabel.style.display = "inline-flex";
+    titleLabel.style.alignItems = "center";
+    titleLabel.style.gap = "6px";
     titleLabel.style.fontSize = "12px";
-    titleLabel.style.fontWeight = "600";
-    titleLabel.style.color = "#10b981";
-    titleLabel.style.letterSpacing = "0.2px";
+    titleLabel.style.fontWeight = "500";
+    titleLabel.style.color = tokens.foreground;
+    titleLabel.style.backgroundColor = tokens.surface2;
+    titleLabel.style.border = `1px solid ${tokens.borderAccent}`;
+    titleLabel.style.borderRadius = "6px";
+    titleLabel.style.padding = "3px 8px";
+    titleLabel.style.flexShrink = "0";
   }
-
-  const subtitleBadge = doc.createElement("div");
-  subtitleBadge.textContent = `${allCandidates.length}`;
-  if (subtitleBadge.style) {
-    subtitleBadge.style.fontSize = "11px";
-    subtitleBadge.style.color = "#9ca3af";
-    subtitleBadge.style.backgroundColor = "#1f2422";
-    subtitleBadge.style.border = "1px solid #2e3432";
-    subtitleBadge.style.borderRadius = "999px";
-    subtitleBadge.style.padding = "1px 8px";
-  }
-
-  titleRow.appendChild?.(titleLabel);
-  titleRow.appendChild?.(subtitleBadge);
-  headerBox.appendChild?.(titleRow);
 
   const searchInput = doc.createElement("input");
   searchInput.type = "text";
@@ -1812,17 +1804,32 @@ export async function openQuickWorkspaceSwitcherModal(
   searchInput.placeholder = catalog.actions.quickJumpPlaceholder;
   searchInput.setAttribute?.("data-testid", "paseo-finder-quick-jump-input");
   if (searchInput.style) {
-    searchInput.style.width = "100%";
+    searchInput.style.flex = "1";
+    searchInput.style.minWidth = "0";
     searchInput.style.boxSizing = "border-box";
-    searchInput.style.backgroundColor = "#0d100f";
-    searchInput.style.border = "1px solid #2e3432";
-    searchInput.style.borderRadius = "8px";
-    searchInput.style.padding = "8px 11px";
-    searchInput.style.color = "#f9fafb";
-    searchInput.style.fontSize = "13.5px";
+    searchInput.style.backgroundColor = "transparent";
+    searchInput.style.border = "none";
+    searchInput.style.padding = "4px 2px";
+    searchInput.style.color = tokens.foreground;
+    searchInput.style.fontSize = "14px";
     searchInput.style.outline = "none";
   }
+
+  const subtitleBadge = doc.createElement("div");
+  subtitleBadge.textContent = `${allCandidates.length}`;
+  if (subtitleBadge.style) {
+    subtitleBadge.style.fontSize = "12px";
+    subtitleBadge.style.color = tokens.foregroundMuted;
+    subtitleBadge.style.backgroundColor = tokens.surface1;
+    subtitleBadge.style.border = `1px solid ${tokens.border}`;
+    subtitleBadge.style.borderRadius = "999px";
+    subtitleBadge.style.padding = "1px 8px";
+    subtitleBadge.style.flexShrink = "0";
+  }
+
+  headerBox.appendChild?.(titleLabel);
   headerBox.appendChild?.(searchInput);
+  headerBox.appendChild?.(subtitleBadge);
   card.appendChild?.(headerBox);
 
   // Results List Container
@@ -1831,10 +1838,10 @@ export async function openQuickWorkspaceSwitcherModal(
   if (listContainer.style) {
     listContainer.style.display = "flex";
     listContainer.style.flexDirection = "column";
-    listContainer.style.padding = "6px";
-    listContainer.style.gap = "3px";
+    listContainer.style.padding = "4px 0";
     listContainer.style.overflowY = "auto";
-    listContainer.style.maxHeight = "360px";
+    listContainer.style.maxHeight = "420px";
+    listContainer.style.backgroundColor = tokens.surface0;
   }
   card.appendChild?.(listContainer);
 
@@ -1842,10 +1849,10 @@ export async function openQuickWorkspaceSwitcherModal(
   const footerBox = doc.createElement("div");
   footerBox.textContent = catalog.actions.quickJumpFooterHint;
   if (footerBox.style) {
-    footerBox.style.padding = "8px 14px";
-    footerBox.style.borderTop = "1px solid #232826";
-    footerBox.style.backgroundColor = "#101312";
-    footerBox.style.color = "#9ca3af";
+    footerBox.style.padding = "8px 16px";
+    footerBox.style.borderTop = `1px solid ${tokens.border}`;
+    footerBox.style.backgroundColor = tokens.surface1;
+    footerBox.style.color = tokens.foregroundMuted;
     footerBox.style.fontSize = "11px";
   }
   card.appendChild?.(footerBox);
@@ -1955,10 +1962,10 @@ export async function openQuickWorkspaceSwitcherModal(
       emptyEl.setAttribute?.("data-testid", "paseo-finder-quick-jump-empty");
       emptyEl.textContent = catalog.actions.quickJumpEmpty;
       if (emptyEl.style) {
-        emptyEl.style.padding = "22px 14px";
+        emptyEl.style.padding = "24px 16px";
         emptyEl.style.textAlign = "center";
-        emptyEl.style.color = "#9ca3af";
-        emptyEl.style.fontSize = "12.5px";
+        emptyEl.style.color = tokens.foregroundMuted;
+        emptyEl.style.fontSize = "13px";
       }
       listContainer.appendChild?.(emptyEl);
       return;
@@ -1984,16 +1991,60 @@ export async function openQuickWorkspaceSwitcherModal(
         row.style.flexDirection = "row";
         row.style.alignItems = "center";
         row.style.justifyContent = "space-between";
-        row.style.gap = "10px";
-        row.style.padding = "8px 10px";
-        row.style.borderRadius = "8px";
+        row.style.gap = "12px";
+        row.style.padding = "8px 16px";
         row.style.cursor = "pointer";
         row.style.backgroundColor = isSelected
-          ? "rgba(16, 185, 129, 0.14)"
+          ? isLight
+            ? tokens.surface2
+            : tokens.surface1
           : "transparent";
-        row.style.border = isSelected
-          ? "1px solid rgba(16, 185, 129, 0.45)"
-          : "1px solid transparent";
+      }
+
+      // Paseo-native `ProjectIconView` leading square badge matching left sidebar
+      const visual = resolveSidebarProjectVisual(doc, win, {
+        projectId: item.projectId,
+        projectKey: item.projectKey,
+        projectName: item.projectName,
+      });
+
+      const iconBadge = doc.createElement("div");
+      iconBadge.setAttribute?.("data-testid", `paseo-finder-quick-jump-icon-${item.projectId}`);
+      if (iconBadge.style) {
+        iconBadge.style.width = "18px";
+        iconBadge.style.height = "18px";
+        iconBadge.style.borderRadius = "4.5px";
+        iconBadge.style.backgroundColor = visual.backgroundColor;
+        iconBadge.style.color = "#ffffff";
+        iconBadge.style.fontSize = "11px";
+        iconBadge.style.fontWeight = "600";
+        iconBadge.style.display = "inline-flex";
+        iconBadge.style.alignItems = "center";
+        iconBadge.style.justifyContent = "center";
+        iconBadge.style.flexShrink = "0";
+        iconBadge.style.overflow = "hidden";
+      }
+      if (visual.iconDataUri) {
+        const img = doc.createElement("img");
+        img.setAttribute?.("src", visual.iconDataUri);
+        if (img.style) {
+          img.style.width = "18px";
+          img.style.height = "18px";
+          img.style.objectFit = "cover";
+        }
+        iconBadge.appendChild?.(img);
+      } else {
+        iconBadge.textContent = visual.initial;
+      }
+
+      const mainWrap = doc.createElement("div");
+      if (mainWrap.style) {
+        mainWrap.style.display = "flex";
+        mainWrap.style.flexDirection = "row";
+        mainWrap.style.alignItems = "center";
+        mainWrap.style.gap = "12px";
+        mainWrap.style.minWidth = "0";
+        mainWrap.style.flex = "1";
       }
 
       const leftCol = doc.createElement("div");
@@ -2016,9 +2067,12 @@ export async function openQuickWorkspaceSwitcherModal(
       const nameEl = doc.createElement("span");
       nameEl.textContent = item.projectName;
       if (nameEl.style) {
-        nameEl.style.color = "#f9fafb";
-        nameEl.style.fontSize = "13px";
-        nameEl.style.fontWeight = "600";
+        nameEl.style.color = tokens.foreground;
+        nameEl.style.fontSize = "14px";
+        nameEl.style.fontWeight = "500";
+        nameEl.style.whiteSpace = "nowrap";
+        nameEl.style.overflow = "hidden";
+        nameEl.style.textOverflow = "ellipsis";
       }
 
       const threadsBadge = doc.createElement("span");
@@ -2029,15 +2083,16 @@ export async function openQuickWorkspaceSwitcherModal(
             ? catalog.actions.quickJumpSingleThreadBadge
             : `${item.activeWorkspaceCount} ${catalog.actions.quickJumpThreadsBadge}`;
       if (threadsBadge.style) {
-        threadsBadge.style.fontSize = "10.5px";
+        threadsBadge.style.fontSize = "11px";
         threadsBadge.style.color =
-          item.activeWorkspaceCount > 0 ? "#10b981" : "#9ca3af";
-        threadsBadge.style.backgroundColor =
           item.activeWorkspaceCount > 0
-            ? "rgba(16, 185, 129, 0.12)"
-            : "#1f2422";
-        threadsBadge.style.padding = "1px 6px";
+            ? tokens.foregroundMuted
+            : tokens.foregroundExtraMuted;
+        threadsBadge.style.backgroundColor = isSelected ? tokens.surface0 : tokens.surface2;
+        threadsBadge.style.border = `1px solid ${tokens.border}`;
+        threadsBadge.style.padding = "0px 6px";
         threadsBadge.style.borderRadius = "999px";
+        threadsBadge.style.flexShrink = "0";
       }
 
       topLine.appendChild?.(nameEl);
@@ -2049,8 +2104,8 @@ export async function openQuickWorkspaceSwitcherModal(
         : "";
       bottomLine.textContent = `${item.shortPath}${activeSub}`;
       if (bottomLine.style) {
-        bottomLine.style.color = "#9ca3af";
-        bottomLine.style.fontSize = "11px";
+        bottomLine.style.color = tokens.foregroundMuted;
+        bottomLine.style.fontSize = "12px";
         bottomLine.style.whiteSpace = "nowrap";
         bottomLine.style.overflow = "hidden";
         bottomLine.style.textOverflow = "ellipsis";
@@ -2058,6 +2113,8 @@ export async function openQuickWorkspaceSwitcherModal(
 
       leftCol.appendChild?.(topLine);
       leftCol.appendChild?.(bottomLine);
+      mainWrap.appendChild?.(iconBadge);
+      mainWrap.appendChild?.(leftCol);
 
       const actionsCol = doc.createElement("div");
       if (actionsCol.style) {
@@ -2081,15 +2138,25 @@ export async function openQuickWorkspaceSwitcherModal(
         );
         btn.textContent = label;
         if (btn.style) {
-          btn.style.fontSize = "11px";
-          btn.style.fontWeight = isPrimary ? "600" : "500";
-          btn.style.padding = "4px 7px";
+          btn.style.fontSize = "11.5px";
+          btn.style.fontWeight = isPrimary ? "500" : "400";
+          btn.style.padding = "3px 7px";
           btn.style.borderRadius = "6px";
           btn.style.cursor = "pointer";
           btn.style.userSelect = "none";
-          btn.style.backgroundColor = isPrimary ? "#10b981" : "#222725";
-          btn.style.color = isPrimary ? "#052e16" : "#d1d5db";
-          btn.style.border = isPrimary ? "1px solid #10b981" : "1px solid #2e3432";
+          if (isPrimary && isSelected) {
+            btn.style.backgroundColor = tokens.primary;
+            btn.style.color = tokens.primaryForeground;
+            btn.style.border = `1px solid ${tokens.primary}`;
+          } else if (isPrimary) {
+            btn.style.backgroundColor = tokens.surface2;
+            btn.style.color = tokens.foreground;
+            btn.style.border = `1px solid ${tokens.border}`;
+          } else {
+            btn.style.backgroundColor = isSelected ? tokens.surface0 : tokens.surface1;
+            btn.style.color = tokens.foregroundMuted;
+            btn.style.border = `1px solid ${tokens.border}`;
+          }
         }
         btn.addEventListener?.("click", (ev) => {
           const me = ev as MinimalMouseEvent;
@@ -2125,7 +2192,7 @@ export async function openQuickWorkspaceSwitcherModal(
         ),
       );
 
-      row.appendChild?.(leftCol);
+      row.appendChild?.(mainWrap);
       row.appendChild?.(actionsCol);
 
       row.addEventListener?.("mouseenter", () => {
@@ -2257,6 +2324,7 @@ export function installDesktopRevealHelpers(
     removeMenu();
     if (!doc.body) return;
 
+    const tokens = syncPaseoThemeCssVariables(doc, win);
     const catalog = getCatalogForLocale(resolveLocale());
     const container = doc.createElement("div");
     container.setAttribute?.("data-testid", "paseo-finder-quick-menu");
@@ -2269,17 +2337,17 @@ export function installDesktopRevealHelpers(
       container.style.left = `${maxX}px`;
       container.style.top = `${maxY}px`;
       container.style.zIndex = "2147483647";
-      container.style.backgroundColor = "#1b1f1e";
-      container.style.border = "1px solid #2e3432";
+      container.style.backgroundColor = tokens.surface0;
+      container.style.border = `1px solid ${tokens.border}`;
       container.style.borderRadius = "8px";
       container.style.padding = "4px";
-      container.style.boxShadow = "0 10px 24px rgba(0, 0, 0, 0.48)";
+      container.style.boxShadow = tokens.shadowLg;
       container.style.display = "flex";
       container.style.flexDirection = "column";
       container.style.gap = "2px";
       container.style.minWidth = "210px";
       container.style.fontFamily =
-        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+        'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
     }
 
     const actions: {
@@ -2322,7 +2390,7 @@ export function installDesktopRevealHelpers(
         const sep = doc.createElement("div");
         if (sep.style) {
           sep.style.height = "1px";
-          sep.style.backgroundColor = "#2e3432";
+          sep.style.backgroundColor = tokens.border;
           sep.style.margin = "3px 4px";
         }
         container.appendChild?.(sep);
@@ -2338,7 +2406,7 @@ export function installDesktopRevealHelpers(
         item.style.gap = "8px";
         item.style.fontSize = "13px";
         item.style.lineHeight = "18px";
-        item.style.color = "#e5e7eb";
+        item.style.color = tokens.foreground;
         item.style.padding = "6px 8px";
         item.style.borderRadius = "6px";
         item.style.cursor = "pointer";
@@ -2348,12 +2416,12 @@ export function installDesktopRevealHelpers(
       const iconWrap = doc.createElement("span");
       iconWrap.innerHTML = LUCIDE_SVGS[act.icon];
       if (iconWrap.style) {
-        iconWrap.style.display = " inline-flex";
+        iconWrap.style.display = "inline-flex";
         iconWrap.style.alignItems = "center";
         iconWrap.style.justifyContent = "center";
         iconWrap.style.width = "16px";
         iconWrap.style.height = "16px";
-        iconWrap.style.color = "#9ca3af";
+        iconWrap.style.color = tokens.foregroundMuted;
         iconWrap.style.flexShrink = "0";
       }
       item.appendChild?.(iconWrap);
@@ -2363,7 +2431,7 @@ export function installDesktopRevealHelpers(
       item.appendChild?.(labelSpan);
 
       item.addEventListener?.("mouseenter", () => {
-        if (item.style) item.style.backgroundColor = "rgba(255, 255, 255, 0.06)";
+        if (item.style) item.style.backgroundColor = tokens.surface2;
       });
       item.addEventListener?.("mouseleave", () => {
         if (item.style) item.style.backgroundColor = "transparent";
@@ -2390,6 +2458,7 @@ export function installDesktopRevealHelpers(
     removeMenu();
     if (!doc.body || !callbacks.onFetchThreadMetadata) return;
 
+    const tokens = syncPaseoThemeCssVariables(doc, win);
     const catalog = getCatalogForLocale(resolveLocale());
     const activeWsId = resolveCurrentActiveWorkspaceId(
       doc,
@@ -2411,16 +2480,16 @@ export function installDesktopRevealHelpers(
       container.style.top = "56px";
       container.style.width = "440px";
       container.style.zIndex = "2147483647";
-      container.style.backgroundColor = "#161918";
-      container.style.border = "1px solid #2e3432";
-      container.style.borderRadius = "10px";
+      container.style.backgroundColor = tokens.surface0;
+      container.style.border = `1px solid ${tokens.border}`;
+      container.style.borderRadius = "8px";
       container.style.padding = "12px";
-      container.style.boxShadow = "0 14px 32px rgba(0, 0, 0, 0.56)";
+      container.style.boxShadow = tokens.shadowLg;
       container.style.display = "flex";
       container.style.flexDirection = "column";
       container.style.gap = "10px";
       container.style.fontFamily =
-        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+        'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
     }
 
     const headerTitle = doc.createElement("div");
@@ -2428,7 +2497,7 @@ export function installDesktopRevealHelpers(
     if (headerTitle.style) {
       headerTitle.style.fontSize = "12px";
       headerTitle.style.fontWeight = "600";
-      headerTitle.style.color = "#e5e7eb";
+      headerTitle.style.color = tokens.foreground;
     }
     container.appendChild?.(headerTitle);
 
@@ -2446,11 +2515,11 @@ export function installDesktopRevealHelpers(
     titleInput.placeholder = catalog.browser.threadNamePlaceholder;
     if (titleInput.style) {
       titleInput.style.flex = "1";
-      titleInput.style.backgroundColor = "#0f1211";
-      titleInput.style.border = "1px solid #2e3432";
+      titleInput.style.backgroundColor = tokens.surface1;
+      titleInput.style.border = `1px solid ${tokens.border}`;
       titleInput.style.borderRadius = "6px";
       titleInput.style.padding = "6px 10px";
-      titleInput.style.color = "#f3f4f6";
+      titleInput.style.color = tokens.foreground;
       titleInput.style.fontSize = "13px";
       titleInput.style.outline = "none";
     }
@@ -2458,9 +2527,9 @@ export function installDesktopRevealHelpers(
     const saveBtn = doc.createElement("div");
     saveBtn.textContent = catalog.actions.saveTitle;
     if (saveBtn.style) {
-      saveBtn.style.backgroundColor = "#10b981";
-      saveBtn.style.color = "#052e16";
-      saveBtn.style.fontWeight = "600";
+      saveBtn.style.backgroundColor = tokens.primary;
+      saveBtn.style.color = tokens.primaryForeground;
+      saveBtn.style.fontWeight = "500";
       saveBtn.style.fontSize = "12px";
       saveBtn.style.padding = "6px 10px";
       saveBtn.style.borderRadius = "6px";
@@ -2529,9 +2598,9 @@ export function installDesktopRevealHelpers(
           chip.style.fontSize = "12px";
           chip.style.cursor = "pointer";
           chip.style.userSelect = "none";
-          chip.style.backgroundColor = isAssigned ? "rgba(16, 185, 129, 0.16)" : "#222725";
-          chip.style.border = isAssigned ? `1px solid ${dotColor}` : "1px solid #2e3432";
-          chip.style.color = "#f3f4f6";
+          chip.style.backgroundColor = isAssigned ? `${dotColor}1f` : tokens.surface2;
+          chip.style.border = isAssigned ? `1px solid ${dotColor}` : `1px solid ${tokens.border}`;
+          chip.style.color = tokens.foreground;
         }
         const dot = doc.createElement("span");
         if (dot.style) {
@@ -2580,11 +2649,11 @@ export function installDesktopRevealHelpers(
     labelInput.placeholder = catalog.browser.newLabelPlaceholder;
     if (labelInput.style) {
       labelInput.style.flex = "1";
-      labelInput.style.backgroundColor = "#0f1211";
-      labelInput.style.border = "1px solid #2e3432";
+      labelInput.style.backgroundColor = tokens.surface1;
+      labelInput.style.border = `1px solid ${tokens.border}`;
       labelInput.style.borderRadius = "6px";
       labelInput.style.padding = "5px 10px";
-      labelInput.style.color = "#f3f4f6";
+      labelInput.style.color = tokens.foreground;
       labelInput.style.fontSize = "12px";
       labelInput.style.outline = "none";
     }
@@ -2610,7 +2679,8 @@ export function installDesktopRevealHelpers(
           dotBtn.style.borderRadius = "999px";
           dotBtn.style.backgroundColor = LABEL_COLOR_HEX[c];
           dotBtn.style.cursor = "pointer";
-          dotBtn.style.border = selectedColor === c ? "2px solid #ffffff" : "1px solid transparent";
+          dotBtn.style.border =
+            selectedColor === c ? `2px solid ${tokens.foreground}` : "1px solid transparent";
         }
         dotBtn.addEventListener?.("click", (ev) => {
           const me = ev as MinimalMouseEvent;
@@ -2627,9 +2697,9 @@ export function installDesktopRevealHelpers(
     const addLabelBtn = doc.createElement("div");
     addLabelBtn.textContent = catalog.actions.addLabel;
     if (addLabelBtn.style) {
-      addLabelBtn.style.backgroundColor = "#222725";
-      addLabelBtn.style.border = "1px solid #2e3432";
-      addLabelBtn.style.color = "#e5e7eb";
+      addLabelBtn.style.backgroundColor = tokens.surface2;
+      addLabelBtn.style.border = `1px solid ${tokens.border}`;
+      addLabelBtn.style.color = tokens.foreground;
       addLabelBtn.style.fontSize = "12px";
       addLabelBtn.style.padding = "5px 8px";
       addLabelBtn.style.borderRadius = "6px";
@@ -2704,20 +2774,38 @@ export function installDesktopRevealHelpers(
     );
   };
 
+  let tabMenuRafId: number | null = null;
+  let observer: InstanceType<NonNullable<MinimalWindow["MutationObserver"]>> | null = null;
+
+  const runTabMenuInjectPass = () => {
+    const count = injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+    if (count > 0) {
+      observer?.takeRecords?.();
+    }
+  };
+
   const scheduleNativeTabMenuExtension = () => {
-    injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+    runTabMenuInjectPass();
     win.requestAnimationFrame?.(() => {
-      injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+      runTabMenuInjectPass();
     });
     setTimeout(() => {
-      injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+      runTabMenuInjectPass();
     }, 20);
   };
 
-  const observer =
+  observer =
     win.MutationObserver && doc.body
       ? new win.MutationObserver(() => {
-          injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+          if (win.requestAnimationFrame) {
+            if (tabMenuRafId !== null) return;
+            tabMenuRafId = win.requestAnimationFrame(() => {
+              tabMenuRafId = null;
+              runTabMenuInjectPass();
+            });
+          } else {
+            runTabMenuInjectPass();
+          }
         })
       : null;
 
@@ -3008,6 +3096,7 @@ export function installDesktopRevealHelpers(
       activeDropToastEl.remove?.();
       activeDropToastEl = null;
     }
+    const tokens = syncPaseoThemeCssVariables(doc, win);
     const toastEl = doc.createElement("div");
     toastEl.setAttribute?.("data-testid", "paseo-finder-folder-drop-toast");
     toastEl.textContent = text;
@@ -3019,15 +3108,15 @@ export function installDesktopRevealHelpers(
       toastEl.style.maxWidth = "420px";
       toastEl.style.padding = "8px 14px";
       toastEl.style.borderRadius = "8px";
-      toastEl.style.backgroundColor = isError ? "#2c1518" : "#13221c";
-      toastEl.style.border = isError ? "1px solid #ef4444" : "1px solid #10b981";
-      toastEl.style.color = "#f3f4f6";
+      toastEl.style.backgroundColor = tokens.surface0;
+      toastEl.style.border = `1px solid ${isError ? tokens.destructive : tokens.border}`;
+      toastEl.style.color = isError ? tokens.destructive : tokens.foreground;
       toastEl.style.fontSize = "12.5px";
       toastEl.style.fontWeight = "500";
-      toastEl.style.boxShadow = "0 10px 28px rgba(0, 0, 0, 0.45)";
+      toastEl.style.boxShadow = tokens.shadowLg;
       toastEl.style.pointerEvents = "none";
       toastEl.style.fontFamily =
-        "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
+        "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
     }
     doc.body.appendChild?.(toastEl);
     activeDropToastEl = toastEl;
@@ -3044,6 +3133,7 @@ export function installDesktopRevealHelpers(
     forceNew: boolean,
   ) => {
     if (!doc.body) return;
+    const tokens = syncPaseoThemeCssVariables(doc, win);
     const catalog = getCatalogForLocale(callbacks.getLocale?.() ?? win.navigator?.language);
     const container = findLeftSidebarContainer(doc, target);
     const rect = container?.getBoundingClientRect?.();
@@ -3057,10 +3147,8 @@ export function installDesktopRevealHelpers(
         ? Math.max(80, Math.round(rect.height) - 12)
         : Math.max(240, (win.innerHeight ?? 760) - 48);
 
-    const accentHex = forceNew ? "#f59e0b" : "#10b981";
-    const bgTint = forceNew
-      ? "rgba(245, 158, 11, 0.10)"
-      : "rgba(16, 185, 129, 0.10)";
+    const accentHex = forceNew ? tokens.statusWarning : tokens.accent;
+    const bgTint = forceNew ? tokens.statusWarningTint : tokens.statusSuccessTint;
     const titleText = forceNew
       ? catalog.actions.dropOverlayForceNewTitle
       : catalog.actions.dropOverlayTitle;
@@ -3075,23 +3163,23 @@ export function installDesktopRevealHelpers(
         overlay.style.position = "fixed";
         overlay.style.zIndex = "9998";
         overlay.style.pointerEvents = "none";
-        overlay.style.borderRadius = "12px";
+        overlay.style.borderRadius = "10px";
         overlay.style.display = "flex";
         overlay.style.flexDirection = "column";
         overlay.style.alignItems = "center";
         overlay.style.justifyContent = "center";
         overlay.style.padding = "16px";
         overlay.style.boxSizing = "border-box";
-        overlay.style.backdropFilter = "blur(3px)";
+        overlay.style.backdropFilter = "blur(2px)";
         overlay.style.fontFamily =
-          "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
+          "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
       }
 
       const card = doc.createElement("div");
       if (card.style) {
-        card.style.backgroundColor = "rgba(17, 20, 19, 0.94)";
-        card.style.border = `1px solid ${accentHex}`;
-        card.style.borderRadius = "10px";
+        card.style.backgroundColor = tokens.surface0;
+        card.style.border = `1px solid ${tokens.border}`;
+        card.style.borderRadius = "8px";
         card.style.padding = "12px 14px";
         card.style.display = "flex";
         card.style.flexDirection = "column";
@@ -3099,7 +3187,7 @@ export function installDesktopRevealHelpers(
         card.style.gap = "6px";
         card.style.textAlign = "center";
         card.style.maxWidth = "230px";
-        card.style.boxShadow = "0 12px 30px rgba(0, 0, 0, 0.45)";
+        card.style.boxShadow = tokens.shadowLg;
       }
 
       const iconWrap = doc.createElement("div");
@@ -3114,7 +3202,7 @@ export function installDesktopRevealHelpers(
       const titleNode = doc.createElement("div");
       titleNode.setAttribute?.("data-role", "drop-title");
       if (titleNode.style) {
-        titleNode.style.color = "#f9fafb";
+        titleNode.style.color = tokens.foreground;
         titleNode.style.fontSize = "12.5px";
         titleNode.style.fontWeight = "600";
         titleNode.style.lineHeight = "1.35";
@@ -3123,7 +3211,7 @@ export function installDesktopRevealHelpers(
       const hintNode = doc.createElement("div");
       hintNode.setAttribute?.("data-role", "drop-hint");
       if (hintNode.style) {
-        hintNode.style.color = "#9ca3af";
+        hintNode.style.color = tokens.foregroundMuted;
         hintNode.style.fontSize = "11px";
         hintNode.style.lineHeight = "1.35";
       }
@@ -3257,6 +3345,10 @@ export function installDesktopRevealHelpers(
     hideSidebarDropOverlay();
     if (activeDropToastTimer) clearTimeout(activeDropToastTimer);
     activeDropToastEl?.remove?.();
+    if (tabMenuRafId !== null) {
+      win.cancelAnimationFrame?.(tabMenuRafId);
+      tabMenuRafId = null;
+    }
     observer?.disconnect();
     doc.removeEventListener("pointerdown", onPointerDownCapture, true);
     doc.removeEventListener("mousedown", onPointerDownCapture, true);
