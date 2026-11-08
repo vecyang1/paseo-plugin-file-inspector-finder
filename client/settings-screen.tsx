@@ -23,9 +23,11 @@ import { Pressable, Text, View } from "react-native";
 import {
   type OpenerTarget,
   type QuickJumpAction,
+  VOICE_STT_PRESETS,
   diagnosePathRpc,
   importFolderWorkspaceRpc,
   inspectScheduleRunsRpc,
+  manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   openScheduleRunSessionRpc,
@@ -38,6 +40,7 @@ import {
   navigateToPaseoWorkspace,
   triggerScheduleRunsDrawer,
 } from "./schedule-runs-web";
+import { syncVoiceCustomModelPreferences } from "./voice-stt-web";
 import {
   focusWorkspaceInApp,
   locateProjectInSidebar,
@@ -61,6 +64,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const quickJump = useRpc(quickJumpWorkspaceRpc);
   const inspectScheduleRuns = useRpc(inspectScheduleRunsRpc);
   const openScheduleRunSession = useRpc(openScheduleRunSessionRpc);
+  const manageVoiceStt = useRpc(manageVoiceSttRpc);
   const isZh = isChineseLocale(
     typeof navigator !== "undefined" ? navigator.language : undefined,
   );
@@ -70,10 +74,15 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   );
   const [folderTestInput, setFolderTestInput] = useState("~/Documents");
   const [renameDiagInput, setRenameDiagInput] = useState("");
-  const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("guan");
+  const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
   const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
   const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
     Awaited<ReturnType<typeof inspectScheduleRuns>> | null
+  >(null);
+  const [voiceModelInput, setVoiceModelInput] = useState("FunAudioLLM/SenseVoiceSmall");
+  const [voiceBaseUrlInput, setVoiceBaseUrlInput] = useState("http://127.0.0.1:8787/v1");
+  const [voiceSnapData, setVoiceSnapData] = useState<
+    Awaited<ReturnType<typeof manageVoiceStt>> | null
   >(null);
 
   useEffect(() => {
@@ -93,8 +102,19 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         enableCommandCenterProjectItems: settings.values.enableCommandCenterProjectItems,
         quickJumpDefaultAction: settings.values.quickJumpDefaultAction,
       });
+      syncVoiceCustomModelPreferences(settings.values.enableVoiceCustomModelHelper);
     }
   }, [settings]);
+
+  useEffect(() => {
+    void manageVoiceStt({ action: "inspect", source: "settings-ui" })
+      .then((res) => {
+        setVoiceSnapData(res);
+        if (res.dictationStt.model) setVoiceModelInput(res.dictationStt.model);
+        if (res.dictationStt.baseUrl) setVoiceBaseUrlInput(res.dictationStt.baseUrl);
+      })
+      .catch(() => {});
+  }, [manageVoiceStt]);
 
   const resolveActiveWsId = (): string | undefined => {
     const g = globalThis as { document?: unknown; window?: unknown };
@@ -493,6 +513,16 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 quickJumpDefaultAction: next,
               });
               void save({ ...values, quickJumpDefaultAction: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.voiceHelperEnabledLabel")}
+            hint={t("settings.voiceHelperEnabledHint")}
+            value={values.enableVoiceCustomModelHelper}
+            onValueChange={(next) => {
+              syncVoiceCustomModelPreferences(next);
+              void save({ ...values, enableVoiceCustomModelHelper: next }, revision);
             }}
           />
 
@@ -969,8 +999,196 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         </View>
       </SettingsSection>
 
+      <SettingsSection title={t("settings.sectionVoiceSttDiag")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>{t("settings.voiceSttDiagPrompt")}</Text>
+
+          <View style={styles.row}>
+            {VOICE_STT_PRESETS.map((preset) => {
+              const isSelected =
+                voiceSnapData?.dictationStt.model.toLowerCase() ===
+                preset.model.toLowerCase();
+              return (
+                <Pressable
+                  key={preset.id}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setVoiceModelInput(preset.model);
+                    setVoiceBaseUrlInput(preset.baseUrl);
+                    void manageVoiceStt({
+                      action: "apply",
+                      presetId: preset.id,
+                      model: preset.model,
+                      source: "settings-ui",
+                    }).then((res) => {
+                      setVoiceSnapData(res);
+                      setVoiceModelInput(res.dictationStt.model);
+                      if (res.dictationStt.baseUrl) {
+                        setVoiceBaseUrlInput(res.dictationStt.baseUrl);
+                      }
+                      if (res.ok) {
+                        toast.show(res.message, { variant: "success" });
+                      } else {
+                        toast.error(res.message);
+                      }
+                    });
+                  }}
+                  style={isSelected ? styles.btn : styles.secondaryBtn}
+                >
+                  <Text style={isSelected ? styles.btnText : styles.secondaryBtnText}>
+                    {isZh ? preset.labelZh : preset.label} ({preset.badge})
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.row}>
+            <TextInput
+              value={voiceModelInput}
+              onChangeText={setVoiceModelInput}
+              placeholder={t("settings.voiceSttModelPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <TextInput
+              value={voiceBaseUrlInput}
+              onChangeText={setVoiceBaseUrlInput}
+              placeholder={t("settings.voiceSttBaseUrlPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+          </View>
+
+          <View style={styles.row}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageVoiceStt({
+                  action: "inspect",
+                  source: "settings-ui",
+                }).then((res) => {
+                  setVoiceSnapData(res);
+                  setVoiceModelInput(res.dictationStt.model);
+                  if (res.dictationStt.baseUrl) {
+                    setVoiceBaseUrlInput(res.dictationStt.baseUrl);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.voiceSttInspectBtn")}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const m = voiceModelInput.trim();
+                if (!m) return;
+                void manageVoiceStt({
+                  action: "apply",
+                  model: m,
+                  baseUrl: voiceBaseUrlInput.trim() || undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setVoiceSnapData(res);
+                  setVoiceModelInput(res.dictationStt.model);
+                  if (res.dictationStt.baseUrl) {
+                    setVoiceBaseUrlInput(res.dictationStt.baseUrl);
+                  }
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>{t("settings.voiceSttApplyBtn")}</Text>
+            </Pressable>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageVoiceStt({
+                  action: "test",
+                  model: voiceModelInput.trim() || undefined,
+                  baseUrl: voiceBaseUrlInput.trim() || undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setVoiceSnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.voiceSttTestBtn")}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageVoiceStt({
+                  action: "reset",
+                  source: "settings-ui",
+                }).then((res) => {
+                  setVoiceSnapData(res);
+                  setVoiceModelInput(res.dictationStt.model);
+                  setVoiceBaseUrlInput(res.dictationStt.baseUrl);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.voiceSttResetBtn")}
+              </Text>
+            </Pressable>
+          </View>
+
+          {voiceSnapData ? (
+            <View style={{ gap: 5, marginTop: 6 }}>
+              <Text style={styles.label}>
+                • Dictation STT: {voiceSnapData.dictationStt.provider} ·{" "}
+                {voiceSnapData.dictationStt.model} ({voiceSnapData.dictationStt.sourceBadge})
+              </Text>
+              <Text style={styles.detail}>
+                • Base URL: {voiceSnapData.dictationStt.baseUrl || "local"} · API Key:{" "}
+                {voiceSnapData.dictationStt.apiKeyPreview || "none"} · Audio Pool Gateway (:8787):{" "}
+                {voiceSnapData.gateway.reachable
+                  ? `ONLINE (${voiceSnapData.gateway.healthyKeys}/${voiceSnapData.gateway.totalKeys} Gemini keys · SiliconFlow=${voiceSnapData.gateway.siliconflowConfigured})`
+                  : "OFFLINE"}
+              </Text>
+              {voiceSnapData.testResult ? (
+                <Text style={styles.label}>
+                  • {voiceSnapData.testResult.ok ? "✓" : "✕"} [{voiceSnapData.testResult.provider} ·{" "}
+                  {voiceSnapData.testResult.model}] {voiceSnapData.testResult.latencyMs}ms —{" "}
+                  {voiceSnapData.testResult.ok
+                    ? `"${voiceSnapData.testResult.transcript}"`
+                    : voiceSnapData.testResult.error}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
       <SettingsSection title={t("settings.sectionContract")}>
         <SettingsCard>
+          <SettingsRow
+            label={t("settings.contractVoiceSttLabel")}
+            hint={t("settings.contractVoiceSttHint")}
+          />
           <SettingsRow
             label={t("settings.contractQuickJumpLabel")}
             hint={t("settings.contractQuickJumpHint")}

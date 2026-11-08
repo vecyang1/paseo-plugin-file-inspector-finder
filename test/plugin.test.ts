@@ -1386,23 +1386,26 @@ test("15. Daemon bridge URL & bundled CJS worker module resolution (regression f
 });
 
 test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, and jump modes (open-latest, locate-sidebar, create-new)", async () => {
-  assert.equal(stripLeadingDatePrefix("2026-11-07 Guan Tian Hao"), "Guan Tian Hao");
+  assert.equal(
+    stripLeadingDatePrefix("2026-11-08 Design System Studio"),
+    "Design System Studio",
+  );
   assert.equal(stripLeadingDatePrefix("26.09.08-antigravity-webhook-hub"), "antigravity-webhook-hub");
   assert.ok(quickJumpWorkspaceRpc.name === "finder.quick_jump_projects");
 
-  const guanKeywords = extractProjectSearchKeywords(
-    "2026-11-07 Guan Tian Hao",
-    "/Users/dev/Cowork/2026-11-07 Guan Tian Hao",
+  const dssKeywords = extractProjectSearchKeywords(
+    "2026-11-08 Design System Studio",
+    "/Users/dev/Cowork/2026-11-08 Design System Studio",
   );
-  assert.ok(guanKeywords.includes("guan tian hao"));
-  assert.ok(guanKeywords.includes("guan"));
-  assert.ok(guanKeywords.includes("gth"), "Must generate initialism/acronym gth");
+  assert.ok(dssKeywords.includes("design system studio"));
+  assert.ok(dssKeywords.includes("design"));
+  assert.ok(dssKeywords.includes("dss"), "Must generate initialism/acronym dss");
 
-  const guanCandidate = {
-    projectName: "2026-11-07 Guan Tian Hao",
-    projectRootPath: "/Users/dev/Cowork/2026-11-07 Guan Tian Hao",
-    shortPath: "~/Cowork/2026-11-07 Guan Tian Hao",
-    primaryWorkspaceTitle: "Guan Thread 9",
+  const dssCandidate = {
+    projectName: "2026-11-08 Design System Studio",
+    projectRootPath: "/Users/dev/Cowork/2026-11-08 Design System Studio",
+    shortPath: "~/Cowork/2026-11-08 Design System Studio",
+    primaryWorkspaceTitle: "Design Thread 9",
   };
   const metaCandidate = {
     projectName: "2026-11-08 Meta harness",
@@ -1411,16 +1414,16 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
     primaryWorkspaceTitle: "Paseo Plugin Dev",
   };
 
-  assert.ok(scoreProjectJumpQuery(guanCandidate, "guan") >= 850);
-  assert.ok(scoreProjectJumpQuery(guanCandidate, "gth") >= 700);
-  assert.equal(scoreProjectJumpQuery(metaCandidate, "guan"), 0);
+  assert.ok(scoreProjectJumpQuery(dssCandidate, "design") >= 850);
+  assert.ok(scoreProjectJumpQuery(dssCandidate, "dss") >= 700);
+  assert.equal(scoreProjectJumpQuery(metaCandidate, "design"), 0);
 
   let createdCount = 0;
   const tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-quick-jump-"));
-  const guanDir = path.join(tmpBase, "2026-11-07 Guan Tian Hao");
+  const dssDir = path.join(tmpBase, "2026-11-08 Design System Studio");
   const metaDir = path.join(tmpBase, "2026-11-08 Meta harness");
-  const emptyDir = path.join(tmpBase, "opencli-plugin-goofish");
-  await fs.mkdir(guanDir, { recursive: true });
+  const emptyDir = path.join(tmpBase, "opencli-plugin-demo");
+  await fs.mkdir(dssDir, { recursive: true });
   await fs.mkdir(metaDir, { recursive: true });
   await fs.mkdir(emptyDir, { recursive: true });
 
@@ -1431,10 +1434,10 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
           list: async () => ({
             projects: [
               {
-                projectId: "prj_guan",
-                projectKey: "key_guan",
-                projectDisplayName: "2026-11-07 Guan Tian Hao",
-                projectRootPath: guanDir,
+                projectId: "prj_dss",
+                projectKey: "key_dss",
+                projectDisplayName: "2026-11-08 Design System Studio",
+                projectRootPath: dssDir,
                 projectKind: "directory" as const,
               },
               {
@@ -1447,7 +1450,7 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
               {
                 projectId: "prj_empty",
                 projectKey: "key_empty",
-                projectDisplayName: "opencli-plugin-goofish",
+                projectDisplayName: "opencli-plugin-demo",
                 projectRootPath: emptyDir,
                 projectKind: "git" as const,
               },
@@ -1457,32 +1460,32 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
         workspaces: {
           list: async () => ({
             entries: [
-              // 3 sub-threads under Guan Tian Hao -> must deduplicate into 1 Project candidate!
+              // 3 sub-threads under Design System Studio -> must deduplicate into 1 Project candidate!
               {
-                id: "wks_guan_1",
-                name: "2026-11-07 Guan Tian Hao",
+                id: "wks_dss_1",
+                name: "2026-11-08 Design System Studio",
                 title: "Old Thread 1",
-                projectId: "prj_guan",
-                projectKey: "key_guan",
-                workspaceDirectory: guanDir,
+                projectId: "prj_dss",
+                projectKey: "key_dss",
+                workspaceDirectory: dssDir,
                 updatedAt: "2026-11-07T10:00:00.000Z",
               },
               {
-                id: "wks_guan_2",
-                name: "2026-11-07 Guan Tian Hao",
-                title: "Latest Guan Thread",
-                projectId: "prj_guan",
-                projectKey: "key_guan",
-                workspaceDirectory: guanDir,
+                id: "wks_dss_2",
+                name: "2026-11-08 Design System Studio",
+                title: "Latest Design Thread",
+                projectId: "prj_dss",
+                projectKey: "key_dss",
+                workspaceDirectory: dssDir,
                 updatedAt: "2026-11-08T09:00:00.000Z",
               },
               {
-                id: "wks_guan_3",
-                name: "2026-11-07 Guan Tian Hao",
+                id: "wks_dss_3",
+                name: "2026-11-08 Design System Studio",
                 title: "Sub Thread 3",
-                projectId: "prj_guan",
-                projectKey: "key_guan",
-                workspaceDirectory: guanDir,
+                projectId: "prj_dss",
+                projectKey: "key_dss",
+                workspaceDirectory: dssDir,
                 updatedAt: "2026-11-07T15:00:00.000Z",
               },
               {
@@ -1507,7 +1510,7 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
             return {
               id: `wks_created_${createdCount}`,
               name: opts.title ?? path.basename(opts.source.path),
-              projectId: "prj_guan",
+              projectId: "prj_dss",
               directory: opts.source.path,
             };
           },
@@ -1523,40 +1526,40 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
     assert.equal(listAll.emptyProjects, 1);
     assert.equal(listAll.candidates.length, 3);
 
-    // 2) Query "guan" -> returns only 1 deduplicated Guan Tian Hao project candidate pointing at latest workspace wks_guan_2
-    const jumpGuan = await handleQuickJumpWorkspace(
-      { action: "jump", query: "guan", jumpMode: "open-latest" },
+    // 2) Query "design" -> returns only 1 deduplicated Design System Studio project candidate pointing at latest workspace wks_dss_2
+    const jumpDss = await handleQuickJumpWorkspace(
+      { action: "jump", query: "design", jumpMode: "open-latest" },
       mockCtx,
     );
-    assert.equal(jumpGuan.ok, true);
-    assert.equal(jumpGuan.candidates.length, 1);
-    assert.equal(jumpGuan.targetProjectId, "prj_guan");
-    assert.equal(jumpGuan.targetWorkspaceId, "wks_guan_2");
-    assert.equal(jumpGuan.selectedCandidate?.activeWorkspaceCount, 3);
+    assert.equal(jumpDss.ok, true);
+    assert.equal(jumpDss.candidates.length, 1);
+    assert.equal(jumpDss.targetProjectId, "prj_dss");
+    assert.equal(jumpDss.targetWorkspaceId, "wks_dss_2");
+    assert.equal(jumpDss.selectedCandidate?.activeWorkspaceCount, 3);
 
     // 3) Locate-sidebar mode -> does not open/create a thread, returns targetProjectId & targetProjectKey
-    const locateGuan = await handleQuickJumpWorkspace(
-      { action: "jump", query: "gth", jumpMode: "locate-sidebar" },
+    const locateDss = await handleQuickJumpWorkspace(
+      { action: "jump", query: "dss", jumpMode: "locate-sidebar" },
       mockCtx,
     );
-    assert.equal(locateGuan.ok, true);
-    assert.equal(locateGuan.jumpMode, "locate-sidebar");
-    assert.equal(locateGuan.targetProjectId, "prj_guan");
-    assert.equal(locateGuan.targetProjectKey, "key_guan");
-    assert.equal(locateGuan.targetWorkspaceId, null);
+    assert.equal(locateDss.ok, true);
+    assert.equal(locateDss.jumpMode, "locate-sidebar");
+    assert.equal(locateDss.targetProjectId, "prj_dss");
+    assert.equal(locateDss.targetProjectKey, "key_dss");
+    assert.equal(locateDss.targetWorkspaceId, null);
 
-    // 4) Create-new mode -> creates a fresh workspace thread inside Guan Tian Hao
-    const createNewGuan = await handleQuickJumpWorkspace(
-      { action: "jump", projectId: "prj_guan", jumpMode: "create-new" },
+    // 4) Create-new mode -> creates a fresh workspace thread inside Design System Studio
+    const createNewDss = await handleQuickJumpWorkspace(
+      { action: "jump", projectId: "prj_dss", jumpMode: "create-new" },
       mockCtx,
     );
-    assert.equal(createNewGuan.ok, true);
-    assert.equal(createNewGuan.createdWorkspace, true);
-    assert.equal(createNewGuan.targetWorkspaceId, "wks_created_1");
+    assert.equal(createNewDss.ok, true);
+    assert.equal(createNewDss.createdWorkspace, true);
+    assert.equal(createNewDss.targetWorkspaceId, "wks_created_1");
 
-    // 5) Jumping to a zero-thread project ("goofish") opens/initializes a clean workspace for it automatically!
+    // 5) Jumping to a zero-thread project ("demo") opens/initializes a clean workspace for it automatically!
     const jumpEmpty = await handleQuickJumpWorkspace(
-      { action: "jump", query: "goofish", jumpMode: "open-latest" },
+      { action: "jump", query: "demo", jumpMode: "open-latest" },
       mockCtx,
     );
     assert.equal(jumpEmpty.ok, true);
@@ -1571,20 +1574,20 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
   let projectRowClicked = false;
   let projectRowScrolled = false;
 
-  const guanProjectRow = createInteractiveDomNode(
+  const dssProjectRow = createInteractiveDomNode(
     "div",
-    { "data-testid": "sidebar-project-row-local:key_guan" },
-    "2026-11-07 Guan Tian Hao",
+    { "data-testid": "sidebar-project-row-local:key_dss" },
+    "2026-11-08 Design System Studio",
   );
-  guanProjectRow.click = () => {
+  dssProjectRow.click = () => {
     projectRowClicked = true;
   };
-  guanProjectRow.scrollIntoView = () => {
+  dssProjectRow.scrollIntoView = () => {
     projectRowScrolled = true;
   };
 
   const body = createInteractiveDomNode("div", { "data-testid": "body" });
-  body.appendChild?.(guanProjectRow);
+  body.appendChild?.(dssProjectRow);
 
   const mockDoc: MinimalDocument = {
     body,
@@ -1607,9 +1610,9 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
   // 1) locateProjectInSidebar clicks collapsed project row to expand it, scrolls into view, and applies flash attribute
   const located = locateProjectInSidebar(
     {
-      projectId: "prj_guan",
-      projectKey: "key_guan",
-      projectName: "2026-11-07 Guan Tian Hao",
+      projectId: "prj_dss",
+      projectKey: "key_dss",
+      projectName: "2026-11-08 Design System Studio",
       expandIfCollapsed: true,
       highlightFlash: true,
     },
@@ -1619,7 +1622,7 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
   assert.equal(located, true);
   assert.equal(projectRowClicked, true);
   assert.equal(projectRowScrolled, true);
-  assert.equal(guanProjectRow.getAttribute?.("data-paseo-project-jump-flash"), "true");
+  assert.equal(dssProjectRow.getAttribute?.("data-paseo-project-jump-flash"), "true");
 
   // 2) openQuickWorkspaceSwitcherModal mounts modal, filters candidates on input, and triggers jump on Enter / Shift+Enter
   const executedJumps: Array<{ projectId?: string; jumpMode?: string }> = [];
@@ -1629,15 +1632,15 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
       defaultJumpMode: "open-latest",
       onListJumpProjects: async () => [
         {
-          projectId: "prj_guan",
-          projectKey: "key_guan",
-          projectName: "2026-11-07 Guan Tian Hao",
-          projectRootPath: "/Users/dev/Cowork/2026-11-07 Guan Tian Hao",
-          shortPath: "~/Cowork/2026-11-07 Guan Tian Hao",
+          projectId: "prj_dss",
+          projectKey: "key_dss",
+          projectName: "2026-11-08 Design System Studio",
+          projectRootPath: "/Users/dev/Cowork/2026-11-08 Design System Studio",
+          shortPath: "~/Cowork/2026-11-08 Design System Studio",
           projectKind: "directory",
           activeWorkspaceCount: 10,
-          primaryWorkspaceId: "wks_guan_latest",
-          primaryWorkspaceTitle: "Guan Main",
+          primaryWorkspaceId: "wks_dss_latest",
+          primaryWorkspaceTitle: "Design Main",
           hasRunningAgent: false,
           lastActivityIso: "2026-11-08T10:00:00.000Z",
           lastActivityRelative: "2m ago",
@@ -1664,11 +1667,11 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
         return {
           ok: true,
           jumpMode: input.jumpMode ?? "open-latest",
-          targetWorkspaceId: "wks_guan_latest",
-          targetProjectId: "prj_guan",
-          targetProjectKey: "key_guan",
-          targetProjectName: "2026-11-07 Guan Tian Hao",
-          message: "Switched to 2026-11-07 Guan Tian Hao",
+          targetWorkspaceId: "wks_dss_latest",
+          targetProjectId: "prj_dss",
+          targetProjectKey: "key_dss",
+          targetProjectName: "2026-11-08 Design System Studio",
+          message: "Switched to 2026-11-08 Design System Studio",
         };
       },
     },
@@ -1682,12 +1685,12 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
   ) as ReturnType<typeof createInteractiveDomNode> | null;
   assert.ok(searchInput, "Quick jump search input must exist");
 
-  // Filter by typing "guan"
-  searchInput.value = "guan";
+  // Filter by typing "design"
+  searchInput.value = "design";
   searchInput.dispatch("input", {});
   assert.ok(
-    body.querySelector?.('[data-testid="paseo-finder-quick-jump-item-prj_guan"]'),
-    "Guan project item should remain visible",
+    body.querySelector?.('[data-testid="paseo-finder-quick-jump-item-prj_dss"]'),
+    "Design project item should remain visible",
   );
   assert.equal(
     body.querySelector?.('[data-testid="paseo-finder-quick-jump-item-prj_meta"]'),
@@ -1699,7 +1702,7 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
   searchInput.dispatch("keydown", { key: "Enter", shiftKey: true });
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(executedJumps, [
-    { projectId: "prj_guan", jumpMode: "locate-sidebar" },
+    { projectId: "prj_dss", jumpMode: "locate-sidebar" },
   ]);
   assert.equal(
     body.querySelector?.('[data-testid="paseo-finder-quick-jump-modal"]'),

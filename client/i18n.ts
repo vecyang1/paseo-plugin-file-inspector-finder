@@ -30,6 +30,10 @@ export const enMessages = {
     jumpSlashDescription:
       "Fast jump directly to a project workspace without sub-thread clutter (or leave empty for switcher)",
     jumpSlashHint: "[project name or keyword, or empty to open Cmd+J switcher]",
+    configureVoiceStt: "Voice: Configure Custom STT Model (SiliconFlow Free / OpenWhispr / Gemini Pool)",
+    voiceSlashDescription:
+      "Switch Paseo Speech-to-text model (e.g. sensevoice, qwen, telespeech, gemini, or custom model ID) or run live probe",
+    voiceSlashHint: "[sensevoice | qwen | telespeech | gemini | test | reset | <custom-model-id>]",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -190,7 +194,7 @@ export const enMessages = {
     sectionQuickJumpDiag: "Project Workspace Quick Jump Reconciler (Cmd+J / Cmd+K)",
     quickJumpDiagPrompt:
       "Search project workspaces without sub-thread noise, preview ranking scores, or test jumping and sidebar auto-scroll:",
-    quickJumpDiagPlaceholder: "e.g. guan, meta, webhook, or acronym like gth...",
+    quickJumpDiagPlaceholder: "e.g. design, meta, webhook, or acronym like dss...",
     quickJumpPreviewBtn: "Preview rank",
     quickJumpTestBtn: "Jump now",
     quickJumpLocateBtn: "Sidebar only",
@@ -198,7 +202,25 @@ export const enMessages = {
     quickJumpSummaryPrefix: "Indexed projects:",
     quickJumpActiveThreadsPrefix: "Active threads:",
     quickJumpEmptyProjectsPrefix: "Zero-thread projects:",
+    voiceHelperEnabledLabel: "Extend Settings -> Voice with SiliconFlow & Custom STT Models",
+    voiceHelperEnabledHint:
+      "Inject 1-click SiliconFlow free ASR presets (SenseVoiceSmall, TeleSpeechASR), OpenWhispr Qwen3-ASR-1.7B, Gemini 6-Key Pool, and custom model input into Settings -> Voice",
+    sectionVoiceSttDiag: "Voice & Custom STT Model Reconciler (SiliconFlow / OpenWhispr / Audio Pool :8787)",
+    voiceSttDiagPrompt:
+      "Inspect Paseo's active Speech-to-text configuration, switch to SiliconFlow free/SOTA models or any custom model ID, or run a live audio transcription probe:",
+    voiceSttModelPlaceholder:
+      "Custom STT Model ID (e.g. FunAudioLLM/SenseVoiceSmall or Qwen/Qwen3-ASR-1.7B)...",
+    voiceSttBaseUrlPlaceholder:
+      "STT Base URL (default http://127.0.0.1:8787/v1 or https://api.siliconflow.cn/v1)...",
+    voiceSttInspectBtn: "Inspect STT",
+    voiceSttApplyBtn: "Apply Model",
+    voiceSttTestBtn: "Test Live Audio",
+    voiceSttResetBtn: "Reset Default",
     sectionContract: "Active Surface Summary",
+    contractVoiceSttLabel:
+      "Custom Voice & SiliconFlow STT Models (Settings -> Voice, /voice & Audio Pool :8787)",
+    contractVoiceSttHint:
+      "Unlock FunAudioLLM/SenseVoiceSmall (Free), TeleAI/TeleSpeechASR (Free), Qwen/Qwen3-ASR-1.7B (OpenWhispr SOTA), Gemini 6-Key Pool, or any custom STT model ID with live transcription probe",
     contractQuickJumpLabel:
       "Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O, Top of Cmd+K & /jump)",
     contractQuickJumpHint:
@@ -259,6 +281,10 @@ export const zhMessages: PluginMessageCatalog = {
     openFolderSlashHint: "<文件夹路径>（已存在则直接切换，不存在则自动创建）",
     jumpSlashDescription: "直接搜索并跳转到目标项目工作区（过滤子会话干扰，留空打开切换面板）",
     jumpSlashHint: "[项目名称或缩写关键词，留空打开 Cmd+J 切换面板]",
+    configureVoiceStt: "语音：切换硅基流动免费/OpenWhispr 自定义语音识别模型",
+    voiceSlashDescription:
+      "一键切换 Paseo 语音转文字模型（如 sensevoice、qwen、telespeech、gemini 或任意自定义模型 ID）或实测转录",
+    voiceSlashHint: "[sensevoice | qwen | telespeech | gemini | test | reset | <自定义模型ID>]",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
@@ -415,7 +441,7 @@ export const zhMessages: PluginMessageCatalog = {
     sectionQuickJumpDiag: "项目工作区快速跳转与排序对账器 (Cmd+J / Cmd+K)",
     quickJumpDiagPrompt:
       "输入任意项目名称、日期后关键词或首字母缩写，实时核验去重排序得分或一键测试跳转与边栏定位：",
-    quickJumpDiagPlaceholder: "例如：guan、meta、webhook 或缩写 gth...",
+    quickJumpDiagPlaceholder: "例如：design、meta、webhook 或缩写 dss...",
     quickJumpPreviewBtn: "预检排序",
     quickJumpTestBtn: "立即跳转",
     quickJumpLocateBtn: "仅定位边栏",
@@ -423,7 +449,25 @@ export const zhMessages: PluginMessageCatalog = {
     quickJumpSummaryPrefix: "已索引项目数：",
     quickJumpActiveThreadsPrefix: "活跃子会话数：",
     quickJumpEmptyProjectsPrefix: "零会话空项目：",
+    voiceHelperEnabledLabel: "在「设置 -> 语音」中启用硅基流动免费与自定义语音模型面板",
+    voiceHelperEnabledHint:
+      "在 Paseo 原生语音设置弹窗中直接注入 SenseVoiceSmall（免费）、TeleSpeechASR（免费）、OpenWhispr 同款 Qwen3-ASR-1.7B、Gemini 6-Key 轮询池与任意自定义模型输入框",
+    sectionVoiceSttDiag: "自定义语音识别 (STT) 模型对账与调优器 (SiliconFlow / OpenWhispr / :8787)",
+    voiceSttDiagPrompt:
+      "实时读取 Paseo 当前生效的语音转文字配置，一键切换硅基流动免费/高精模型或任意自定义模型 ID，并发送真实音频执行端到端转录验收：",
+    voiceSttModelPlaceholder:
+      "输入任意自定义模型 ID（如 FunAudioLLM/SenseVoiceSmall 或 Qwen/Qwen3-ASR-1.7B）...",
+    voiceSttBaseUrlPlaceholder:
+      "语音接口 Base URL（默认 http://127.0.0.1:8787/v1 或 https://api.siliconflow.cn/v1）...",
+    voiceSttInspectBtn: "读取当前配置",
+    voiceSttApplyBtn: "应用模型",
+    voiceSttTestBtn: "实测音频转录",
+    voiceSttResetBtn: "恢复默认",
     sectionContract: "已启用能力概览",
+    contractVoiceSttLabel:
+      "硅基流动免费与自定义语音模型扩展（设置 -> 语音、/voice 与 :8787 语音池网关）",
+    contractVoiceSttHint:
+      "支持一键切换 FunAudioLLM/SenseVoiceSmall（免费）、TeleAI/TeleSpeechASR（免费）、Qwen/Qwen3-ASR-1.7B（OpenWhispr 同款）、Gemini 6-Key 轮询池或任意自定义模型，并提供端到端音频转录实测",
     contractQuickJumpLabel: "项目工作区快速直达切换 (Cmd+J / Cmd+Shift+O、Cmd+K 置顶与 /jump)",
     contractQuickJumpHint:
       "按 Cmd+J 或 Cmd+Shift+O（或在 Cmd+K 搜索 / 输入 /jump <项目名>），按项目去重直达目标工作区并自动滚动展开左侧边栏",
