@@ -21,6 +21,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
+  type InlineRenameCaretPosition,
   type OpenerTarget,
   type QuickJumpAction,
   VOICE_STT_PRESETS,
@@ -50,8 +51,11 @@ import {
 } from "./schedule-runs-web";
 import { syncVoiceCustomModelPreferences } from "./voice-stt-web";
 import {
+  applyInlineInputCaret,
+  findF2InlineRenameTarget,
   focusWorkspaceInApp,
   locateProjectInSidebar,
+  mountInlineTitleInput,
   openQuickWorkspaceSwitcherModal,
   resolveCurrentActiveWorkspaceId,
   revealWorkspaceInSidebar,
@@ -118,6 +122,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       );
       syncInlineRenamePreferences({
         enableInlineDoubleClickRename: settings.values.enableInlineDoubleClickRename,
+        autoJumpToFirstPlaceInput: settings.values.autoJumpToFirstPlaceInput,
+        inlineRenameCaretPosition: settings.values.inlineRenameCaretPosition,
         enableQuickRenameAndLabelShortcuts:
           settings.values.enableQuickRenameAndLabelShortcuts,
         enableDesktopContextMenuHelper: settings.values.enableDesktopContextMenuHelper,
@@ -448,6 +454,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             onValueChange={(next) => {
               syncInlineRenamePreferences({
                 enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
                 enableQuickRenameAndLabelShortcuts:
                   values.enableQuickRenameAndLabelShortcuts,
                 enableDesktopContextMenuHelper: next,
@@ -463,11 +471,72 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             onValueChange={(next) => {
               syncInlineRenamePreferences({
                 enableInlineDoubleClickRename: next,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
                 enableQuickRenameAndLabelShortcuts:
                   values.enableQuickRenameAndLabelShortcuts,
                 enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
               });
               void save({ ...values, enableInlineDoubleClickRename: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.autoJumpFirstPlaceLabel")}
+            hint={t("settings.autoJumpFirstPlaceHint")}
+            value={values.autoJumpToFirstPlaceInput}
+            onValueChange={(next) => {
+              const nextCaret: InlineRenameCaretPosition = next
+                ? "start"
+                : values.inlineRenameCaretPosition === "end"
+                  ? "end"
+                  : "select-all";
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: next,
+                inlineRenameCaretPosition: nextCaret,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+              });
+              void save(
+                {
+                  ...values,
+                  autoJumpToFirstPlaceInput: next,
+                  inlineRenameCaretPosition: nextCaret,
+                },
+                revision,
+              );
+            }}
+          />
+
+          <SettingsSelect
+            label={t("settings.inlineRenameCaretModeLabel")}
+            hint={t("settings.inlineRenameCaretModeHint")}
+            value={values.inlineRenameCaretPosition}
+            options={[
+              { label: t("settings.optCaretStart"), value: "start" },
+              { label: t("settings.optCaretSelectAll"), value: "select-all" },
+              { label: t("settings.optCaretEnd"), value: "end" },
+            ]}
+            onValueChange={(next) => {
+              const nextAutoJump = next === "start";
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: nextAutoJump,
+                inlineRenameCaretPosition: next,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+              });
+              void save(
+                {
+                  ...values,
+                  autoJumpToFirstPlaceInput: nextAutoJump,
+                  inlineRenameCaretPosition: next,
+                },
+                revision,
+              );
             }}
           />
 
@@ -478,6 +547,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             onValueChange={(next) => {
               syncInlineRenamePreferences({
                 enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
                 enableQuickRenameAndLabelShortcuts: next,
                 enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
               });
@@ -832,9 +903,65 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 {t("settings.inlineRenameResetBtn")}
               </Text>
             </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.inlineRenameTestInlineBtn")}
+              onPress={() => {
+                const g = globalThis as { document?: unknown; window?: unknown };
+                if (g.document && g.window) {
+                  const doc = g.document as Parameters<typeof findF2InlineRenameTarget>[0];
+                  const win = g.window as Parameters<typeof findF2InlineRenameTarget>[1];
+                  const target = findF2InlineRenameTarget(doc, win, resolveActiveWsId());
+                  if (target) {
+                    const session = mountInlineTitleInput(
+                      doc,
+                      win ?? null,
+                      target,
+                      async (nextTitle, meta) => {
+                        await renameThread({
+                          workspaceId: meta.workspaceId,
+                          agentId: meta.agentId,
+                          title: nextTitle,
+                          source: meta.source,
+                        });
+                      },
+                      undefined,
+                      { caretPosition: values.inlineRenameCaretPosition },
+                    );
+                    if (session) {
+                      toast.show(
+                        `${t("settings.inlineRenameCaretStatusPrefix")} [${session.inputEl.selectionStart ?? 0}, ${session.inputEl.selectionEnd ?? 0}]`,
+                        { variant: "success" },
+                      );
+                      return;
+                    }
+                  }
+                  const probe = doc.createElement("input");
+                  probe.value = "Install Notpamina on two WordPress sites";
+                  const res = applyInlineInputCaret(probe, values.inlineRenameCaretPosition);
+                  toast.show(
+                    `${t("settings.inlineRenameCaretStatusPrefix")} [${res.selectionStart}, ${res.selectionEnd}] · scrollLeft=${res.scrollLeft}`,
+                    { variant: "success" },
+                  );
+                }
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.inlineRenameTestInlineBtn")}
+              </Text>
+            </Pressable>
           </View>
 
           <View style={{ gap: 5, marginTop: 4 }}>
+            <Text style={styles.detail}>
+              • {t("settings.inlineRenameCaretStatusPrefix")}{" "}
+              {values.inlineRenameCaretPosition === "start"
+                ? t("settings.optCaretStart")
+                : values.inlineRenameCaretPosition === "end"
+                  ? t("settings.optCaretEnd")
+                  : t("settings.optCaretSelectAll")}
+            </Text>
             <Text style={styles.detail}>
               •{" "}
               {values.enableInlineDoubleClickRename

@@ -84,6 +84,16 @@ export const InlineRenameSourceSchema = z.enum([
 
 export type InlineRenameSource = z.infer<typeof InlineRenameSourceSchema>;
 
+export const InlineRenameCaretPositionSchema = z.enum([
+  "start",
+  "select-all",
+  "end",
+]);
+
+export type InlineRenameCaretPosition = z.infer<
+  typeof InlineRenameCaretPositionSchema
+>;
+
 export const pluginSettings = defineSettings({
   id: "finder-settings",
   scope: "host",
@@ -95,6 +105,8 @@ export const pluginSettings = defineSettings({
     autoAssociateImagePanels: z.boolean().default(true),
     enableDesktopContextMenuHelper: z.boolean().default(true),
     enableInlineDoubleClickRename: z.boolean().default(true),
+    autoJumpToFirstPlaceInput: z.boolean().default(true),
+    inlineRenameCaretPosition: InlineRenameCaretPositionSchema.default("start"),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
     enableSidebarFolderDrop: z.boolean().default(true),
     sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),

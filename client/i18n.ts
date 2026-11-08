@@ -131,6 +131,16 @@ export const enMessages = {
     inlineDoubleClickRenameLabel: "Double-click to rename inline without popup",
     inlineDoubleClickRenameHint:
       "Double-click any left sidebar workspace row, top workspace header title, or agent tab (or press F2 / Cmd+Shift+E) to edit its title directly in place",
+    autoJumpFirstPlaceLabel:
+      "Auto-jump cursor to first place (start of input) on inline rename",
+    autoJumpFirstPlaceHint:
+      "Place the caret at index 0 with horizontal scroll at start immediately so you can type prefixes without extra clicks (hold Option while double-clicking or press Cmd+A to select all)",
+    inlineRenameCaretModeLabel: "Inline rename initial cursor position",
+    inlineRenameCaretModeHint:
+      "Where the cursor lands when opening an inline rename input box",
+    optCaretStart: "First place — start of title (index 0)",
+    optCaretSelectAll: "Select entire title",
+    optCaretEnd: "End of title",
     quickRenameLabelShortcutsLabel: "Enable quick thread rename & label shortcuts",
     quickRenameLabelShortcutsHint:
       "Press F2 or Cmd+Shift+E for in-place inline rename, or Cmd+Shift+L for colored workspace labels",
@@ -190,8 +200,10 @@ export const enMessages = {
     inlineRenameInspectBtn: "Inspect active",
     inlineRenameApplyBtn: "Apply title",
     inlineRenameResetBtn: "Reset custom title",
+    inlineRenameTestInlineBtn: "Test inline input",
     inlineRenameActiveWs: "Active workspace:",
     inlineRenameCurrentTitle: "Current title:",
+    inlineRenameCaretStatusPrefix: "Initial cursor:",
     inlineRenameSurfaces:
       "Active surfaces: Left sidebar row double-click · Top header title double-click · Agent tab double-click · F2 / Cmd+Shift+E",
     inlineRenameDisabledHint: "Inline double-click rename is currently disabled in settings above",
@@ -386,6 +398,14 @@ export const zhMessages: PluginMessageCatalog = {
     inlineDoubleClickRenameLabel: "双击直接原位重命名（无弹窗）",
     inlineDoubleClickRenameHint:
       "双击左侧边栏任意工作区行、顶部工作区标题或智能体标签页（或按 F2 / Cmd+Shift+E），直接原位编辑名称",
+    autoJumpFirstPlaceLabel: "原位重命名时自动将光标跳至输入框首位",
+    autoJumpFirstPlaceHint:
+      "打开重命名输入框后立即将光标定位到最开头（索引 0）并保持左对齐，无需多次点击即可直接输入前缀标签（按住 Option 双击或按 Cmd+A 可全选）",
+    inlineRenameCaretModeLabel: "原位重命名初始光标位置",
+    inlineRenameCaretModeHint: "触发原位重命名输入框时的默认光标落点",
+    optCaretStart: "跳至首位（索引 0，方便直接加前缀）",
+    optCaretSelectAll: "全选整行标题",
+    optCaretEnd: "跳至末尾",
     quickRenameLabelShortcutsLabel: "启用会话重命名与标签快捷键",
     quickRenameLabelShortcutsHint:
       "按 F2 或 Cmd+Shift+E 直接原位重命名工作区，按 Cmd+Shift+L 快速管理彩色标签",
@@ -441,8 +461,10 @@ export const zhMessages: PluginMessageCatalog = {
     inlineRenameInspectBtn: "读取当前工作区",
     inlineRenameApplyBtn: "应用标题",
     inlineRenameResetBtn: "重置默认标题",
+    inlineRenameTestInlineBtn: "实测首位光标",
     inlineRenameActiveWs: "当前工作区：",
     inlineRenameCurrentTitle: "当前标题：",
+    inlineRenameCaretStatusPrefix: "初始光标策略：",
     inlineRenameSurfaces:
       "已生效入口：左侧边栏行双击 · 顶部标题双击 · 智能体标签页双击 · F2 / Cmd+Shift+E",
     inlineRenameDisabledHint: "上方设置中当前已关闭双击原位重命名",

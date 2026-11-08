@@ -918,6 +918,9 @@ function createInteractiveDomNode(
     listeners: Map<string, Array<(ev: unknown) => void>>;
     focused: boolean;
     selected: boolean;
+    selectionStart: number | null;
+    selectionEnd: number | null;
+    scrollLeft: number;
     triggerBlur: () => void;
     dispatch: (type: string, ev?: Record<string, unknown>) => void;
   } = {
@@ -931,6 +934,9 @@ function createInteractiveDomNode(
     listeners,
     focused: false,
     selected: false,
+    selectionStart: null,
+    selectionEnd: null,
+    scrollLeft: 0,
     getAttribute: (n) => attrs.get(n) ?? null,
     setAttribute: (n, v) => {
       attrs.set(n, v);
@@ -1013,6 +1019,14 @@ function createInteractiveDomNode(
     },
     select: () => {
       node.selected = true;
+      const len = (node.value ?? "").length;
+      node.selectionStart = 0;
+      node.selectionEnd = len;
+    },
+    setSelectionRange: (start: number, end: number) => {
+      node.selectionStart = start;
+      node.selectionEnd = end;
+      node.selected = start === 0 && end === (node.value ?? "").length && end > 0;
     },
     triggerBlur: () => {
       node.focused = false;
@@ -2623,6 +2637,150 @@ test("28. Search (⌘F / ⌘K) & Route Navigation Left-Sidebar Auto-Reveal, Unco
     "Parent project row must receive theme-aware highlight flash",
   );
 });
+
+test("29. Auto-jump cursor to first place (index 0, 0) on inline rename (default enabled on device, shields focus-theft without re-selecting all, supports select-all/end & Option+dblclick)", () => {
+  const head = createInteractiveDomNode("head");
+  const body = createInteractiveDomNode("body");
+  const row = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_mao_2",
+  });
+  const titleWrap = createInteractiveDomNode("div");
+  const initialTitleStr = "Install Notpamina on two WordPress sites";
+  const titleEl = createInteractiveDomNode(
+    "span",
+    { "data-testid": "sidebar-workspace-title-local:wks_mao_2" },
+    initialTitleStr,
+  );
+  titleWrap.appendChild?.(titleEl);
+  row.appendChild?.(titleWrap);
+  body.appendChild?.(row);
+
+  const storage = new Map<string, string>();
+  const mockDoc: MinimalDocument = {
+    head,
+    body,
+    createElement: (tag) => createInteractiveDomNode(tag),
+    querySelector: (sel) => body.querySelector?.(sel) ?? null,
+    querySelectorAll: () => [row],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  const mockWin: MinimalWindow = {
+    location: { pathname: "/h/local/workspace/wks_mao_2" },
+    localStorage: {
+      get length() {
+        return storage.size;
+      },
+      key: (idx) => Array.from(storage.keys())[idx] ?? null,
+      getItem: (k) => storage.get(k) ?? null,
+      setItem: (k, v) => {
+        storage.set(k, v);
+      },
+    },
+    requestAnimationFrame: (cb) => {
+      cb();
+      return 1;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // 1) Default preferences (and legacy 3-key localStorage objects) must auto-enable first-place caret ("start")
+  storage.set(
+    "paseo:finder-plugin:inline-rename-config",
+    JSON.stringify({
+      enableInlineDoubleClickRename: true,
+      enableQuickRenameAndLabelShortcuts: true,
+      enableDesktopContextMenuHelper: true,
+    }),
+  );
+  const defaultPrefs = readInlineRenamePreferences(mockWin.localStorage);
+  assert.equal(
+    defaultPrefs.autoJumpToFirstPlaceInput,
+    true,
+    "autoJumpToFirstPlaceInput must be enabled by default on device even with pre-existing localStorage",
+  );
+  assert.equal(
+    defaultPrefs.inlineRenameCaretPosition,
+    "start",
+    "inlineRenameCaretPosition must default to start (0, 0)",
+  );
+
+  // Also verify pluginSettings schema defaults
+  const parsedDefaults = pluginSettings.schema.parse({});
+  assert.equal(parsedDefaults.autoJumpToFirstPlaceInput, true);
+  assert.equal(parsedDefaults.inlineRenameCaretPosition, "start");
+
+  const target = resolveInlineRenameTarget(titleEl, mockDoc, mockWin);
+  assert.ok(target);
+  const session = mountInlineTitleInput(mockDoc, mockWin, target, async () => {});
+  assert.ok(session);
+  const input = session.inputEl as ReturnType<typeof createInteractiveDomNode>;
+
+  assert.equal(input.focused, true);
+  assert.equal(input.getAttribute?.("data-caret-mode"), "start");
+  assert.equal(
+    input.selectionStart,
+    0,
+    "Caret selectionStart must auto-jump to index 0 (first place)",
+  );
+  assert.equal(
+    input.selectionEnd,
+    0,
+    "Caret selectionEnd must auto-jump to index 0 (not select-all)",
+  );
+  assert.equal(input.scrollLeft, 0, "Input scrollLeft must be pinned to 0");
+
+  // 2) Composer focus-theft blur shield must restore focus AND keep caret at (0, 0) instead of calling select()!
+  input.triggerBlur();
+  assert.equal(input.focused, true);
+  assert.equal(input.selectionStart, 0);
+  assert.equal(input.selectionEnd, 0);
+
+  // 3) If user manually clicks inside the input to move cursor to index 7, focus-theft blur preserves (7, 7)
+  input.setSelectionRange?.(7, 7);
+  input.dispatch("mousedown");
+  input.triggerBlur();
+  assert.equal(input.focused, true);
+  assert.equal(input.selectionStart, 7);
+  assert.equal(input.selectionEnd, 7);
+  session.cancel();
+
+  // 4) Switching preference to autoJumpToFirstPlaceInput=false -> inlineRenameCaretPosition="select-all"
+  syncInlineRenamePreferences({ autoJumpToFirstPlaceInput: false }, mockWin.localStorage);
+  const selectAllPrefs = readInlineRenamePreferences(mockWin.localStorage);
+  assert.equal(selectAllPrefs.autoJumpToFirstPlaceInput, false);
+  assert.equal(selectAllPrefs.inlineRenameCaretPosition, "select-all");
+
+  const sessionSelectAll = mountInlineTitleInput(mockDoc, mockWin, target, async () => {});
+  assert.ok(sessionSelectAll);
+  const inputSelectAll = sessionSelectAll.inputEl as ReturnType<typeof createInteractiveDomNode>;
+  assert.equal(inputSelectAll.getAttribute?.("data-caret-mode"), "select-all");
+  assert.equal(inputSelectAll.selectionStart, 0);
+  assert.equal(inputSelectAll.selectionEnd, initialTitleStr.length);
+  sessionSelectAll.cancel();
+
+  // 5) Switching preference to inlineRenameCaretPosition="end" places caret at (len, len)
+  syncInlineRenamePreferences({ inlineRenameCaretPosition: "end" }, mockWin.localStorage);
+  const endPrefs = readInlineRenamePreferences(mockWin.localStorage);
+  assert.equal(endPrefs.autoJumpToFirstPlaceInput, false);
+  assert.equal(endPrefs.inlineRenameCaretPosition, "end");
+
+  const sessionEnd = mountInlineTitleInput(mockDoc, mockWin, target, async () => {});
+  assert.ok(sessionEnd);
+  const inputEnd = sessionEnd.inputEl as ReturnType<typeof createInteractiveDomNode>;
+  assert.equal(inputEnd.getAttribute?.("data-caret-mode"), "end");
+  assert.equal(inputEnd.selectionStart, initialTitleStr.length);
+  assert.equal(inputEnd.selectionEnd, initialTitleStr.length);
+  sessionEnd.cancel();
+
+  // 6) F2 target resolution finds active sidebar row by activeWsId even without aria-selected="true"
+  const f2SidebarTarget = findF2InlineRenameTarget(mockDoc, mockWin);
+  assert.ok(f2SidebarTarget);
+  assert.equal(f2SidebarTarget.surface, "sidebar-row");
+  assert.equal(f2SidebarTarget.workspaceId, "wks_mao_2");
+});
+
 
 
 

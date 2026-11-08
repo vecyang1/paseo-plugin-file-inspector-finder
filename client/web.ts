@@ -1,5 +1,6 @@
 import { Platform } from "react-native";
 import {
+  type InlineRenameCaretPosition,
   type InlineRenameSource,
   type OpenerTarget,
   type ProjectJumpCandidate,
@@ -36,6 +37,9 @@ export interface MinimalElement {
   placeholder?: string;
   readOnly?: boolean;
   disabled?: boolean;
+  selectionStart?: number | null;
+  selectionEnd?: number | null;
+  scrollLeft?: number;
   parentElement?: MinimalElement | null;
   nextSibling?: MinimalElement | null;
   children?: ArrayLike<MinimalElement>;
@@ -53,7 +57,11 @@ export interface MinimalElement {
   click?(): void;
   focus?(): void;
   select?(): void;
-  setSelectionRange?(start: number, end: number): void;
+  setSelectionRange?(
+    start: number,
+    end: number,
+    direction?: "forward" | "backward" | "none",
+  ): void;
   scrollIntoView?(
     arg?:
       | boolean
@@ -263,6 +271,8 @@ export function readQuickJumpPreferences(
 
 export interface InlineRenamePreferences {
   enableInlineDoubleClickRename: boolean;
+  autoJumpToFirstPlaceInput: boolean;
+  inlineRenameCaretPosition: InlineRenameCaretPosition;
   enableQuickRenameAndLabelShortcuts: boolean;
   enableDesktopContextMenuHelper: boolean;
 }
@@ -276,9 +286,29 @@ export function syncInlineRenamePreferences(
   if (!storage) return;
   try {
     const existing = readInlineRenamePreferences(storage);
+    let nextCaret: InlineRenameCaretPosition = existing.inlineRenameCaretPosition;
+    let nextAutoJump: boolean = existing.autoJumpToFirstPlaceInput;
+
+    if (prefs.inlineRenameCaretPosition !== undefined) {
+      nextCaret = prefs.inlineRenameCaretPosition;
+      nextAutoJump =
+        prefs.autoJumpToFirstPlaceInput !== undefined
+          ? prefs.autoJumpToFirstPlaceInput
+          : nextCaret === "start";
+    } else if (prefs.autoJumpToFirstPlaceInput !== undefined) {
+      nextAutoJump = prefs.autoJumpToFirstPlaceInput;
+      nextCaret = nextAutoJump
+        ? "start"
+        : existing.inlineRenameCaretPosition === "end"
+          ? "end"
+          : "select-all";
+    }
+
     const merged: InlineRenamePreferences = {
       enableInlineDoubleClickRename:
         prefs.enableInlineDoubleClickRename ?? existing.enableInlineDoubleClickRename,
+      autoJumpToFirstPlaceInput: nextAutoJump,
+      inlineRenameCaretPosition: nextCaret,
       enableQuickRenameAndLabelShortcuts:
         prefs.enableQuickRenameAndLabelShortcuts ??
         existing.enableQuickRenameAndLabelShortcuts,
@@ -296,6 +326,8 @@ export function readInlineRenamePreferences(
 ): InlineRenamePreferences {
   const defaults: InlineRenamePreferences = {
     enableInlineDoubleClickRename: true,
+    autoJumpToFirstPlaceInput: true,
+    inlineRenameCaretPosition: "start",
     enableQuickRenameAndLabelShortcuts: true,
     enableDesktopContextMenuHelper: true,
   };
@@ -304,8 +336,26 @@ export function readInlineRenamePreferences(
     const raw = storage.getItem(INLINE_RENAME_STORAGE_KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<Record<keyof InlineRenamePreferences, unknown>>;
+    const rawCaret = parsed.inlineRenameCaretPosition;
+    const hasExplicitAutoJump = typeof parsed.autoJumpToFirstPlaceInput === "boolean";
+    const autoJump = hasExplicitAutoJump
+      ? Boolean(parsed.autoJumpToFirstPlaceInput)
+      : rawCaret === "select-all" || rawCaret === "end"
+        ? false
+        : true;
+    const caretPosition: InlineRenameCaretPosition =
+      rawCaret === "select-all" || rawCaret === "end" || rawCaret === "start"
+        ? autoJump && rawCaret !== "start" && hasExplicitAutoJump
+          ? "start"
+          : rawCaret
+        : autoJump
+          ? "start"
+          : "select-all";
+
     return {
       enableInlineDoubleClickRename: parsed.enableInlineDoubleClickRename !== false,
+      autoJumpToFirstPlaceInput: caretPosition === "start",
+      inlineRenameCaretPosition: caretPosition,
       enableQuickRenameAndLabelShortcuts:
         parsed.enableQuickRenameAndLabelShortcuts !== false,
       enableDesktopContextMenuHelper: parsed.enableDesktopContextMenuHelper !== false,
@@ -313,6 +363,32 @@ export function readInlineRenamePreferences(
   } catch {
     return defaults;
   }
+}
+
+export function applyInlineInputCaret(
+  inputEl: MinimalElement,
+  caretPosition: InlineRenameCaretPosition = "start",
+): { selectionStart: number; selectionEnd: number; scrollLeft: number } {
+  const len = (inputEl.value ?? "").length;
+  inputEl.focus?.();
+  if (caretPosition === "start") {
+    inputEl.setSelectionRange?.(0, 0, "none");
+    inputEl.selectionStart = 0;
+    inputEl.selectionEnd = 0;
+    inputEl.scrollLeft = 0;
+    return { selectionStart: 0, selectionEnd: 0, scrollLeft: 0 };
+  }
+  if (caretPosition === "end") {
+    inputEl.setSelectionRange?.(len, len, "none");
+    inputEl.selectionStart = len;
+    inputEl.selectionEnd = len;
+    return { selectionStart: len, selectionEnd: len, scrollLeft: len };
+  }
+  inputEl.select?.();
+  inputEl.setSelectionRange?.(0, len, "forward");
+  inputEl.selectionStart = 0;
+  inputEl.selectionEnd = len;
+  return { selectionStart: 0, selectionEnd: len, scrollLeft: 0 };
 }
 
 export function syncSidebarDropPreferences(
@@ -728,6 +804,26 @@ export function findF2InlineRenameTarget(
     }
   }
 
+  const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, fallbackWorkspaceId);
+  if (activeWsId) {
+    const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row) continue;
+      const tid = row.getAttribute?.("data-testid") ?? "";
+      const parsed = parseSidebarWorkspaceRowTestId(tid);
+      if (parsed?.workspaceId === activeWsId) {
+        const rect = row.getBoundingClientRect?.();
+        if (!rect || (rect.width > 20 && rect.height > 10)) {
+          const resolved = resolveInlineRenameTarget(row, doc, win, fallbackWorkspaceId);
+          if (resolved) {
+            return { ...resolved, source: "f2-inline" };
+          }
+        }
+      }
+    }
+  }
+
   const headerTitle = doc.querySelector('[data-testid="workspace-header-title"]');
   if (headerTitle) {
     const rect = headerTitle.getBoundingClientRect?.();
@@ -800,6 +896,7 @@ export function mountInlineTitleInput(
     meta: { workspaceId?: string; agentId?: string; source: InlineRenameSource },
   ) => Promise<void>,
   onDisposed?: () => void,
+  options?: { caretPosition?: InlineRenameCaretPosition },
 ): ActiveInlineRenameSession | null {
   const parent = target.titleEl.parentElement;
   if (!parent || (!parent.insertBefore && !parent.appendChild)) {
@@ -808,6 +905,10 @@ export function mountInlineTitleInput(
 
   ensureInlineRenameStyleTag(doc, win);
 
+  const effectiveCaretPosition: InlineRenameCaretPosition =
+    options?.caretPosition ??
+    readInlineRenamePreferences(win?.localStorage).inlineRenameCaretPosition;
+
   const computed = win?.getComputedStyle?.(target.titleEl) ?? null;
   const inputEl = doc.createElement("input");
   inputEl.type = "text";
@@ -815,6 +916,7 @@ export function mountInlineTitleInput(
   inputEl.placeholder = target.initialTitle || "Workspace title";
   inputEl.setAttribute?.("data-testid", "paseo-finder-inline-rename-input");
   inputEl.setAttribute?.("data-rename-surface", target.surface);
+  inputEl.setAttribute?.("data-caret-mode", effectiveCaretPosition);
   if (target.workspaceId) {
     inputEl.setAttribute?.("data-workspace-id", target.workspaceId);
   }
@@ -855,6 +957,15 @@ export function mountInlineTitleInput(
   const mountedAt = Date.now();
   let settled = false;
   let outsidePointerDown = false;
+  let userAdjustedSelection = false;
+  let lastKnownSelStart =
+    effectiveCaretPosition === "end" ? target.initialTitle.length : 0;
+  let lastKnownSelEnd =
+    effectiveCaretPosition === "select-all"
+      ? target.initialTitle.length
+      : effectiveCaretPosition === "end"
+        ? target.initialTitle.length
+        : 0;
 
   const cleanupDom = () => {
     if (target.titleEl.removeAttribute) {
@@ -945,13 +1056,25 @@ export function mountInlineTitleInput(
     "pointerdown",
     "pointerup",
   ]) {
-    inputEl.addEventListener?.(evtName, stopBubble);
+    inputEl.addEventListener?.(evtName, (ev) => {
+      stopBubble(ev);
+      if (evtName === "mousedown" || evtName === "pointerdown" || evtName === "mouseup") {
+        userAdjustedSelection = true;
+        if (typeof inputEl.selectionStart === "number") {
+          lastKnownSelStart = inputEl.selectionStart;
+        }
+        if (typeof inputEl.selectionEnd === "number") {
+          lastKnownSelEnd = inputEl.selectionEnd;
+        }
+      }
+    });
   }
 
   inputEl.addEventListener?.("keydown", (ev) => {
     const ke = ev as MinimalKeyboardEvent;
     ke.stopPropagation?.();
     if (ke.isComposing || ke.keyCode === 229) {
+      userAdjustedSelection = true;
       return;
     }
     if (ke.key === "Enter") {
@@ -960,30 +1083,35 @@ export function mountInlineTitleInput(
     } else if (ke.key === "Escape") {
       ke.preventDefault();
       cancel();
+    } else {
+      userAdjustedSelection = true;
     }
   });
 
   inputEl.addEventListener?.("blur", () => {
     if (settled) return;
-    // Shield against Paseo's WorkspaceScreen composer auto-focus stealing focus ~30-220ms
-    // after Click 1 of a double-click navigates to an unselected sidebar workspace row!
-    if (!outsidePointerDown && Date.now() - mountedAt < 260) {
-      inputEl.focus?.();
-      inputEl.select?.();
+    // Shield against Paseo's WorkspaceScreen composer auto-focus stealing focus (~30-1200ms
+    // after Click 1 of a double-click navigates to an unselected sidebar workspace row),
+    // while strictly preserving the first-place (0, 0) caret or any user manual selection!
+    if (!outsidePointerDown && Date.now() - mountedAt < 1200) {
+      if (userAdjustedSelection) {
+        const s = typeof inputEl.selectionStart === "number" ? inputEl.selectionStart : lastKnownSelStart;
+        const e = typeof inputEl.selectionEnd === "number" ? inputEl.selectionEnd : lastKnownSelEnd;
+        inputEl.focus?.();
+        inputEl.setSelectionRange?.(s, e);
+      } else {
+        applyInlineInputCaret(inputEl, effectiveCaretPosition);
+      }
       return;
     }
     void commitFromTrigger("blur");
   });
 
   win?.getSelection?.()?.removeAllRanges?.();
-  inputEl.focus?.();
-  inputEl.select?.();
-  inputEl.setSelectionRange?.(0, target.initialTitle.length);
+  applyInlineInputCaret(inputEl, effectiveCaretPosition);
   win?.requestAnimationFrame?.(() => {
-    if (!settled) {
-      inputEl.focus?.();
-      inputEl.select?.();
-      inputEl.setSelectionRange?.(0, (inputEl.value ?? "").length);
+    if (!settled && !userAdjustedSelection) {
+      applyInlineInputCaret(inputEl, effectiveCaretPosition);
     }
   });
 
@@ -3135,13 +3263,16 @@ export function installDesktopRevealHelpers(
       if (mode === "labels") {
         labelInput.focus?.();
       } else {
-        titleInput.focus?.();
-        titleInput.select?.();
+        const renamePrefs = readInlineRenamePreferences(win.localStorage);
+        applyInlineInputCaret(titleInput, renamePrefs.inlineRenameCaretPosition);
       }
     }, 10);
   };
 
-  const startInlineRename = (target: InlineRenameTarget) => {
+  const startInlineRename = (
+    target: InlineRenameTarget,
+    options?: { caretPosition?: InlineRenameCaretPosition },
+  ) => {
     activeInlineSession?.cancel();
     removeMenu();
     activeInlineSession = mountInlineTitleInput(
@@ -3154,6 +3285,7 @@ export function installDesktopRevealHelpers(
       () => {
         activeInlineSession = null;
       },
+      options,
     );
   };
 
@@ -3515,7 +3647,17 @@ export function installDesktopRevealHelpers(
         me.preventDefault();
         me.stopPropagation();
         lastClickTracker = null;
-        startInlineRename(target);
+        // If rapid 2nd-click in onClickCapture already mounted the inline session on this exact target,
+        // do NOT tear down and re-mount it on the trailing dblclick event (unless Option/Alt was held to invert caret mode).
+        if (activeInlineSession?.target.targetKey === target.targetKey && !me.altKey) {
+          return;
+        }
+        const overrideCaret: InlineRenameCaretPosition | undefined = me.altKey
+          ? prefs.inlineRenameCaretPosition === "start"
+            ? "select-all"
+            : "start"
+          : undefined;
+        startInlineRename(target, overrideCaret ? { caretPosition: overrideCaret } : undefined);
         return;
       }
     } else if (

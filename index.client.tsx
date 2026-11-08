@@ -33,6 +33,7 @@ import {
   openQuickWorkspaceSwitcherModal,
   readQuickJumpPreferences,
   syncImagePanelAssociations,
+  syncInlineRenamePreferences,
 } from "./client/web";
 import {
   WorkspaceFinderPanel,
@@ -44,8 +45,9 @@ import {
 } from "./client/schedule-runs-web";
 
 export default function contribute(client: PluginClientContext) {
-  // 1. Pre-associate image extensions with our Image Inspector file panel
+  // 1. Pre-associate image extensions with our Image Inspector file panel & materialize default inline rename prefs
   syncImagePanelAssociations("file-inspector-finder", "image-inspector", true);
+  syncInlineRenamePreferences({});
 
   // 2. Register Image & Media File Panel (adds top Finder/Preview/Copy/Metadata toolbar inside image tabs)
   client.addFilePanel({
