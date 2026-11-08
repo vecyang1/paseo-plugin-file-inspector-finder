@@ -20,13 +20,16 @@ import {
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   pluginSettings,
+  quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { pluginTranslations } from "./i18n";
 import {
   LABEL_COLOR_HEX,
   focusWorkspaceInApp,
+  openQuickWorkspaceSwitcherModal,
   syncInlineRenamePreferences,
+  syncQuickJumpPreferences,
   syncSidebarDropPreferences,
 } from "./web";
 
@@ -50,6 +53,7 @@ function FinderBrowserView({
   const renameThread = useRpc(renameWorkspaceOrAgentRpc);
   const manageLabels = useRpc(manageWorkspaceLabelsRpc);
   const importFolder = useRpc(importFolderWorkspaceRpc);
+  const quickJump = useRpc(quickJumpWorkspaceRpc);
   const settingsState = useSettings(pluginSettings);
 
   useEffect(() => {
@@ -65,6 +69,12 @@ function FinderBrowserView({
           settingsState.values.enableQuickRenameAndLabelShortcuts,
         enableDesktopContextMenuHelper:
           settingsState.values.enableDesktopContextMenuHelper,
+      });
+      syncQuickJumpPreferences({
+        enableWorkspaceQuickJump: settingsState.values.enableWorkspaceQuickJump,
+        enableCommandCenterProjectItems:
+          settingsState.values.enableCommandCenterProjectItems,
+        quickJumpDefaultAction: settingsState.values.quickJumpDefaultAction,
       });
     }
   }, [settingsState]);
@@ -384,6 +394,50 @@ function FinderBrowserView({
           >
             <Icon name="FolderOpen" size={13} color={theme.colors.accentForeground} />
             <Text style={styles.accentBtnText}>{t("browser.openWorkspaceRoot")}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("settings.quickJumpOpenModalBtn")}
+            onPress={() => {
+              onClosePopover?.();
+              void openQuickWorkspaceSwitcherModal({
+                defaultJumpMode:
+                  settingsState.status === "ready"
+                    ? settingsState.values.quickJumpDefaultAction
+                    : "open-latest",
+                onListJumpProjects: async (q) => {
+                  const r = await quickJump({
+                    action: "list",
+                    query: q,
+                    limit: 50,
+                    source: "quick-switcher",
+                  });
+                  return r.candidates;
+                },
+                onExecuteQuickJump: async (input) => {
+                  const r = await quickJump({
+                    action: "jump",
+                    projectId: input.projectId,
+                    query: input.query,
+                    jumpMode: input.jumpMode,
+                    source: input.source ?? "quick-switcher",
+                  });
+                  return {
+                    ok: r.ok,
+                    jumpMode: r.jumpMode,
+                    targetWorkspaceId: r.targetWorkspaceId,
+                    targetProjectId: r.targetProjectId,
+                    targetProjectKey: r.targetProjectKey,
+                    targetProjectName: r.targetProjectName,
+                    message: r.message,
+                  };
+                },
+              });
+            }}
+            style={styles.secondaryBtn}
+          >
+            <Icon name="FolderSearch" size={13} color={theme.colors.foreground} />
+            <Text style={styles.btnText}>{t("settings.quickJumpOpenModalBtn")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"

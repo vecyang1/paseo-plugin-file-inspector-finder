@@ -14,17 +14,25 @@ import {
   pluginSettings,
   quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
+  inspectScheduleRunsRpc,
+  openScheduleRunSessionRpc,
+  manageVoiceSttRpc,
 } from "./shared/contracts";
 import {
   handleDiagnosePath,
   handleImportFolderWorkspace,
   handleInspectFile,
   handleListWorkspaceMedia,
+  handleManageVoiceStt,
   handleManageWorkspaceLabels,
   handleOpenFileTarget,
   handleQuickJumpWorkspace,
   handleRenameThread,
 } from "./server/handlers";
+import {
+  handleInspectScheduleRuns,
+  handleOpenScheduleRunSession,
+} from "./server/schedule-runs-handlers";
 
 export default function contribute(server: PluginServerContext) {
   const settingsHandle = server.registerSettings(pluginSettings);
@@ -45,6 +53,9 @@ export default function contribute(server: PluginServerContext) {
       readSettings: () => settingsHandle.read(),
     }),
   );
+  server.handle(inspectScheduleRunsRpc, handleInspectScheduleRuns);
+  server.handle(openScheduleRunSessionRpc, handleOpenScheduleRunSession);
+  server.handle(manageVoiceSttRpc, handleManageVoiceStt);
 
   const revealTool = defineAgentTool({
     name: "reveal_in_finder",
@@ -215,6 +226,123 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const scheduleRunsTool = defineAgentTool({
+    name: "inspect_schedule_runs",
+    title: "Inspect Paseo Schedule Runs & Open Run Conversation",
+    description:
+      "List Paseo schedule execution history (all runs across native schedules and AG standby twins), preview run conversation timelines, trigger run-now, or unarchive a completed run workspace.",
+    input: z.object({
+      action: z
+        .enum([
+          "list",
+          "open-run",
+          "preview-timeline",
+          "run-now",
+          "toggle-archive-on-finish",
+        ])
+        .optional()
+        .describe("list (default), open-run, preview-timeline, run-now, or toggle-archive-on-finish"),
+      scheduleId: z.string().optional().describe("Schedule ID (e.g. 2a8a43f9 or 85c593c3)"),
+      runId: z.string().optional().describe("Specific run ID to inspect or open"),
+      query: z.string().optional().describe("Filter schedules/runs by name, model, or output"),
+      onlyWithRuns: z.boolean().optional().describe("Only return schedules that have recorded runs"),
+      archiveOnFinish: z
+        .boolean()
+        .optional()
+        .describe("When action is toggle-archive-on-finish, set archiveOnFinish value"),
+    }),
+    async execute(input, { paseo }) {
+      const act = input.action ?? "list";
+      if (act === "list") {
+        const result = await handleInspectScheduleRuns(
+          {
+            scheduleId: input.scheduleId,
+            query: input.query,
+            onlyWithRuns: input.onlyWithRuns ?? true,
+            includeWorkspaceNames: true,
+            maxRunsPerSchedule: 30,
+          },
+          { paseo } as never,
+        );
+        return {
+          text: JSON.stringify(result, null, 2),
+          structuredContent: result,
+          isError: !result.ok,
+        };
+      }
+      const result = await handleOpenScheduleRunSession(
+        {
+          action: act,
+          scheduleId: input.scheduleId ?? "",
+          runId: input.runId,
+          archiveOnFinish: input.archiveOnFinish,
+          dryRun: false,
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
+  const voiceSttTool = defineAgentTool({
+    name: "manage_voice_stt",
+    title: "Inspect, Test, or Configure Paseo Custom Voice / STT Models (SiliconFlow & Audio Pool)",
+    description:
+      "Inspect Paseo's active Speech-to-text configuration, apply SiliconFlow free/SOTA presets (FunAudioLLM/SenseVoiceSmall, Qwen/Qwen3-ASR-1.7B, TeleAI/TeleSpeechASR) or arbitrary custom STT models, or run a live transcription probe.",
+    input: z.object({
+      action: z
+        .enum(["inspect", "apply", "test", "reset"])
+        .optional()
+        .describe("inspect (default), apply, test, or reset"),
+      presetId: z
+        .string()
+        .optional()
+        .describe(
+          "Optional preset ID: siliconflow-sensevoice-free, siliconflow-qwen3-asr, siliconflow-telespeech-free, gemini-pool-3.5, groq-whisper-v3, local-parakeet",
+        ),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "Custom STT model ID (e.g. FunAudioLLM/SenseVoiceSmall, Qwen/Qwen3-ASR-1.7B, TeleAI/TeleSpeechASR, gemini-3.5-transcribe)",
+        ),
+      baseUrl: z
+        .string()
+        .optional()
+        .describe("Optional OpenAI-compatible STT base URL (defaults to http://127.0.0.1:8787/v1 when local pool gateway is active)"),
+      apiKey: z.string().optional().describe("Optional API key override"),
+      language: z.string().optional().describe("Optional language hint (e.g. auto, zh, en)"),
+      routeViaGateway: z
+        .boolean()
+        .optional()
+        .describe("Route SiliconFlow/Gemini/Groq models via local Audio Pool Gateway :8787 (default true)"),
+    }),
+    async execute(input, { paseo }) {
+      const result = await handleManageVoiceStt(
+        {
+          action: input.action ?? (input.presetId || input.model ? "apply" : "inspect"),
+          presetId: input.presetId,
+          model: input.model,
+          baseUrl: input.baseUrl,
+          apiKey: input.apiKey,
+          language: input.language,
+          routeViaGateway: input.routeViaGateway,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
@@ -224,6 +352,8 @@ export default function contribute(server: PluginServerContext) {
         threadMetaTool,
         importFolderTool,
         quickJumpTool,
+        scheduleRunsTool,
+        voiceSttTool,
       ],
     };
   });

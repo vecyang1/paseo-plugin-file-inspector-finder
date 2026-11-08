@@ -2,10 +2,13 @@ import { Platform } from "react-native";
 import {
   type InlineRenameSource,
   type OpenerTarget,
+  type ProjectJumpCandidate,
+  type QuickJumpAction,
   type SidebarDropBehavior,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
+  scoreProjectJumpQuery,
 } from "../shared/contracts";
 import { getCatalogForLocale } from "./i18n";
 
@@ -57,6 +60,15 @@ export interface MinimalElement {
   focus?(): void;
   select?(): void;
   setSelectionRange?(start: number, end: number): void;
+  scrollIntoView?(
+    arg?:
+      | boolean
+      | {
+          behavior?: "auto" | "instant" | "smooth" | string;
+          block?: "start" | "center" | "end" | "nearest" | string;
+          inline?: "start" | "center" | "end" | "nearest" | string;
+        },
+  ): void;
   getBoundingClientRect?(): {
     left: number;
     top: number;
@@ -190,6 +202,61 @@ const LUCIDE_SVGS: Record<
 
 const SIDEBAR_DROP_STORAGE_KEY = "paseo:finder-plugin:sidebar-drop-config";
 const INLINE_RENAME_STORAGE_KEY = "paseo:finder-plugin:inline-rename-config";
+const QUICK_JUMP_STORAGE_KEY = "paseo:finder-plugin:quick-jump-config";
+
+export interface QuickJumpPreferences {
+  enableWorkspaceQuickJump: boolean;
+  enableCommandCenterProjectItems: boolean;
+  quickJumpDefaultAction: QuickJumpAction;
+}
+
+export function syncQuickJumpPreferences(
+  prefs: Partial<QuickJumpPreferences>,
+  storageOverride?: MinimalStorage | null,
+): void {
+  const storage =
+    storageOverride ?? (Platform.OS === "web" ? getWebWindow()?.localStorage : null);
+  if (!storage) return;
+  try {
+    const existing = readQuickJumpPreferences(storage);
+    const merged: QuickJumpPreferences = {
+      enableWorkspaceQuickJump:
+        prefs.enableWorkspaceQuickJump ?? existing.enableWorkspaceQuickJump,
+      enableCommandCenterProjectItems:
+        prefs.enableCommandCenterProjectItems ?? existing.enableCommandCenterProjectItems,
+      quickJumpDefaultAction:
+        prefs.quickJumpDefaultAction ?? existing.quickJumpDefaultAction,
+    };
+    storage.setItem(QUICK_JUMP_STORAGE_KEY, JSON.stringify(merged));
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
+export function readQuickJumpPreferences(
+  storage?: MinimalStorage | null,
+): QuickJumpPreferences {
+  const defaults: QuickJumpPreferences = {
+    enableWorkspaceQuickJump: true,
+    enableCommandCenterProjectItems: true,
+    quickJumpDefaultAction: "open-latest",
+  };
+  if (!storage) return defaults;
+  try {
+    const raw = storage.getItem(QUICK_JUMP_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<Record<keyof QuickJumpPreferences, unknown>>;
+    const action = parsed.quickJumpDefaultAction;
+    return {
+      enableWorkspaceQuickJump: parsed.enableWorkspaceQuickJump !== false,
+      enableCommandCenterProjectItems: parsed.enableCommandCenterProjectItems !== false,
+      quickJumpDefaultAction:
+        action === "locate-sidebar" || action === "create-new" ? action : "open-latest",
+    };
+  } catch {
+    return defaults;
+  }
+}
 
 export interface InlineRenamePreferences {
   enableInlineDoubleClickRename: boolean;
@@ -1038,6 +1105,16 @@ export interface RenameThreadOptions {
   source?: InlineRenameSource;
 }
 
+export interface QuickJumpExecutionSummary {
+  ok: boolean;
+  jumpMode: QuickJumpAction;
+  targetWorkspaceId: string | null;
+  targetProjectId: string | null;
+  targetProjectKey: string | null;
+  targetProjectName: string | null;
+  message: string;
+}
+
 export interface DesktopRevealHelperCallbacks {
   isEnabled(): boolean;
   getLocale?(): string;
@@ -1055,6 +1132,13 @@ export interface DesktopRevealHelperCallbacks {
     paths: string[],
     options: { forceNew: boolean },
   ): Promise<FolderDropResultSummary | null>;
+  onListJumpProjects?(query?: string): Promise<ProjectJumpCandidate[]>;
+  onExecuteQuickJump?(input: {
+    projectId?: string;
+    query?: string;
+    jumpMode?: QuickJumpAction;
+    source?: "quick-switcher";
+  }): Promise<QuickJumpExecutionSummary | null>;
 }
 
 const PASEO_INTERNAL_FILE_DRAG_MIME = "application/x-paseo-workspace-file";
@@ -1238,17 +1322,148 @@ function inferActiveServerId(doc: MinimalDocument, win?: MinimalWindow | null): 
   return "local";
 }
 
+export interface LocateProjectSidebarOptions {
+  projectId?: string | null;
+  projectKey?: string | null;
+  projectName?: string | null;
+  expandIfCollapsed?: boolean;
+  highlightFlash?: boolean;
+}
+
+export function locateProjectInSidebar(
+  options: LocateProjectSidebarOptions,
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): boolean {
+  const win = winOverride ?? getWebWindow();
+  const doc = docOverride ?? win?.document ?? null;
+  if (!doc) return false;
+
+  const cleanProjectId = (options.projectId ?? "").trim();
+  const cleanProjectKey = (options.projectKey ?? "").trim();
+  const cleanProjectName = (options.projectName ?? "").trim().toLowerCase();
+  if (!cleanProjectId && !cleanProjectKey && !cleanProjectName) {
+    return false;
+  }
+
+  const projRows = doc.querySelectorAll('[data-testid^="sidebar-project-row-"]');
+  let matchedRow: MinimalElement | null = null;
+  let matchedViewKey = "";
+
+  for (let i = 0; i < projRows.length; i += 1) {
+    const prow = projRows[i];
+    if (!prow) continue;
+    const ptid = prow.getAttribute?.("data-testid") ?? "";
+    const viewKey = ptid.replace(/^sidebar-project-row-/, "");
+    if (
+      (cleanProjectKey &&
+        (ptid.endsWith(`:${cleanProjectKey}`) || viewKey === cleanProjectKey)) ||
+      (cleanProjectId &&
+        (ptid.endsWith(`:${cleanProjectId}`) || viewKey === cleanProjectId))
+    ) {
+      matchedRow = prow;
+      matchedViewKey = viewKey;
+      break;
+    }
+    if (cleanProjectName) {
+      const text = (prow.textContent ?? "").trim().toLowerCase();
+      if (text === cleanProjectName) {
+        matchedRow = prow;
+        matchedViewKey = viewKey;
+        break;
+      }
+    }
+  }
+
+  if (!matchedRow) {
+    return false;
+  }
+
+  if (options.expandIfCollapsed !== false) {
+    const lists = doc.querySelectorAll('[data-testid^="sidebar-workspace-list-"]');
+    let isExpanded = false;
+    for (let i = 0; i < lists.length; i += 1) {
+      const ltid = lists[i]?.getAttribute?.("data-testid") ?? "";
+      const listViewKey = ltid.replace(/^sidebar-workspace-list-/, "");
+      if (
+        (matchedViewKey && listViewKey === matchedViewKey) ||
+        (cleanProjectKey && ltid.endsWith(`:${cleanProjectKey}`)) ||
+        (cleanProjectId && ltid.endsWith(`:${cleanProjectId}`))
+      ) {
+        isExpanded = true;
+        break;
+      }
+    }
+    if (!isExpanded) {
+      matchedRow.click?.();
+    }
+  }
+
+  try {
+    matchedRow.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  } catch {
+    try {
+      matchedRow.scrollIntoView?.(true);
+    } catch {
+      // Ignore if scrollIntoView is unsupported in mock DOM
+    }
+  }
+
+  if (options.highlightFlash !== false) {
+    matchedRow.setAttribute?.("data-paseo-project-jump-flash", "true");
+    if (matchedRow.style) {
+      const prevBg = matchedRow.style.backgroundColor ?? "";
+      const prevOutline = matchedRow.style.outline ?? "";
+      const prevRadius = matchedRow.style.borderRadius ?? "";
+      matchedRow.style.backgroundColor = "rgba(16, 185, 129, 0.18)";
+      matchedRow.style.outline = "1px solid rgba(16, 185, 129, 0.65)";
+      matchedRow.style.borderRadius = "8px";
+      setTimeout(() => {
+        if (matchedRow?.style) {
+          matchedRow.style.backgroundColor = prevBg;
+          matchedRow.style.outline = prevOutline;
+          matchedRow.style.borderRadius = prevRadius;
+        }
+        matchedRow?.removeAttribute?.("data-paseo-project-jump-flash");
+      }, 1600);
+    }
+  }
+
+  return true;
+}
+
 export function focusWorkspaceInApp(
   workspaceId: string,
   projectId?: string | null,
   docOverride?: MinimalDocument | null,
   winOverride?: MinimalWindow | null,
+  projectMeta?: {
+    projectKey?: string | null;
+    projectName?: string | null;
+  },
 ): boolean {
   const cleanId = workspaceId.trim();
-  if (!cleanId) return false;
   const win = winOverride ?? getWebWindow();
   const doc = docOverride ?? win?.document ?? null;
   if (!doc) return false;
+
+  if (projectId || projectMeta?.projectKey || projectMeta?.projectName) {
+    locateProjectInSidebar(
+      {
+        projectId,
+        projectKey: projectMeta?.projectKey,
+        projectName: projectMeta?.projectName,
+        expandIfCollapsed: true,
+        highlightFlash: true,
+      },
+      doc,
+      win,
+    );
+  }
+
+  if (!cleanId) {
+    return Boolean(projectId || projectMeta?.projectKey || projectMeta?.projectName);
+  }
 
   const tryClickRowOnce = (allowExpandCollapsedProject: boolean): boolean => {
     const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
@@ -1256,31 +1471,27 @@ export function focusWorkspaceInApp(
       const row = rows[i];
       const tid = row?.getAttribute?.("data-testid") ?? "";
       if (tid.endsWith(`:${cleanId}`) || tid === `sidebar-workspace-row-${cleanId}`) {
+        try {
+          row?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+        } catch {
+          // Ignore scrollIntoView error
+        }
         row?.click?.();
         return true;
       }
     }
-    if (allowExpandCollapsedProject && projectId) {
-      const lists = doc.querySelectorAll('[data-testid^="sidebar-workspace-list-"]');
-      let isExpanded = false;
-      for (let i = 0; i < lists.length; i += 1) {
-        const ltid = lists[i]?.getAttribute?.("data-testid") ?? "";
-        if (ltid.endsWith(`:${projectId}`)) {
-          isExpanded = true;
-          break;
-        }
-      }
-      if (!isExpanded) {
-        const projRows = doc.querySelectorAll('[data-testid^="sidebar-project-row-"]');
-        for (let i = 0; i < projRows.length; i += 1) {
-          const prow = projRows[i];
-          const ptid = prow?.getAttribute?.("data-testid") ?? "";
-          if (ptid.endsWith(`:${projectId}`)) {
-            prow?.click?.();
-            break;
-          }
-        }
-      }
+    if (allowExpandCollapsedProject && (projectId || projectMeta?.projectKey || projectMeta?.projectName)) {
+      locateProjectInSidebar(
+        {
+          projectId,
+          projectKey: projectMeta?.projectKey,
+          projectName: projectMeta?.projectName,
+          expandIfCollapsed: true,
+          highlightFlash: false,
+        },
+        doc,
+        win,
+      );
     }
     return false;
   };
@@ -1466,6 +1677,544 @@ export function injectIntoNativeTabMenus(
   return injectedCount;
 }
 
+export interface OpenQuickWorkspaceSwitcherOptions {
+  initialQuery?: string;
+  locale?: string;
+  defaultJumpMode?: QuickJumpAction;
+  onListJumpProjects: (query?: string) => Promise<ProjectJumpCandidate[]>;
+  onExecuteQuickJump: (input: {
+    projectId?: string;
+    query?: string;
+    jumpMode?: QuickJumpAction;
+    source?: "quick-switcher";
+  }) => Promise<QuickJumpExecutionSummary | null>;
+  onAfterJump?: (summary: QuickJumpExecutionSummary) => void;
+  onDisposed?: () => void;
+}
+
+export async function openQuickWorkspaceSwitcherModal(
+  options: OpenQuickWorkspaceSwitcherOptions,
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): Promise<MinimalElement | null> {
+  const win = winOverride ?? getWebWindow();
+  const doc = docOverride ?? win?.document ?? null;
+  if (!doc || !doc.body) return null;
+
+  const existing = doc.querySelector('[data-testid="paseo-finder-quick-jump-modal"]');
+  existing?.remove?.();
+
+  const catalog = getCatalogForLocale(options.locale ?? win?.navigator?.language);
+  const jumpPrefs = readQuickJumpPreferences(win?.localStorage);
+  const defaultAction: QuickJumpAction =
+    options.defaultJumpMode ?? jumpPrefs.quickJumpDefaultAction;
+
+  const allCandidates = await options.onListJumpProjects("").catch(() => []);
+  if (!doc.body) return null;
+
+  const backdrop = doc.createElement("div");
+  backdrop.setAttribute?.("data-testid", "paseo-finder-quick-jump-modal");
+  backdrop.setAttribute?.("role", "dialog");
+  if (backdrop.style) {
+    backdrop.style.position = "fixed";
+    backdrop.style.left = "0";
+    backdrop.style.top = "0";
+    backdrop.style.width = "100vw";
+    backdrop.style.height = "100vh";
+    backdrop.style.zIndex = "2147483647";
+    backdrop.style.backgroundColor = "rgba(8, 10, 10, 0.56)";
+    backdrop.style.backdropFilter = "blur(3px)";
+    backdrop.style.display = "flex";
+    backdrop.style.flexDirection = "column";
+    backdrop.style.alignItems = "center";
+    backdrop.style.paddingTop = "68px";
+    backdrop.style.boxSizing = "border-box";
+    backdrop.style.fontFamily =
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  }
+
+  const card = doc.createElement("div");
+  card.setAttribute?.("data-testid", "paseo-finder-quick-jump-card");
+  if (card.style) {
+    card.style.width = "min(580px, calc(100vw - 32px))";
+    card.style.maxHeight = "min(520px, calc(100vh - 120px))";
+    card.style.backgroundColor = "#141716";
+    card.style.border = "1px solid #2b312f";
+    card.style.borderRadius = "12px";
+    card.style.boxShadow = "0 20px 48px rgba(0, 0, 0, 0.65)";
+    card.style.display = "flex";
+    card.style.flexDirection = "column";
+    card.style.overflow = "hidden";
+  }
+
+  let closed = false;
+  const closeModal = () => {
+    if (closed) return;
+    closed = true;
+    backdrop.remove?.();
+    options.onDisposed?.();
+  };
+
+  backdrop.addEventListener?.("click", (ev) => {
+    const me = ev as MinimalMouseEvent;
+    if (me.target === backdrop) {
+      me.preventDefault?.();
+      me.stopPropagation?.();
+      closeModal();
+    }
+  });
+
+  // Top Header + Search Input
+  const headerBox = doc.createElement("div");
+  if (headerBox.style) {
+    headerBox.style.padding = "12px 14px 10px 14px";
+    headerBox.style.borderBottom = "1px solid #232826";
+    headerBox.style.display = "flex";
+    headerBox.style.flexDirection = "column";
+    headerBox.style.gap = "8px";
+  }
+
+  const titleRow = doc.createElement("div");
+  if (titleRow.style) {
+    titleRow.style.display = "flex";
+    titleRow.style.flexDirection = "row";
+    titleRow.style.alignItems = "center";
+    titleRow.style.justifyContent = "space-between";
+  }
+
+  const titleLabel = doc.createElement("div");
+  titleLabel.textContent = catalog.actions.quickJumpTitle;
+  if (titleLabel.style) {
+    titleLabel.style.fontSize = "12px";
+    titleLabel.style.fontWeight = "600";
+    titleLabel.style.color = "#10b981";
+    titleLabel.style.letterSpacing = "0.2px";
+  }
+
+  const subtitleBadge = doc.createElement("div");
+  subtitleBadge.textContent = `${allCandidates.length}`;
+  if (subtitleBadge.style) {
+    subtitleBadge.style.fontSize = "11px";
+    subtitleBadge.style.color = "#9ca3af";
+    subtitleBadge.style.backgroundColor = "#1f2422";
+    subtitleBadge.style.border = "1px solid #2e3432";
+    subtitleBadge.style.borderRadius = "999px";
+    subtitleBadge.style.padding = "1px 8px";
+  }
+
+  titleRow.appendChild?.(titleLabel);
+  titleRow.appendChild?.(subtitleBadge);
+  headerBox.appendChild?.(titleRow);
+
+  const searchInput = doc.createElement("input");
+  searchInput.type = "text";
+  searchInput.value = options.initialQuery ?? "";
+  searchInput.placeholder = catalog.actions.quickJumpPlaceholder;
+  searchInput.setAttribute?.("data-testid", "paseo-finder-quick-jump-input");
+  if (searchInput.style) {
+    searchInput.style.width = "100%";
+    searchInput.style.boxSizing = "border-box";
+    searchInput.style.backgroundColor = "#0d100f";
+    searchInput.style.border = "1px solid #2e3432";
+    searchInput.style.borderRadius = "8px";
+    searchInput.style.padding = "8px 11px";
+    searchInput.style.color = "#f9fafb";
+    searchInput.style.fontSize = "13.5px";
+    searchInput.style.outline = "none";
+  }
+  headerBox.appendChild?.(searchInput);
+  card.appendChild?.(headerBox);
+
+  // Results List Container
+  const listContainer = doc.createElement("div");
+  listContainer.setAttribute?.("data-testid", "paseo-finder-quick-jump-list");
+  if (listContainer.style) {
+    listContainer.style.display = "flex";
+    listContainer.style.flexDirection = "column";
+    listContainer.style.padding = "6px";
+    listContainer.style.gap = "3px";
+    listContainer.style.overflowY = "auto";
+    listContainer.style.maxHeight = "360px";
+  }
+  card.appendChild?.(listContainer);
+
+  // Footer Keyboard Hints
+  const footerBox = doc.createElement("div");
+  footerBox.textContent = catalog.actions.quickJumpFooterHint;
+  if (footerBox.style) {
+    footerBox.style.padding = "8px 14px";
+    footerBox.style.borderTop = "1px solid #232826";
+    footerBox.style.backgroundColor = "#101312";
+    footerBox.style.color = "#9ca3af";
+    footerBox.style.fontSize = "11px";
+  }
+  card.appendChild?.(footerBox);
+
+  let filtered: ProjectJumpCandidate[] = [...allCandidates];
+  let selectedIndex = 0;
+
+  const computeFiltered = (rawQuery: string): ProjectJumpCandidate[] => {
+    const q = rawQuery.trim();
+    if (!q) {
+      return [...allCandidates];
+    }
+    const scored: ProjectJumpCandidate[] = [];
+    for (const item of allCandidates) {
+      const score = scoreProjectJumpQuery(
+        {
+          projectName: item.projectName,
+          projectRootPath: item.projectRootPath,
+          shortPath: item.shortPath,
+          primaryWorkspaceTitle: item.primaryWorkspaceTitle,
+        },
+        q,
+      );
+      if (score > 0) {
+        scored.push({
+          ...item,
+          score: score + Math.min(25, item.activeWorkspaceCount * 2),
+        });
+      }
+    }
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.projectName.localeCompare(b.projectName);
+    });
+    return scored;
+  };
+
+  const triggerJump = async (
+    candidate: ProjectJumpCandidate | undefined,
+    jumpMode: QuickJumpAction,
+  ) => {
+    if (!candidate) return;
+    closeModal();
+    if (jumpMode === "locate-sidebar") {
+      locateProjectInSidebar(
+        {
+          projectId: candidate.projectId,
+          projectKey: candidate.projectKey,
+          projectName: candidate.projectName,
+          expandIfCollapsed: true,
+          highlightFlash: true,
+        },
+        doc,
+        win,
+      );
+    }
+    const summary = await options
+      .onExecuteQuickJump({
+        projectId: candidate.projectId,
+        query: searchInput.value ?? "",
+        jumpMode,
+        source: "quick-switcher",
+      })
+      .catch(() => null);
+    if (!summary) return;
+    if (summary.ok) {
+      if (summary.jumpMode === "locate-sidebar") {
+        locateProjectInSidebar(
+          {
+            projectId: summary.targetProjectId ?? candidate.projectId,
+            projectKey: summary.targetProjectKey ?? candidate.projectKey,
+            projectName: summary.targetProjectName ?? candidate.projectName,
+            expandIfCollapsed: true,
+            highlightFlash: true,
+          },
+          doc,
+          win,
+        );
+      } else if (summary.targetWorkspaceId) {
+        focusWorkspaceInApp(
+          summary.targetWorkspaceId,
+          summary.targetProjectId ?? candidate.projectId,
+          doc,
+          win,
+          {
+            projectKey: summary.targetProjectKey ?? candidate.projectKey,
+            projectName: summary.targetProjectName ?? candidate.projectName,
+          },
+        );
+      }
+    }
+    options.onAfterJump?.(summary);
+  };
+
+  const renderList = () => {
+    while (listContainer.children && listContainer.children.length > 0) {
+      const first = listContainer.children[0];
+      if (!first?.remove) break;
+      first.remove();
+    }
+    if (listContainer.innerHTML !== undefined) {
+      listContainer.innerHTML = "";
+    }
+    subtitleBadge.textContent = `${filtered.length} / ${allCandidates.length}`;
+    if (filtered.length === 0) {
+      const emptyEl = doc.createElement("div");
+      emptyEl.setAttribute?.("data-testid", "paseo-finder-quick-jump-empty");
+      emptyEl.textContent = catalog.actions.quickJumpEmpty;
+      if (emptyEl.style) {
+        emptyEl.style.padding = "22px 14px";
+        emptyEl.style.textAlign = "center";
+        emptyEl.style.color = "#9ca3af";
+        emptyEl.style.fontSize = "12.5px";
+      }
+      listContainer.appendChild?.(emptyEl);
+      return;
+    }
+
+    if (selectedIndex >= filtered.length) {
+      selectedIndex = Math.max(0, filtered.length - 1);
+    }
+
+    for (let idx = 0; idx < filtered.length; idx += 1) {
+      const item = filtered[idx];
+      if (!item) continue;
+      const isSelected = idx === selectedIndex;
+
+      const row = doc.createElement("div");
+      row.setAttribute?.(
+        "data-testid",
+        `paseo-finder-quick-jump-item-${item.projectId}`,
+      );
+      row.setAttribute?.("data-selected", isSelected ? "true" : "false");
+      if (row.style) {
+        row.style.display = "flex";
+        row.style.flexDirection = "row";
+        row.style.alignItems = "center";
+        row.style.justifyContent = "space-between";
+        row.style.gap = "10px";
+        row.style.padding = "8px 10px";
+        row.style.borderRadius = "8px";
+        row.style.cursor = "pointer";
+        row.style.backgroundColor = isSelected
+          ? "rgba(16, 185, 129, 0.14)"
+          : "transparent";
+        row.style.border = isSelected
+          ? "1px solid rgba(16, 185, 129, 0.45)"
+          : "1px solid transparent";
+      }
+
+      const leftCol = doc.createElement("div");
+      if (leftCol.style) {
+        leftCol.style.display = "flex";
+        leftCol.style.flexDirection = "column";
+        leftCol.style.gap = "2px";
+        leftCol.style.minWidth = "0";
+        leftCol.style.flex = "1";
+      }
+
+      const topLine = doc.createElement("div");
+      if (topLine.style) {
+        topLine.style.display = "flex";
+        topLine.style.flexDirection = "row";
+        topLine.style.alignItems = "center";
+        topLine.style.gap = "7px";
+      }
+
+      const nameEl = doc.createElement("span");
+      nameEl.textContent = item.projectName;
+      if (nameEl.style) {
+        nameEl.style.color = "#f9fafb";
+        nameEl.style.fontSize = "13px";
+        nameEl.style.fontWeight = "600";
+      }
+
+      const threadsBadge = doc.createElement("span");
+      threadsBadge.textContent =
+        item.activeWorkspaceCount === 0
+          ? catalog.actions.quickJumpEmptyBadge
+          : item.activeWorkspaceCount === 1
+            ? catalog.actions.quickJumpSingleThreadBadge
+            : `${item.activeWorkspaceCount} ${catalog.actions.quickJumpThreadsBadge}`;
+      if (threadsBadge.style) {
+        threadsBadge.style.fontSize = "10.5px";
+        threadsBadge.style.color =
+          item.activeWorkspaceCount > 0 ? "#10b981" : "#9ca3af";
+        threadsBadge.style.backgroundColor =
+          item.activeWorkspaceCount > 0
+            ? "rgba(16, 185, 129, 0.12)"
+            : "#1f2422";
+        threadsBadge.style.padding = "1px 6px";
+        threadsBadge.style.borderRadius = "999px";
+      }
+
+      topLine.appendChild?.(nameEl);
+      topLine.appendChild?.(threadsBadge);
+
+      const bottomLine = doc.createElement("div");
+      const activeSub = item.primaryWorkspaceTitle
+        ? ` · ${item.primaryWorkspaceTitle}`
+        : "";
+      bottomLine.textContent = `${item.shortPath}${activeSub}`;
+      if (bottomLine.style) {
+        bottomLine.style.color = "#9ca3af";
+        bottomLine.style.fontSize = "11px";
+        bottomLine.style.whiteSpace = "nowrap";
+        bottomLine.style.overflow = "hidden";
+        bottomLine.style.textOverflow = "ellipsis";
+      }
+
+      leftCol.appendChild?.(topLine);
+      leftCol.appendChild?.(bottomLine);
+
+      const actionsCol = doc.createElement("div");
+      if (actionsCol.style) {
+        actionsCol.style.display = "flex";
+        actionsCol.style.flexDirection = "row";
+        actionsCol.style.alignItems = "center";
+        actionsCol.style.gap = "5px";
+        actionsCol.style.flexShrink = "0";
+      }
+
+      const makeBtn = (
+        btnKey: string,
+        label: string,
+        mode: QuickJumpAction,
+        isPrimary: boolean,
+      ) => {
+        const btn = doc.createElement("div");
+        btn.setAttribute?.(
+          "data-testid",
+          `paseo-finder-quick-jump-${btnKey}-${item.projectId}`,
+        );
+        btn.textContent = label;
+        if (btn.style) {
+          btn.style.fontSize = "11px";
+          btn.style.fontWeight = isPrimary ? "600" : "500";
+          btn.style.padding = "4px 7px";
+          btn.style.borderRadius = "6px";
+          btn.style.cursor = "pointer";
+          btn.style.userSelect = "none";
+          btn.style.backgroundColor = isPrimary ? "#10b981" : "#222725";
+          btn.style.color = isPrimary ? "#052e16" : "#d1d5db";
+          btn.style.border = isPrimary ? "1px solid #10b981" : "1px solid #2e3432";
+        }
+        btn.addEventListener?.("click", (ev) => {
+          const me = ev as MinimalMouseEvent;
+          me.preventDefault?.();
+          me.stopPropagation?.();
+          void triggerJump(item, mode);
+        });
+        return btn;
+      };
+
+      actionsCol.appendChild?.(
+        makeBtn(
+          "open",
+          catalog.actions.quickJumpBtnOpen,
+          "open-latest",
+          defaultAction === "open-latest",
+        ),
+      );
+      actionsCol.appendChild?.(
+        makeBtn(
+          "locate",
+          catalog.actions.quickJumpBtnSidebar,
+          "locate-sidebar",
+          defaultAction === "locate-sidebar",
+        ),
+      );
+      actionsCol.appendChild?.(
+        makeBtn(
+          "new",
+          catalog.actions.quickJumpBtnNew,
+          "create-new",
+          defaultAction === "create-new",
+        ),
+      );
+
+      row.appendChild?.(leftCol);
+      row.appendChild?.(actionsCol);
+
+      row.addEventListener?.("mouseenter", () => {
+        if (selectedIndex !== idx) {
+          selectedIndex = idx;
+          renderList();
+        }
+      });
+
+      row.addEventListener?.("click", (ev) => {
+        const me = ev as MinimalMouseEvent;
+        me.preventDefault?.();
+        me.stopPropagation?.();
+        const mode: QuickJumpAction = me.altKey
+          ? "create-new"
+          : me.shiftKey
+            ? "locate-sidebar"
+            : defaultAction;
+        void triggerJump(item, mode);
+      });
+
+      listContainer.appendChild?.(row);
+    }
+  };
+
+  if (options.initialQuery) {
+    filtered = computeFiltered(options.initialQuery);
+  }
+  renderList();
+
+  searchInput.addEventListener?.("input", () => {
+    filtered = computeFiltered(searchInput.value ?? "");
+    selectedIndex = 0;
+    renderList();
+  });
+
+  searchInput.addEventListener?.("keydown", (ev) => {
+    const ke = ev as MinimalKeyboardEvent;
+    if (ke.key === "Escape") {
+      ke.preventDefault?.();
+      ke.stopPropagation?.();
+      closeModal();
+      return;
+    }
+    if (ke.key === "ArrowDown") {
+      ke.preventDefault?.();
+      ke.stopPropagation?.();
+      if (filtered.length > 0) {
+        selectedIndex = (selectedIndex + 1) % filtered.length;
+        renderList();
+      }
+      return;
+    }
+    if (ke.key === "ArrowUp") {
+      ke.preventDefault?.();
+      ke.stopPropagation?.();
+      if (filtered.length > 0) {
+        selectedIndex = (selectedIndex - 1 + filtered.length) % filtered.length;
+        renderList();
+      }
+      return;
+    }
+    if (ke.key === "Enter") {
+      if (ke.isComposing || ke.keyCode === 229) return;
+      ke.preventDefault?.();
+      ke.stopPropagation?.();
+      const targetCandidate = filtered[selectedIndex] ?? filtered[0];
+      const mode: QuickJumpAction = ke.altKey
+        ? "create-new"
+        : ke.shiftKey
+          ? "locate-sidebar"
+          : defaultAction;
+      void triggerJump(targetCandidate, mode);
+    }
+  });
+
+  backdrop.appendChild?.(card);
+  doc.body.appendChild?.(backdrop);
+
+  setTimeout(() => {
+    searchInput.focus?.();
+    if (options.initialQuery) {
+      searchInput.select?.();
+    }
+  }, 10);
+
+  return backdrop;
+}
+
 export function installDesktopRevealHelpers(
   callbacks: DesktopRevealHelperCallbacks,
   docOverride?: MinimalDocument | null,
@@ -1477,6 +2226,7 @@ export function installDesktopRevealHelpers(
   if (!win || !doc) return () => {};
 
   let activeMenuEl: MinimalElement | null = null;
+  let activeQuickJumpModalEl: MinimalElement | null = null;
   let activeInlineSession: ActiveInlineRenameSession | null = null;
   let lastClickTracker: {
     targetKey: string;
@@ -1496,6 +2246,10 @@ export function installDesktopRevealHelpers(
     if (activeMenuEl) {
       activeMenuEl.remove?.();
       activeMenuEl = null;
+    }
+    if (activeQuickJumpModalEl) {
+      activeQuickJumpModalEl.remove?.();
+      activeQuickJumpModalEl = null;
     }
   };
 
@@ -2186,6 +2940,45 @@ export function installDesktopRevealHelpers(
     ) {
       ke.preventDefault();
       void showQuickThreadMetadataBar("labels");
+      return;
+    }
+    // Cmd+J (Ctrl+J) or Cmd+Shift+O (Ctrl+Shift+O) opens Quick Project Workspace Switcher
+    const jumpPrefs = readQuickJumpPreferences(win.localStorage);
+    if (
+      jumpPrefs.enableWorkspaceQuickJump &&
+      callbacks.onListJumpProjects &&
+      callbacks.onExecuteQuickJump &&
+      (ke.metaKey || ke.ctrlKey) &&
+      !ke.altKey &&
+      ((!ke.shiftKey && ke.key.toLowerCase() === "j") ||
+        (ke.shiftKey && ke.key.toLowerCase() === "o"))
+    ) {
+      ke.preventDefault();
+      ke.stopPropagation?.();
+      if (activeQuickJumpModalEl) {
+        activeQuickJumpModalEl.remove?.();
+        activeQuickJumpModalEl = null;
+        return;
+      }
+      removeMenu();
+      void openQuickWorkspaceSwitcherModal(
+        {
+          locale: resolveLocale(),
+          defaultJumpMode: jumpPrefs.quickJumpDefaultAction,
+          onListJumpProjects: (q) => callbacks.onListJumpProjects!(q),
+          onExecuteQuickJump: (input) => callbacks.onExecuteQuickJump!(input),
+          onAfterJump: (summary) => {
+            showDropReceiptToast(summary.message, !summary.ok);
+          },
+          onDisposed: () => {
+            activeQuickJumpModalEl = null;
+          },
+        },
+        doc,
+        win,
+      ).then((el) => {
+        activeQuickJumpModalEl = el;
+      });
     }
   };
 

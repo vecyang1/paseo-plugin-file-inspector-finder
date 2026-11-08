@@ -22,19 +22,30 @@ import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   type OpenerTarget,
+  type QuickJumpAction,
   diagnosePathRpc,
   importFolderWorkspaceRpc,
+  inspectScheduleRunsRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
+  openScheduleRunSessionRpc,
   pluginSettings,
+  quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
-import { pluginTranslations } from "./i18n";
+import { isChineseLocale, pluginTranslations } from "./i18n";
+import {
+  navigateToPaseoWorkspace,
+  triggerScheduleRunsDrawer,
+} from "./schedule-runs-web";
 import {
   focusWorkspaceInApp,
+  locateProjectInSidebar,
+  openQuickWorkspaceSwitcherModal,
   resolveCurrentActiveWorkspaceId,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
+  syncQuickJumpPreferences,
   syncSidebarDropPreferences,
 } from "./web";
 
@@ -47,12 +58,23 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const importFolder = useRpc(importFolderWorkspaceRpc);
   const manageLabels = useRpc(manageWorkspaceLabelsRpc);
   const renameThread = useRpc(renameWorkspaceOrAgentRpc);
+  const quickJump = useRpc(quickJumpWorkspaceRpc);
+  const inspectScheduleRuns = useRpc(inspectScheduleRunsRpc);
+  const openScheduleRunSession = useRpc(openScheduleRunSessionRpc);
+  const isZh = isChineseLocale(
+    typeof navigator !== "undefined" ? navigator.language : undefined,
+  );
 
   const [testInput, setTestInput] = useState(
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
   );
   const [folderTestInput, setFolderTestInput] = useState("~/Documents");
   const [renameDiagInput, setRenameDiagInput] = useState("");
+  const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("guan");
+  const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
+  const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
+    Awaited<ReturnType<typeof inspectScheduleRuns>> | null
+  >(null);
 
   useEffect(() => {
     if (settings.status === "ready") {
@@ -65,6 +87,11 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         enableQuickRenameAndLabelShortcuts:
           settings.values.enableQuickRenameAndLabelShortcuts,
         enableDesktopContextMenuHelper: settings.values.enableDesktopContextMenuHelper,
+      });
+      syncQuickJumpPreferences({
+        enableWorkspaceQuickJump: settings.values.enableWorkspaceQuickJump,
+        enableCommandCenterProjectItems: settings.values.enableCommandCenterProjectItems,
+        quickJumpDefaultAction: settings.values.quickJumpDefaultAction,
       });
     }
   }, [settings]);
@@ -129,6 +156,52 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         toast.show(res.message, { variant: "success" });
         if (!vars.dryRun && res.primaryWorkspaceId) {
           focusWorkspaceInApp(res.primaryWorkspaceId, res.primaryProjectId);
+        }
+      } else {
+        toast.error(res.message);
+      }
+    },
+  });
+
+  const quickJumpDiagMutation = useMutation({
+    mutationFn: (vars: {
+      query: string;
+      action: "list" | "jump";
+      jumpMode?: QuickJumpAction;
+      dryRun?: boolean;
+    }) =>
+      quickJump({
+        action: vars.action,
+        query: vars.query,
+        jumpMode: vars.jumpMode,
+        dryRun: vars.dryRun,
+        limit: 12,
+        source: "ui",
+      }),
+    onSuccess: (res, vars) => {
+      if (res.ok) {
+        toast.show(res.message, { variant: "success" });
+        if (vars.action === "jump" && !vars.dryRun) {
+          if (res.jumpMode === "locate-sidebar") {
+            locateProjectInSidebar({
+              projectId: res.targetProjectId,
+              projectKey: res.targetProjectKey,
+              projectName: res.targetProjectName,
+              expandIfCollapsed: true,
+              highlightFlash: true,
+            });
+          } else if (res.targetWorkspaceId) {
+            focusWorkspaceInApp(
+              res.targetWorkspaceId,
+              res.targetProjectId,
+              undefined,
+              undefined,
+              {
+                projectKey: res.targetProjectKey,
+                projectName: res.targetProjectName,
+              },
+            );
+          }
         }
       } else {
         toast.error(res.message);
@@ -377,6 +450,53 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSwitch
+            label={t("settings.quickJumpEnabledLabel")}
+            hint={t("settings.quickJumpEnabledHint")}
+            value={values.enableWorkspaceQuickJump}
+            onValueChange={(next) => {
+              syncQuickJumpPreferences({
+                enableWorkspaceQuickJump: next,
+                enableCommandCenterProjectItems: values.enableCommandCenterProjectItems,
+                quickJumpDefaultAction: values.quickJumpDefaultAction,
+              });
+              void save({ ...values, enableWorkspaceQuickJump: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.commandCenterProjectsLabel")}
+            hint={t("settings.commandCenterProjectsHint")}
+            value={values.enableCommandCenterProjectItems}
+            onValueChange={(next) => {
+              syncQuickJumpPreferences({
+                enableWorkspaceQuickJump: values.enableWorkspaceQuickJump,
+                enableCommandCenterProjectItems: next,
+                quickJumpDefaultAction: values.quickJumpDefaultAction,
+              });
+              void save({ ...values, enableCommandCenterProjectItems: next }, revision);
+            }}
+          />
+
+          <SettingsSelect
+            label={t("settings.quickJumpModeLabel")}
+            hint={t("settings.quickJumpModeHint")}
+            value={values.quickJumpDefaultAction}
+            options={[
+              { label: t("settings.optJumpOpenLatest"), value: "open-latest" },
+              { label: t("settings.optJumpLocateSidebar"), value: "locate-sidebar" },
+              { label: t("settings.optJumpCreateNew"), value: "create-new" },
+            ]}
+            onValueChange={(next) => {
+              syncQuickJumpPreferences({
+                enableWorkspaceQuickJump: values.enableWorkspaceQuickJump,
+                enableCommandCenterProjectItems: values.enableCommandCenterProjectItems,
+                quickJumpDefaultAction: next,
+              });
+              void save({ ...values, quickJumpDefaultAction: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
             label={t("settings.showComposerPillLabel")}
             hint={t("settings.showComposerPillHint")}
             value={values.showComposerPill}
@@ -397,6 +517,138 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             }}
           />
         </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionQuickJumpDiag")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>{t("settings.quickJumpDiagPrompt")}</Text>
+          <View style={styles.row}>
+            <TextInput
+              value={quickJumpQueryInput}
+              onChangeText={setQuickJumpQueryInput}
+              placeholder={t("settings.quickJumpDiagPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.quickJumpPreviewBtn")}
+              onPress={() => {
+                quickJumpDiagMutation.mutate({
+                  query: quickJumpQueryInput.trim(),
+                  action: "jump",
+                  dryRun: true,
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.quickJumpPreviewBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.quickJumpTestBtn")}
+              onPress={() => {
+                quickJumpDiagMutation.mutate({
+                  query: quickJumpQueryInput.trim(),
+                  action: "jump",
+                  jumpMode: values.quickJumpDefaultAction,
+                  dryRun: false,
+                });
+              }}
+              style={styles.btn}
+            >
+              <Icon name="FolderOpen" size={14} color={theme.colors.accentForeground} />
+              <Text style={styles.btnText}>{t("settings.quickJumpTestBtn")}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.quickJumpLocateBtn")}
+              onPress={() => {
+                quickJumpDiagMutation.mutate({
+                  query: quickJumpQueryInput.trim(),
+                  action: "jump",
+                  jumpMode: "locate-sidebar",
+                  dryRun: false,
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.quickJumpLocateBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.quickJumpOpenModalBtn")}
+              onPress={() => {
+                void openQuickWorkspaceSwitcherModal({
+                  initialQuery: quickJumpQueryInput.trim(),
+                  defaultJumpMode: values.quickJumpDefaultAction,
+                  onListJumpProjects: async (q) => {
+                    const r = await quickJump({
+                      action: "list",
+                      query: q,
+                      limit: 50,
+                      source: "quick-switcher",
+                    });
+                    return r.candidates;
+                  },
+                  onExecuteQuickJump: async (input) => {
+                    const r = await quickJump({
+                      action: "jump",
+                      projectId: input.projectId,
+                      query: input.query,
+                      jumpMode: input.jumpMode,
+                      source: input.source ?? "quick-switcher",
+                    });
+                    return {
+                      ok: r.ok,
+                      jumpMode: r.jumpMode,
+                      targetWorkspaceId: r.targetWorkspaceId,
+                      targetProjectId: r.targetProjectId,
+                      targetProjectKey: r.targetProjectKey,
+                      targetProjectName: r.targetProjectName,
+                      message: r.message,
+                    };
+                  },
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.quickJumpOpenModalBtn")}
+              </Text>
+            </Pressable>
+          </View>
+
+          {quickJumpDiagMutation.data ? (
+            <View style={{ gap: 5, marginTop: 6 }}>
+              <Text style={styles.label}>
+                {t("settings.quickJumpSummaryPrefix")}{" "}
+                {quickJumpDiagMutation.data.totalProjects} ·{" "}
+                {t("settings.quickJumpActiveThreadsPrefix")}{" "}
+                {quickJumpDiagMutation.data.totalActiveWorkspaces} ·{" "}
+                {t("settings.quickJumpEmptyProjectsPrefix")}{" "}
+                {quickJumpDiagMutation.data.emptyProjects} ·{" "}
+                {quickJumpDiagMutation.data.durationMs}ms
+              </Text>
+              <Text style={styles.detail}>
+                • {quickJumpDiagMutation.data.targetProjectName || "-"} →{" "}
+                {quickJumpDiagMutation.data.selectedCandidate?.primaryWorkspaceTitle || "-"} (
+                {quickJumpDiagMutation.data.targetWorkspaceId || "sidebar-only"})
+              </Text>
+              {quickJumpDiagMutation.data.candidates.slice(0, 4).map((cand) => (
+                <Text key={cand.projectId} style={styles.detail}>
+                  • [{cand.score} pts] {cand.projectName} ({cand.activeWorkspaceCount} threads) —{" "}
+                  {cand.shortPath}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+        </View>
       </SettingsSection>
 
       <SettingsSection title={t("settings.sectionInlineRenameDiag")}>
@@ -606,8 +858,123 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         </View>
       </SettingsSection>
 
+      <SettingsSection
+        title={
+          isZh
+            ? "定时任务运行历史与会话穿透对账器 (Schedules Runs & Session Drill-Down)"
+            : "Schedule Runs & Session Drill-Down Inspector (⌘⇧H)"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {isZh
+              ? "实时读取 Paseo 全部定时任务与 AG 灾备孪生运行历史（runs[]），一键打开「运行记录抽屉 (⌘⇧H)」或自动解档并跳转进入任意历史运行会话："
+              : "Inspect live Paseo schedule run history across all native & standby schedules, open the Runs Drawer (⌘⇧H), or unarchive and jump directly into any run conversation:"}
+          </Text>
+          <View style={styles.row}>
+            <TextInput
+              value={scheduleRunsQueryInput}
+              onChangeText={setScheduleRunsQueryInput}
+              placeholder={
+                isZh
+                  ? "筛选任务名/ID（留空默认列出有运行记录的任务）..."
+                  : "Filter schedule name or ID (leave empty for schedules with runs)..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() =>
+                inspectScheduleRuns({
+                  query: scheduleRunsQueryInput.trim() || undefined,
+                  onlyWithRuns: !scheduleRunsQueryInput.trim(),
+                  includeWorkspaceNames: true,
+                  maxRunsPerSchedule: 15,
+                }).then((res) => {
+                  setScheduleRunsDiagData(res);
+                })
+              }
+              style={styles.btn}
+            >
+              <Icon name="Clock" size={14} color={theme.colors.accentForeground} />
+              <Text style={styles.btnText}>
+                {isZh ? "读取运行账本" : "Inspect Runs"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() =>
+                triggerScheduleRunsDrawer(scheduleRunsQueryInput.trim() || null)
+              }
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "打开运行抽屉 (⌘⇧H)" : "Open Runs Drawer (⌘⇧H)"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {scheduleRunsDiagData ? (
+            <View style={{ gap: 6, marginTop: 6 }}>
+              <Text style={styles.label}>
+                {isZh
+                  ? `已扫描 ${scheduleRunsDiagData.totalSchedules} 个任务 · ${scheduleRunsDiagData.schedulesWithRuns} 个含运行记录 · 共 ${scheduleRunsDiagData.totalRuns} 次运行（✓ ${scheduleRunsDiagData.succeededRuns} / ✕ ${scheduleRunsDiagData.failedRuns}）· ${scheduleRunsDiagData.durationMs}ms`
+                  : `Scanned ${scheduleRunsDiagData.totalSchedules} schedules · ${scheduleRunsDiagData.schedulesWithRuns} with runs · ${scheduleRunsDiagData.totalRuns} total runs (✓ ${scheduleRunsDiagData.succeededRuns} / ✕ ${scheduleRunsDiagData.failedRuns}) · ${scheduleRunsDiagData.durationMs}ms`}
+              </Text>
+              {scheduleRunsDiagData.recentRuns.slice(0, 6).map((runItem) => (
+                <View
+                  key={runItem.id}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    paddingVertical: 4,
+                  }}
+                >
+                  <Text style={[styles.detail, { flex: 1 }]} numberOfLines={1}>
+                    • [{runItem.status === "succeeded" ? "✓" : "✕"}]{" "}
+                    {runItem.scheduleName} ({runItem.durationFormatted}) —{" "}
+                    {runItem.workspaceName || runItem.outputPreview}
+                  </Text>
+                  {runItem.workspaceId ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => {
+                        void openScheduleRunSession({
+                          action: "open-run",
+                          scheduleId: runItem.scheduleId,
+                          runId: runItem.id,
+                          workspaceId: runItem.workspaceId ?? undefined,
+                          agentId: runItem.agentId ?? undefined,
+                          dryRun: false,
+                        }).then((res) => {
+                          if (res.workspaceId) {
+                            navigateToPaseoWorkspace(res.workspaceId, res.agentId);
+                          }
+                        });
+                      }}
+                      style={styles.secondaryBtn}
+                    >
+                      <Text style={styles.secondaryBtnText}>
+                        {isZh ? "进入对话 ↗" : "Open Chat ↗"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
       <SettingsSection title={t("settings.sectionContract")}>
         <SettingsCard>
+          <SettingsRow
+            label={t("settings.contractQuickJumpLabel")}
+            hint={t("settings.contractQuickJumpHint")}
+          />
           <SettingsRow
             label={t("settings.contractInlineRenameLabel")}
             hint={t("settings.contractInlineRenameHint")}

@@ -1343,10 +1343,17 @@ function shortenHomePath(absPath: string): string {
 function pickWorkspaceTimestampMs(ws: {
   lastUserMessageAt?: string | null;
   activityAt?: string | null;
+  updatedAt?: string | null;
   statusEnteredAt?: string | null;
   createdAt?: string | null;
 }): number {
-  for (const raw of [ws.lastUserMessageAt, ws.activityAt, ws.statusEnteredAt, ws.createdAt]) {
+  for (const raw of [
+    ws.lastUserMessageAt,
+    ws.activityAt,
+    ws.updatedAt,
+    ws.statusEnteredAt,
+    ws.createdAt,
+  ]) {
     if (raw) {
       const parsed = Date.parse(raw);
       if (Number.isFinite(parsed) && parsed > 0) {
@@ -1421,6 +1428,7 @@ export async function handleQuickJumpWorkspace(
     status?: string;
     statusEnteredAt?: string | null;
     activityAt?: string | null;
+    updatedAt?: string | null;
     createdAt?: string | null;
     lastUserMessageAt?: string | null;
   };
@@ -1755,6 +1763,11 @@ export async function handleQuickJumpWorkspace(
     recentActions: getRecentActionLogs().slice(0, 8),
   };
 }
+
+export * from "./schedule-runs-handlers";
+export * from "./voice-stt-handlers";
+
+
 
 
 

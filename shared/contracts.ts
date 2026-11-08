@@ -42,6 +42,7 @@ export const ActionLogTargetSchema = z.union([
   z.literal("workspace-import"),
   z.literal("workspace-meta"),
   z.literal("workspace-jump"),
+  z.literal("voice-stt"),
 ]);
 
 export type ActionLogTarget = z.infer<typeof ActionLogTargetSchema>;
@@ -99,6 +100,8 @@ export const pluginSettings = defineSettings({
     enableWorkspaceQuickJump: z.boolean().default(true),
     enableCommandCenterProjectItems: z.boolean().default(true),
     quickJumpDefaultAction: QuickJumpActionSchema.default("open-latest"),
+    enableScheduleRunsInspector: z.boolean().default(true),
+    enableVoiceCustomModelHelper: z.boolean().default(true),
     showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),
   }),
@@ -341,6 +344,170 @@ export const quickJumpWorkspaceRpc = defineRpc({
   }),
 });
 
+export const VoiceSttPresetSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  labelZh: z.string(),
+  provider: z.enum(["openai", "local"]),
+  model: z.string(),
+  baseUrl: z.string(),
+  directBaseUrl: z.string(),
+  badge: z.string(),
+  freeTier: z.boolean(),
+  description: z.string(),
+  descriptionZh: z.string(),
+});
+
+export type VoiceSttPreset = z.infer<typeof VoiceSttPresetSchema>;
+
+export const VOICE_STT_PRESETS: readonly VoiceSttPreset[] = [
+  {
+    id: "siliconflow-sensevoice-free",
+    label: "SiliconFlow Free · SenseVoiceSmall",
+    labelZh: "硅基流动免费 · SenseVoiceSmall",
+    provider: "openai",
+    model: "FunAudioLLM/SenseVoiceSmall",
+    baseUrl: "http://127.0.0.1:8787/v1",
+    directBaseUrl: "https://api.siliconflow.cn/v1",
+    badge: "FREE · ~0.9s",
+    freeTier: true,
+    description: "Zero-cost high-speed multilingual ASR (CN/EN/JA/Cantonese) via SiliconFlow",
+    descriptionZh: "硅基流动免费极速多语种语音识别（中/英/日/粤）",
+  },
+  {
+    id: "siliconflow-qwen3-asr",
+    label: "OpenWhispr SOTA · Qwen3-ASR-1.7B",
+    labelZh: "OpenWhispr 同款 · Qwen3-ASR-1.7B",
+    provider: "openai",
+    model: "Qwen/Qwen3-ASR-1.7B",
+    baseUrl: "http://127.0.0.1:8787/v1",
+    directBaseUrl: "https://api.siliconflow.cn/v1",
+    badge: "OPENWHISPR · ~0.78s",
+    freeTier: false,
+    description: "Exact model configured in OpenWhispr — ultra-low latency bilingual SOTA ASR",
+    descriptionZh: "与 OpenWhispr 完全一致的高精度中英混输语音模型",
+  },
+  {
+    id: "siliconflow-telespeech-free",
+    label: "SiliconFlow Free · TeleSpeechASR",
+    labelZh: "硅基流动免费 · TeleSpeechASR",
+    provider: "openai",
+    model: "TeleAI/TeleSpeechASR",
+    baseUrl: "http://127.0.0.1:8787/v1",
+    directBaseUrl: "https://api.siliconflow.cn/v1",
+    badge: "FREE · CN/Dialect",
+    freeTier: true,
+    description: "Zero-cost TeleAI speech recognition for Mandarin & dialects via SiliconFlow",
+    descriptionZh: "硅基流动免费中国电信星辰语音识别模型",
+  },
+  {
+    id: "gemini-pool-3.5",
+    label: "Gemini 6-Key Pool · gemini-3.5-transcribe",
+    labelZh: "Gemini 6-Key 轮询池 · gemini-3.5-transcribe",
+    provider: "openai",
+    model: "gemini-3.5-transcribe",
+    baseUrl: "http://127.0.0.1:8787/v1",
+    directBaseUrl: "http://127.0.0.1:8787/v1",
+    badge: "6-KEY POOL · FREE",
+    freeTier: true,
+    description: "Auto-rotating 6-key Google Gemini Interactions pool with 429 cooldown protection",
+    descriptionZh: "本地 6-Key 自动轮换防 429 熔断语音池",
+  },
+  {
+    id: "groq-whisper-v3",
+    label: "Groq LPU · whisper-large-v3",
+    labelZh: "Groq 极速 · whisper-large-v3",
+    provider: "openai",
+    model: "whisper-large-v3",
+    baseUrl: "http://127.0.0.1:8787/v1",
+    directBaseUrl: "https://api.groq.com/openai/v1",
+    badge: "GROQ · ~0.85s",
+    freeTier: true,
+    description: "Groq LPU Whisper-Large-V3 ultra-fast transcription",
+    descriptionZh: "Groq LPU 极速 Whisper-Large-V3 语音转录",
+  },
+  {
+    id: "local-parakeet",
+    label: "Local Offline · parakeet-tdt-0.6b-v2",
+    labelZh: "本地离线 · parakeet-tdt-0.6b-v2",
+    provider: "local",
+    model: "parakeet-tdt-0.6b-v2",
+    baseUrl: "",
+    directBaseUrl: "",
+    badge: "OFFLINE",
+    freeTier: true,
+    description: "On-device Sherpa-ONNX offline speech recognition",
+    descriptionZh: "设备端 Sherpa-ONNX 离线语音识别",
+  },
+] as const;
+
+export const VoiceSttEndpointSnapshotSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  baseUrl: z.string(),
+  language: z.string(),
+  hasApiKey: z.boolean(),
+  apiKeyPreview: z.string(),
+  sourceBadge: z.string(),
+});
+
+export type VoiceSttEndpointSnapshot = z.infer<typeof VoiceSttEndpointSnapshotSchema>;
+
+export const VoiceSttTestReceiptSchema = z.object({
+  ok: z.boolean(),
+  transcript: z.string(),
+  model: z.string(),
+  provider: z.string(),
+  keyUsed: z.string(),
+  latencyMs: z.number(),
+  endpoint: z.string(),
+  error: z.string().nullable(),
+});
+
+export type VoiceSttTestReceipt = z.infer<typeof VoiceSttTestReceiptSchema>;
+
+export const manageVoiceSttRpc = defineRpc({
+  name: "finder.manage_voice_stt",
+  input: z.object({
+    action: z.enum(["inspect", "apply", "test", "reset"]).default("inspect"),
+    presetId: z.string().optional(),
+    provider: z.enum(["openai", "local"]).optional(),
+    model: z.string().optional(),
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional(),
+    language: z.string().optional(),
+    syncVoiceMode: z.boolean().optional(),
+    routeViaGateway: z.boolean().optional(),
+    source: z
+      .enum(["voice-sheet", "settings-ui", "slash-command", "command-center", "agent-tool"])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.enum(["inspect", "apply", "test", "reset"]),
+    dictationStt: VoiceSttEndpointSnapshotSchema,
+    voiceModeStt: VoiceSttEndpointSnapshotSchema,
+    gateway: z.object({
+      reachable: z.boolean(),
+      url: z.string(),
+      healthyKeys: z.number(),
+      totalKeys: z.number(),
+      siliconflowConfigured: z.boolean(),
+      groqConfigured: z.boolean(),
+    }),
+    openWhisprDetected: z.object({
+      found: z.boolean(),
+      endpoint: z.string(),
+      model: z.string(),
+    }),
+    presets: z.array(VoiceSttPresetSchema),
+    testResult: VoiceSttTestReceiptSchema.nullable(),
+    message: z.string(),
+    durationMs: z.number(),
+    recentActions: z.array(ActionLogEntrySchema),
+  }),
+});
+
 export function stripLeadingDatePrefix(name: string): string {
   return name
     .trim()
@@ -462,6 +629,5 @@ export function scoreProjectJumpQuery(
   return totalScore;
 }
 
-
-
+export * from "./schedule-runs-contracts";
 

@@ -5,29 +5,39 @@ import type {
 import { copyText } from "@getpaseo/plugin/client/ui";
 import {
   type OpenerTarget,
+  type QuickJumpAction,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
+  extractProjectSearchKeywords,
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
+  quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
 } from "./shared/contracts";
-import { pluginTranslations } from "./client/i18n";
+import { getCatalogForLocale, pluginTranslations } from "./client/i18n";
 import { ImageInspectorFilePanel } from "./client/image-panel";
 import { FinderPluginSettingsScreen } from "./client/settings-screen";
 import {
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
   installDesktopRevealHelpers,
+  locateProjectInSidebar,
   mountInlineTitleInput,
+  openQuickWorkspaceSwitcherModal,
+  readQuickJumpPreferences,
   syncImagePanelAssociations,
 } from "./client/web";
 import {
   WorkspaceFinderPanel,
   WorkspaceFinderPopover,
 } from "./client/workspace-finder";
+import {
+  installDesktopScheduleRunsEnhancer,
+  triggerScheduleRunsDrawer,
+} from "./client/schedule-runs-web";
 
 export default function contribute(client: PluginClientContext) {
   // 1. Pre-associate image extensions with our Image Inspector file panel
@@ -188,6 +198,106 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  const launchQuickJumpModal = (initialQuery?: string) => {
+    const jumpPrefs = readQuickJumpPreferences();
+    void openQuickWorkspaceSwitcherModal({
+      initialQuery,
+      locale: client.i18n.locale,
+      defaultJumpMode: jumpPrefs.quickJumpDefaultAction,
+      onListJumpProjects: async (query?: string) => {
+        const res = await client.rpc(quickJumpWorkspaceRpc, {
+          action: "list",
+          query,
+          limit: 50,
+          source: "quick-switcher",
+        });
+        return res.candidates;
+      },
+      onExecuteQuickJump: async (input) => {
+        const res = await client.rpc(quickJumpWorkspaceRpc, {
+          action: "jump",
+          projectId: input.projectId,
+          query: input.query,
+          jumpMode: input.jumpMode,
+          source: input.source ?? "quick-switcher",
+        });
+        if (res.ok && res.targetWorkspaceId) {
+          lastKnownWorkspaceId = res.targetWorkspaceId;
+        }
+        return {
+          ok: res.ok,
+          jumpMode: res.jumpMode,
+          targetWorkspaceId: res.targetWorkspaceId,
+          targetProjectId: res.targetProjectId,
+          targetProjectKey: res.targetProjectKey,
+          targetProjectName: res.targetProjectName,
+          message: res.message,
+        };
+      },
+    });
+  };
+
+  client.addCommandCenterItem({
+    id: "quick-jump-workspace",
+    title: pluginTranslations.message("commands.quickJumpWorkspace"),
+    icon: "FolderSearch",
+    keywords: [
+      "jump",
+      "switch",
+      "workspace",
+      "project",
+      "folder",
+      "go",
+      "cmd+j",
+      "quick",
+    ],
+    context: "global",
+    onSelect({ openSettings }) {
+      setTimeout(() => {
+        launchQuickJumpModal();
+      }, 30);
+      void openSettings;
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "inspect-schedule-runs",
+    title: "Schedules: Inspect Runs & Execution History (⌘⇧H)",
+    icon: "Clock",
+    keywords: [
+      "schedule",
+      "runs",
+      "history",
+      "cadence",
+      "automation",
+      "standby",
+      "logs",
+      "定时任务",
+      "运行记录",
+      "历史",
+    ],
+    context: "global",
+    onSelect() {
+      setTimeout(() => {
+        triggerScheduleRunsDrawer(null);
+      }, 30);
+    },
+  });
+
+  client.addSlashCommand({
+    name: "schedule-runs",
+    description:
+      "Open Paseo Schedule Runs & Execution History drawer (or inspect a specific schedule ID)",
+    argumentHint: "[schedule-id]",
+    context: "workspace",
+    async onSubmit({ args }) {
+      const sid = args.trim() || null;
+      setTimeout(() => {
+        triggerScheduleRunsDrawer(sid);
+      }, 30);
+    },
+  });
+
   // 6. Register Composer Slash Commands (/reveal, /finder, /rename, /title, /label, /tag)
   for (const cmdName of ["reveal", "finder"] as const) {
     client.addSlashCommand({
@@ -325,10 +435,163 @@ export default function contribute(client: PluginClientContext) {
     });
   }
 
-  // 7. Dynamically register Top-Right Workspace Header Button
+  for (const cmdName of ["jump", "go"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.jumpSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.jumpSlashHint"),
+      context: "workspace",
+      async onSubmit({ args, rpc }) {
+        const trimmed = args.trim();
+        if (!trimmed) {
+          launchQuickJumpModal();
+          return;
+        }
+        const res = await rpc(quickJumpWorkspaceRpc, {
+          action: "jump",
+          query: trimmed,
+          source: "slash-command",
+        });
+        if (!res.ok) {
+          launchQuickJumpModal(trimmed);
+          return;
+        }
+        if (res.jumpMode === "locate-sidebar") {
+          locateProjectInSidebar({
+            projectId: res.targetProjectId,
+            projectKey: res.targetProjectKey,
+            projectName: res.targetProjectName,
+            expandIfCollapsed: true,
+            highlightFlash: true,
+          });
+        } else if (res.targetWorkspaceId) {
+          lastKnownWorkspaceId = res.targetWorkspaceId;
+          focusWorkspaceInApp(
+            res.targetWorkspaceId,
+            res.targetProjectId,
+            undefined,
+            undefined,
+            {
+              projectKey: res.targetProjectKey,
+              projectName: res.targetProjectName,
+            },
+          );
+        }
+      },
+    });
+  }
+
+  // 7. Dynamically register Top-Right Workspace Header Button + Command Center (⌘K) Project Jump Items
   const headerButtons = new Map<string, PluginButtonRegistration>();
+  const projectCommandCleanups = new Map<string, () => void>();
   const lifetime = new AbortController();
   let lastKnownWorkspaceId: string | undefined;
+  let syncProjectsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearProjectCommandItems = () => {
+    for (const cleanup of projectCommandCleanups.values()) {
+      try {
+        cleanup();
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+    projectCommandCleanups.clear();
+  };
+
+  const syncCommandCenterProjectItems = async () => {
+    if (lifetime.signal.aborted) return;
+    const res = await client
+      .rpc(quickJumpWorkspaceRpc, {
+        action: "list",
+        limit: 50,
+        source: "command-center",
+      })
+      .catch(() => null);
+    if (!res || lifetime.signal.aborted) return;
+
+    const jumpPrefs = readQuickJumpPreferences();
+    if (!jumpPrefs.enableCommandCenterProjectItems) {
+      clearProjectCommandItems();
+      return;
+    }
+
+    const catalog = getCatalogForLocale(client.i18n.locale);
+    const seenIds = new Set<string>();
+
+    for (const candidate of res.candidates) {
+      const itemId = `jump-project-${candidate.projectId}`;
+      seenIds.add(itemId);
+      projectCommandCleanups.get(itemId)?.();
+
+      const cleanup = client.addCommandCenterItem({
+        id: itemId,
+        title: `${catalog.commands.jumpToProjectPrefix} ${candidate.projectName} (${candidate.activeWorkspaceCount})`,
+        icon: "FolderOpen",
+        keywords: extractProjectSearchKeywords(
+          candidate.projectName,
+          candidate.projectRootPath,
+        ),
+        context: "global",
+        async onSelect({ rpc }) {
+          const jumpRes = await rpc(quickJumpWorkspaceRpc, {
+            action: "jump",
+            projectId: candidate.projectId,
+            source: "command-center",
+          });
+          if (!jumpRes.ok) return;
+          if (jumpRes.jumpMode === "locate-sidebar") {
+            locateProjectInSidebar({
+              projectId: jumpRes.targetProjectId ?? candidate.projectId,
+              projectKey: jumpRes.targetProjectKey ?? candidate.projectKey,
+              projectName: jumpRes.targetProjectName ?? candidate.projectName,
+              expandIfCollapsed: true,
+              highlightFlash: true,
+            });
+          } else if (jumpRes.targetWorkspaceId) {
+            lastKnownWorkspaceId = jumpRes.targetWorkspaceId;
+            focusWorkspaceInApp(
+              jumpRes.targetWorkspaceId,
+              jumpRes.targetProjectId ?? candidate.projectId,
+              undefined,
+              undefined,
+              {
+                projectKey: jumpRes.targetProjectKey ?? candidate.projectKey,
+                projectName: jumpRes.targetProjectName ?? candidate.projectName,
+              },
+            );
+          }
+        },
+      });
+
+      if (typeof cleanup === "function") {
+        projectCommandCleanups.set(itemId, cleanup);
+      }
+    }
+
+    for (const [existingId, cleanup] of projectCommandCleanups.entries()) {
+      if (!seenIds.has(existingId)) {
+        try {
+          cleanup();
+        } catch {
+          // Ignore
+        }
+        projectCommandCleanups.delete(existingId);
+      }
+    }
+  };
+
+  const scheduleCommandCenterProjectsSync = () => {
+    if (lifetime.signal.aborted) return;
+    if (syncProjectsTimer) {
+      clearTimeout(syncProjectsTimer);
+    }
+    syncProjectsTimer = setTimeout(() => {
+      void syncCommandCenterProjectItems();
+    }, 120);
+  };
+
+  void syncCommandCenterProjectItems();
 
   const registerWorkspaceHeader = (workspace: { id: string }) => {
     if (lifetime.signal.aborted) return;
@@ -359,11 +622,13 @@ export default function contribute(client: PluginClientContext) {
       subscription.subscribe({
         snapshot: ({ entries: nextEntries }) => {
           for (const ws of nextEntries) registerWorkspaceHeader(ws);
+          scheduleCommandCenterProjectsSync();
         },
         update: (msg) => {
           if (msg.type === "workspace_update" && msg.payload.kind === "upsert") {
             registerWorkspaceHeader(msg.payload.workspace);
           }
+          scheduleCommandCenterProjectsSync();
         },
       });
       return undefined;
@@ -492,11 +757,55 @@ export default function contribute(client: PluginClientContext) {
         message: res.message,
       };
     },
+    onListJumpProjects: async (query?: string) => {
+      const res = await client.rpc(quickJumpWorkspaceRpc, {
+        action: "list",
+        query,
+        limit: 50,
+        source: "quick-switcher",
+      });
+      return res.candidates;
+    },
+    onExecuteQuickJump: async (input: {
+      projectId?: string;
+      query?: string;
+      jumpMode?: QuickJumpAction;
+      source?: "quick-switcher";
+    }) => {
+      const res = await client.rpc(quickJumpWorkspaceRpc, {
+        action: "jump",
+        projectId: input.projectId,
+        query: input.query,
+        jumpMode: input.jumpMode,
+        source: input.source ?? "quick-switcher",
+      });
+      if (res.ok && res.targetWorkspaceId) {
+        lastKnownWorkspaceId = res.targetWorkspaceId;
+      }
+      return {
+        ok: res.ok,
+        jumpMode: res.jumpMode,
+        targetWorkspaceId: res.targetWorkspaceId,
+        targetProjectId: res.targetProjectId,
+        targetProjectKey: res.targetProjectKey,
+        targetProjectName: res.targetProjectName,
+        message: res.message,
+      };
+    },
+  });
+
+  const cleanupScheduleRunsEnhancer = installDesktopScheduleRunsEnhancer({
+    call: (def, input) => client.rpc(def as never, input as never) as never,
   });
 
   return () => {
     lifetime.abort();
+    if (syncProjectsTimer) {
+      clearTimeout(syncProjectsTimer);
+    }
+    clearProjectCommandItems();
     cleanupWebHelpers();
+    cleanupScheduleRunsEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
   };

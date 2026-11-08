@@ -15,7 +15,11 @@ import {
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   pluginSettings,
+  quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
+  extractProjectSearchKeywords,
+  scoreProjectJumpQuery,
+  stripLeadingDatePrefix,
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
@@ -27,7 +31,10 @@ import {
   handleListWorkspaceMedia,
   handleManageWorkspaceLabels,
   handleOpenFileTarget,
+  handleQuickJumpWorkspace,
   handleRenameThread,
+  handleInspectScheduleRuns,
+  handleOpenScheduleRunSession,
   normalizeDaemonListenAddress,
   resolveBestPath,
   resolveDaemonClientModuleHref,
@@ -52,7 +59,9 @@ import {
   isInsideSidebarDropZone,
   isInsideWorkspaceHeaderTitle,
   isInsideWorkspaceTab,
+  locateProjectInSidebar,
   mountInlineTitleInput,
+  openQuickWorkspaceSwitcherModal,
   parseSidebarWorkspaceRowTestId,
   readInlineRenamePreferences,
   resolveCurrentActiveWorkspaceId,
@@ -942,6 +951,23 @@ function createInteractiveDomNode(
       }
       return null;
     },
+    querySelectorAll: (selector: string) => {
+      const matchAttr = selector.match(/^\[data-testid="([^"]+)"\]$/);
+      const matchPrefix = selector.match(/^\[data-testid\^="([^"]+)"\]$/);
+      const out: MinimalElement[] = [];
+      const walk = (el: MinimalElement) => {
+        const tid = el.getAttribute?.("data-testid") ?? "";
+        if (matchAttr && tid === matchAttr[1]) out.push(el);
+        else if (matchPrefix && tid.startsWith(matchPrefix[1])) out.push(el);
+        for (const ch of (el.children as MinimalElement[]) ?? []) {
+          walk(ch);
+        }
+      };
+      for (const ch of children) {
+        walk(ch);
+      }
+      return out;
+    },
     addEventListener: (type, handler) => {
       const arr = listeners.get(type) ?? [];
       arr.push(handler);
@@ -1359,6 +1385,534 @@ test("15. Daemon bridge URL & bundled CJS worker module resolution (regression f
   assert.ok(resolvedFromUndefined.endsWith("/@getpaseo/client/dist/node/index.js"));
 });
 
+test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, and jump modes (open-latest, locate-sidebar, create-new)", async () => {
+  assert.equal(stripLeadingDatePrefix("2026-11-07 Guan Tian Hao"), "Guan Tian Hao");
+  assert.equal(stripLeadingDatePrefix("26.09.08-antigravity-webhook-hub"), "antigravity-webhook-hub");
+  assert.ok(quickJumpWorkspaceRpc.name === "finder.quick_jump_projects");
 
+  const guanKeywords = extractProjectSearchKeywords(
+    "2026-11-07 Guan Tian Hao",
+    "/Users/dev/Cowork/2026-11-07 Guan Tian Hao",
+  );
+  assert.ok(guanKeywords.includes("guan tian hao"));
+  assert.ok(guanKeywords.includes("guan"));
+  assert.ok(guanKeywords.includes("gth"), "Must generate initialism/acronym gth");
 
+  const guanCandidate = {
+    projectName: "2026-11-07 Guan Tian Hao",
+    projectRootPath: "/Users/dev/Cowork/2026-11-07 Guan Tian Hao",
+    shortPath: "~/Cowork/2026-11-07 Guan Tian Hao",
+    primaryWorkspaceTitle: "Guan Thread 9",
+  };
+  const metaCandidate = {
+    projectName: "2026-11-08 Meta harness",
+    projectRootPath: "/Users/dev/Cowork/2026-11-08 Meta harness",
+    shortPath: "~/Cowork/2026-11-08 Meta harness",
+    primaryWorkspaceTitle: "Paseo Plugin Dev",
+  };
+
+  assert.ok(scoreProjectJumpQuery(guanCandidate, "guan") >= 850);
+  assert.ok(scoreProjectJumpQuery(guanCandidate, "gth") >= 700);
+  assert.equal(scoreProjectJumpQuery(metaCandidate, "guan"), 0);
+
+  let createdCount = 0;
+  const tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-quick-jump-"));
+  const guanDir = path.join(tmpBase, "2026-11-07 Guan Tian Hao");
+  const metaDir = path.join(tmpBase, "2026-11-08 Meta harness");
+  const emptyDir = path.join(tmpBase, "opencli-plugin-goofish");
+  await fs.mkdir(guanDir, { recursive: true });
+  await fs.mkdir(metaDir, { recursive: true });
+  await fs.mkdir(emptyDir, { recursive: true });
+
+  try {
+    const mockCtx = {
+      paseo: {
+        projects: {
+          list: async () => ({
+            projects: [
+              {
+                projectId: "prj_guan",
+                projectKey: "key_guan",
+                projectDisplayName: "2026-11-07 Guan Tian Hao",
+                projectRootPath: guanDir,
+                projectKind: "directory" as const,
+              },
+              {
+                projectId: "prj_meta",
+                projectKey: "key_meta",
+                projectDisplayName: "2026-11-08 Meta harness",
+                projectRootPath: metaDir,
+                projectKind: "git" as const,
+              },
+              {
+                projectId: "prj_empty",
+                projectKey: "key_empty",
+                projectDisplayName: "opencli-plugin-goofish",
+                projectRootPath: emptyDir,
+                projectKind: "git" as const,
+              },
+            ],
+          }),
+        },
+        workspaces: {
+          list: async () => ({
+            entries: [
+              // 3 sub-threads under Guan Tian Hao -> must deduplicate into 1 Project candidate!
+              {
+                id: "wks_guan_1",
+                name: "2026-11-07 Guan Tian Hao",
+                title: "Old Thread 1",
+                projectId: "prj_guan",
+                projectKey: "key_guan",
+                workspaceDirectory: guanDir,
+                updatedAt: "2026-11-07T10:00:00.000Z",
+              },
+              {
+                id: "wks_guan_2",
+                name: "2026-11-07 Guan Tian Hao",
+                title: "Latest Guan Thread",
+                projectId: "prj_guan",
+                projectKey: "key_guan",
+                workspaceDirectory: guanDir,
+                updatedAt: "2026-11-08T09:00:00.000Z",
+              },
+              {
+                id: "wks_guan_3",
+                name: "2026-11-07 Guan Tian Hao",
+                title: "Sub Thread 3",
+                projectId: "prj_guan",
+                projectKey: "key_guan",
+                workspaceDirectory: guanDir,
+                updatedAt: "2026-11-07T15:00:00.000Z",
+              },
+              {
+                id: "wks_meta_1",
+                name: "2026-11-08 Meta harness",
+                title: "Meta Main",
+                projectId: "prj_meta",
+                projectKey: "key_meta",
+                workspaceDirectory: metaDir,
+                updatedAt: "2026-11-08T08:00:00.000Z",
+              },
+            ],
+          }),
+          open: async (cwd: string) => ({
+            id: "wks_opened_empty",
+            name: path.basename(cwd),
+            projectId: "prj_empty",
+            directory: cwd,
+          }),
+          create: async (opts: { source: { path: string }; title?: string }) => {
+            createdCount += 1;
+            return {
+              id: `wks_created_${createdCount}`,
+              name: opts.title ?? path.basename(opts.source.path),
+              projectId: "prj_guan",
+              directory: opts.source.path,
+            };
+          },
+        },
+      },
+    } as never;
+
+    // 1) List all projects -> 3 deduplicated projects instead of 4 individual sub-threads
+    const listAll = await handleQuickJumpWorkspace({ action: "list" }, mockCtx);
+    assert.equal(listAll.ok, true);
+    assert.equal(listAll.totalProjects, 3);
+    assert.equal(listAll.totalActiveWorkspaces, 4);
+    assert.equal(listAll.emptyProjects, 1);
+    assert.equal(listAll.candidates.length, 3);
+
+    // 2) Query "guan" -> returns only 1 deduplicated Guan Tian Hao project candidate pointing at latest workspace wks_guan_2
+    const jumpGuan = await handleQuickJumpWorkspace(
+      { action: "jump", query: "guan", jumpMode: "open-latest" },
+      mockCtx,
+    );
+    assert.equal(jumpGuan.ok, true);
+    assert.equal(jumpGuan.candidates.length, 1);
+    assert.equal(jumpGuan.targetProjectId, "prj_guan");
+    assert.equal(jumpGuan.targetWorkspaceId, "wks_guan_2");
+    assert.equal(jumpGuan.selectedCandidate?.activeWorkspaceCount, 3);
+
+    // 3) Locate-sidebar mode -> does not open/create a thread, returns targetProjectId & targetProjectKey
+    const locateGuan = await handleQuickJumpWorkspace(
+      { action: "jump", query: "gth", jumpMode: "locate-sidebar" },
+      mockCtx,
+    );
+    assert.equal(locateGuan.ok, true);
+    assert.equal(locateGuan.jumpMode, "locate-sidebar");
+    assert.equal(locateGuan.targetProjectId, "prj_guan");
+    assert.equal(locateGuan.targetProjectKey, "key_guan");
+    assert.equal(locateGuan.targetWorkspaceId, null);
+
+    // 4) Create-new mode -> creates a fresh workspace thread inside Guan Tian Hao
+    const createNewGuan = await handleQuickJumpWorkspace(
+      { action: "jump", projectId: "prj_guan", jumpMode: "create-new" },
+      mockCtx,
+    );
+    assert.equal(createNewGuan.ok, true);
+    assert.equal(createNewGuan.createdWorkspace, true);
+    assert.equal(createNewGuan.targetWorkspaceId, "wks_created_1");
+
+    // 5) Jumping to a zero-thread project ("goofish") opens/initializes a clean workspace for it automatically!
+    const jumpEmpty = await handleQuickJumpWorkspace(
+      { action: "jump", query: "goofish", jumpMode: "open-latest" },
+      mockCtx,
+    );
+    assert.equal(jumpEmpty.ok, true);
+    assert.equal(jumpEmpty.targetProjectId, "prj_empty");
+    assert.equal(jumpEmpty.targetWorkspaceId, "wks_opened_empty");
+  } finally {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cmd+J Quick Workspace Switcher modal", async () => {
+  let projectRowClicked = false;
+  let projectRowScrolled = false;
+
+  const guanProjectRow = createInteractiveDomNode(
+    "div",
+    { "data-testid": "sidebar-project-row-local:key_guan" },
+    "2026-11-07 Guan Tian Hao",
+  );
+  guanProjectRow.click = () => {
+    projectRowClicked = true;
+  };
+  guanProjectRow.scrollIntoView = () => {
+    projectRowScrolled = true;
+  };
+
+  const body = createInteractiveDomNode("div", { "data-testid": "body" });
+  body.appendChild?.(guanProjectRow);
+
+  const mockDoc: MinimalDocument = {
+    body,
+    head: createInteractiveDomNode("head"),
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    querySelector: (sel: string) => body.querySelector?.(sel) ?? null,
+    querySelectorAll: (sel: string) => body.querySelectorAll?.(sel) ?? [],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const mockWin: MinimalWindow = {
+    document: mockDoc,
+    innerWidth: 1280,
+    innerHeight: 800,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // 1) locateProjectInSidebar clicks collapsed project row to expand it, scrolls into view, and applies flash attribute
+  const located = locateProjectInSidebar(
+    {
+      projectId: "prj_guan",
+      projectKey: "key_guan",
+      projectName: "2026-11-07 Guan Tian Hao",
+      expandIfCollapsed: true,
+      highlightFlash: true,
+    },
+    mockDoc,
+    mockWin,
+  );
+  assert.equal(located, true);
+  assert.equal(projectRowClicked, true);
+  assert.equal(projectRowScrolled, true);
+  assert.equal(guanProjectRow.getAttribute?.("data-paseo-project-jump-flash"), "true");
+
+  // 2) openQuickWorkspaceSwitcherModal mounts modal, filters candidates on input, and triggers jump on Enter / Shift+Enter
+  const executedJumps: Array<{ projectId?: string; jumpMode?: string }> = [];
+  const modalEl = await openQuickWorkspaceSwitcherModal(
+    {
+      locale: "en-US",
+      defaultJumpMode: "open-latest",
+      onListJumpProjects: async () => [
+        {
+          projectId: "prj_guan",
+          projectKey: "key_guan",
+          projectName: "2026-11-07 Guan Tian Hao",
+          projectRootPath: "/Users/dev/Cowork/2026-11-07 Guan Tian Hao",
+          shortPath: "~/Cowork/2026-11-07 Guan Tian Hao",
+          projectKind: "directory",
+          activeWorkspaceCount: 10,
+          primaryWorkspaceId: "wks_guan_latest",
+          primaryWorkspaceTitle: "Guan Main",
+          hasRunningAgent: false,
+          lastActivityIso: "2026-11-08T10:00:00.000Z",
+          lastActivityRelative: "2m ago",
+          score: 100,
+        },
+        {
+          projectId: "prj_meta",
+          projectKey: "key_meta",
+          projectName: "2026-11-08 Meta harness",
+          projectRootPath: "/Users/dev/Cowork/2026-11-08 Meta harness",
+          shortPath: "~/Cowork/2026-11-08 Meta harness",
+          projectKind: "git",
+          activeWorkspaceCount: 3,
+          primaryWorkspaceId: "wks_meta_latest",
+          primaryWorkspaceTitle: "Meta Main",
+          hasRunningAgent: true,
+          lastActivityIso: "2026-11-08T10:05:00.000Z",
+          lastActivityRelative: "just now",
+          score: 100,
+        },
+      ],
+      onExecuteQuickJump: async (input) => {
+        executedJumps.push({ projectId: input.projectId, jumpMode: input.jumpMode });
+        return {
+          ok: true,
+          jumpMode: input.jumpMode ?? "open-latest",
+          targetWorkspaceId: "wks_guan_latest",
+          targetProjectId: "prj_guan",
+          targetProjectKey: "key_guan",
+          targetProjectName: "2026-11-07 Guan Tian Hao",
+          message: "Switched to 2026-11-07 Guan Tian Hao",
+        };
+      },
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  assert.ok(modalEl, "Quick jump modal must mount into document.body");
+  const searchInput = body.querySelector?.(
+    '[data-testid="paseo-finder-quick-jump-input"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(searchInput, "Quick jump search input must exist");
+
+  // Filter by typing "guan"
+  searchInput.value = "guan";
+  searchInput.dispatch("input", {});
+  assert.ok(
+    body.querySelector?.('[data-testid="paseo-finder-quick-jump-item-prj_guan"]'),
+    "Guan project item should remain visible",
+  );
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-jump-item-prj_meta"]'),
+    null,
+    "Non-matching Meta project item should be filtered out",
+  );
+
+  // Press Shift+Enter -> executes locate-sidebar and closes modal
+  searchInput.dispatch("keydown", { key: "Enter", shiftKey: true });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(executedJumps, [
+    { projectId: "prj_guan", jumpMode: "locate-sidebar" },
+  ]);
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-jump-modal"]'),
+    null,
+    "Modal must close after executing jump",
+  );
+});
+
+test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspectScheduleRuns & handleOpenScheduleRunSession)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-sched-runs-"));
+  try {
+    const sentinelSchedule = {
+      id: "2a8a43f9",
+      name: "AG · Antigravity Webhook Hub — Sentinel",
+      prompt: "[ag-standby slug=webhook-hub-sentinel sha=7cd9bd605c40]\nRun sentinel check.",
+      cadence: { type: "cron", expression: "0 */4 * * *", timezone: "Asia/Shanghai" },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "antigravity",
+          cwd: "/Users/dev/webhook-hub",
+          modeId: "full-access",
+          model: "gemini-3.8-flash-high",
+          archiveOnFinish: true,
+        },
+      },
+      status: "paused",
+      nextRunAt: null,
+      lastRunAt: "2026-11-08T00:32:52.578Z",
+      runs: [
+        {
+          id: "run-1",
+          scheduledFor: "2026-11-07T20:29:53.000Z",
+          startedAt: "2026-11-07T20:29:53.000Z",
+          endedAt: "2026-11-07T20:35:08.000Z",
+          status: "succeeded",
+          agentId: "agent-older",
+          workspaceId: "wks_older",
+          output: "✅ Older sentinel run ok\n",
+          error: null,
+        },
+        {
+          id: "run-2",
+          scheduledFor: "2026-11-08T00:30:06.000Z",
+          startedAt: "2026-11-08T00:30:06.000Z",
+          endedAt: "2026-11-08T00:32:52.000Z",
+          status: "succeeded",
+          agentId: "agent-latest",
+          workspaceId: "wks_archived_run",
+          output: "### Antigravity Webhook Hub 哨兵巡检快照 (全绿正常)\n",
+          error: null,
+        },
+      ],
+    };
+    const idleSchedule = {
+      id: "idle0001",
+      name: "AG · Idle Sidecar",
+      prompt: "[ag-standby slug=idle-sidecar sha=111122223333]\nIdle prompt.",
+      cadence: { type: "cron", expression: "0 9 * * *", timezone: "Asia/Shanghai" },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "antigravity",
+          cwd: "/Users/dev/idle",
+          modeId: "full-access",
+          model: "gemini-3.8-flash-high",
+        },
+      },
+      status: "paused",
+      runs: [],
+    };
+
+    await fs.writeFile(
+      path.join(tmpDir, "2a8a43f9.json"),
+      JSON.stringify(sentinelSchedule, null, 2),
+      "utf-8",
+    );
+    await fs.writeFile(
+      path.join(tmpDir, "idle0001.json"),
+      JSON.stringify(idleSchedule, null, 2),
+      "utf-8",
+    );
+
+    const restoredWorkspaces: string[] = [];
+    const spawnedRunOnce: string[] = [];
+    const mockBridge = {
+      async inspectWorkspaceRecovery(wid: string) {
+        if (wid === "wks_archived_run") {
+          return {
+            kind: "recoverable",
+            workspaceId: wid,
+            workspaceName: "Run webhook hub sentinel standby check",
+            action: "unarchive",
+          };
+        }
+        return { kind: "active", workspaceId: wid, workspaceName: "Older Run" };
+      },
+      async restoreWorkspace(wid: string) {
+        restoredWorkspaces.push(wid);
+      },
+      async fetchAgentTimeline(agentId: string) {
+        return {
+          entries: [
+            {
+              timestamp: "2026-11-08T00:30:07.000Z",
+              item: {
+                type: "user_message",
+                text: "Run sentinel check",
+                messageId: `msg-u-${agentId}`,
+              },
+            },
+            {
+              timestamp: "2026-11-08T00:32:51.000Z",
+              item: {
+                type: "assistant_message",
+                text: "### Antigravity Webhook Hub 哨兵巡检快照 (全绿正常)",
+                messageId: `msg-a-${agentId}`,
+              },
+            },
+          ],
+        };
+      },
+      async scheduleUpdate() {
+        return {};
+      },
+    };
+
+    const mockContext = {
+      paseo: {
+        workspaces: {
+          async list() {
+            return { entries: [] };
+          },
+        },
+      },
+    } as never;
+
+    // 1) Inspect schedules with runs
+    const inspected = await handleInspectScheduleRuns(
+      {
+        onlyWithRuns: true,
+        includeWorkspaceNames: true,
+        maxRunsPerSchedule: 20,
+      },
+      mockContext,
+      { schedulesDir: tmpDir, bridge: mockBridge },
+    );
+    assert.equal(inspected.ok, true);
+    assert.equal(inspected.totalSchedules, 2);
+    assert.equal(inspected.schedulesWithRuns, 1);
+    assert.equal(inspected.totalRuns, 2);
+    assert.equal(inspected.succeededRuns, 2);
+    assert.equal(inspected.schedules.length, 1);
+    assert.equal(inspected.schedules[0].id, "2a8a43f9");
+    assert.equal(inspected.schedules[0].isStandbyTwin, true);
+    assert.equal(inspected.schedules[0].standbySlug, "webhook-hub-sentinel");
+    assert.equal(inspected.schedules[0].runs[0].id, "run-2");
+    assert.equal(
+      inspected.schedules[0].runs[0].workspaceName,
+      "Run webhook hub sentinel standby check",
+    );
+    assert.equal(inspected.schedules[0].runs[0].isArchived, true);
+
+    // 2) Open archived run session -> unarchives workspace via restoreWorkspace and loads timeline
+    const opened = await handleOpenScheduleRunSession(
+      {
+        action: "open-run",
+        scheduleId: "2a8a43f9",
+        runId: "run-2",
+        dryRun: false,
+      },
+      mockContext,
+      { schedulesDir: tmpDir, bridge: mockBridge },
+    );
+    assert.equal(opened.ok, true);
+    assert.equal(opened.unarchived, true);
+    assert.deepEqual(restoredWorkspaces, ["wks_archived_run"]);
+    assert.equal(opened.workspaceId, "wks_archived_run");
+    assert.equal(opened.timelineEntries.length, 2);
+    assert.equal(opened.timelineEntries[1].role, "assistant");
+
+    // 3) Toggle archiveOnFinish policy (能调)
+    const toggled = await handleOpenScheduleRunSession(
+      {
+        action: "toggle-archive-on-finish",
+        scheduleId: "2a8a43f9",
+        archiveOnFinish: false,
+        dryRun: false,
+      },
+      mockContext,
+      { schedulesDir: tmpDir, bridge: mockBridge },
+    );
+    assert.equal(toggled.ok, true);
+    assert.equal(toggled.archiveOnFinish, false);
+
+    // 4) Trigger run-now
+    const triggered = await handleOpenScheduleRunSession(
+      {
+        action: "run-now",
+        scheduleId: "2a8a43f9",
+        dryRun: false,
+      },
+      mockContext,
+      {
+        schedulesDir: tmpDir,
+        bridge: mockBridge,
+        spawnDetachedRunOnce: (sid) => spawnedRunOnce.push(sid),
+      },
+    );
+    assert.equal(triggered.ok, true);
+    assert.deepEqual(spawnedRunOnce, ["2a8a43f9"]);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
 
