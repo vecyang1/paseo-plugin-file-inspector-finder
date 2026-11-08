@@ -45,86 +45,81 @@ export function readVoiceCustomModelPreferences(): { enabled: boolean } {
 }
 
 interface VoiceCopy {
-  panelTitle: string;
-  panelSubtitle: string;
-  activeModelPrefix: string;
-  gatewayOnlineBadge: string;
-  gatewayOfflineBadge: string;
+  customModelLabel: string;
+  presetsLabel: string;
   customModelPlaceholder: string;
   applyBtn: string;
   applyingBtn: string;
   testBtn: string;
   testingBtn: string;
-  resetBtn: string;
-  routeGatewayHint: string;
   appliedSuccessPrefix: string;
   testOkPrefix: string;
   testFailPrefix: string;
 }
 
 const COPY_EN: VoiceCopy = {
-  panelTitle: "Custom STT Models & SiliconFlow Presets",
-  panelSubtitle:
-    "Unlock SiliconFlow free ASR (SenseVoiceSmall, TeleSpeechASR), OpenWhispr Qwen3-ASR-1.7B, Gemini 6-Key Pool, or any custom model ID.",
-  activeModelPrefix: "Active STT:",
-  gatewayOnlineBadge: "Audio Pool :8787 Ready",
-  gatewayOfflineBadge: "Direct API Mode",
-  customModelPlaceholder:
-    "Enter any custom STT model ID (e.g. FunAudioLLM/SenseVoiceSmall or Qwen/Qwen3-ASR-1.7B)...",
-  applyBtn: "Apply Custom Model",
-  applyingBtn: "Applying...",
-  testBtn: "Test STT",
-  testingBtn: "Testing...",
-  resetBtn: "Reset Default",
-  routeGatewayHint:
-    "Auto-routes SiliconFlow & Gemini models via local Audio Pool Gateway (:8787) to fix Paseo chunked stream uploads and enable 6-key failover.",
-  appliedSuccessPrefix: "Applied STT model:",
-  testOkPrefix: "STT Probe OK",
-  testFailPrefix: "STT Probe Error",
+  customModelLabel: "Custom model",
+  presetsLabel: "Presets",
+  customModelPlaceholder: "Model ID (e.g. Qwen/Qwen3-ASR-1.7B)",
+  applyBtn: "Apply",
+  applyingBtn: "Saving…",
+  testBtn: "Test",
+  testingBtn: "Testing…",
+  appliedSuccessPrefix: "Saved",
+  testOkPrefix: "OK",
+  testFailPrefix: "Failed",
 };
 
 const COPY_ZH: VoiceCopy = {
-  panelTitle: "自定义语音模型与硅基流动免费预设",
-  panelSubtitle:
-    "一键启用硅基流动免费语音模型 (SenseVoiceSmall / TeleSpeechASR)、OpenWhispr 同款 Qwen3-ASR-1.7B、Gemini 6-Key 轮询池，或输入任意自定义模型 ID。",
-  activeModelPrefix: "当前生效模型：",
-  gatewayOnlineBadge: "本地语音网关 :8787 就绪",
-  gatewayOfflineBadge: "直连 API 模式",
-  customModelPlaceholder:
-    "输入任意自定义语音模型 ID（如 FunAudioLLM/SenseVoiceSmall 或 Qwen/Qwen3-ASR-1.7B）...",
-  applyBtn: "应用此模型",
-  applyingBtn: "应用中...",
-  testBtn: "测试转录",
-  testingBtn: "测试中...",
-  resetBtn: "恢复默认",
-  routeGatewayHint:
-    "自动通过本地语音池网关 (:8787) 转发硅基流动请求，修复桌面端分块流式上传报错并附带 6-Key 自动容灾。",
-  appliedSuccessPrefix: "已切换语音模型：",
-  testOkPrefix: "转录实测通过",
-  testFailPrefix: "转录测试失败",
+  customModelLabel: "自定义模型",
+  presetsLabel: "快捷预设",
+  customModelPlaceholder: "模型 ID（如 Qwen/Qwen3-ASR-1.7B）",
+  applyBtn: "应用",
+  applyingBtn: "保存中…",
+  testBtn: "测试",
+  testingBtn: "测试中…",
+  appliedSuccessPrefix: "已保存",
+  testOkPrefix: "通过",
+  testFailPrefix: "失败",
+};
+
+const SHORT_PRESET_LABELS: Record<string, { en: string; zh: string }> = {
+  "siliconflow-sensevoice-free": { en: "SenseVoiceSmall", zh: "SenseVoiceSmall" },
+  "siliconflow-qwen3-asr": { en: "Qwen3-ASR-1.7B", zh: "Qwen3-ASR-1.7B" },
+  "siliconflow-telespeech-free": { en: "TeleSpeechASR", zh: "TeleSpeechASR" },
+  "gemini-audio-pool": { en: "Gemini Pool", zh: "Gemini 语音池" },
+  "groq-whisper-turbo": { en: "Whisper LPU", zh: "Whisper LPU" },
+  "local-parakeet": { en: "Parakeet Local", zh: "本地 Parakeet" },
 };
 
 function getCopy(locale?: string | null): { copy: VoiceCopy; zh: boolean } {
-  const zh = isChineseLocale(locale ?? (typeof navigator !== "undefined" ? navigator.language : "en"));
+  const zh = isChineseLocale(
+    locale ?? (typeof navigator !== "undefined" ? navigator.language : "en"),
+  );
   return { copy: zh ? COPY_ZH : COPY_EN, zh };
 }
 
-function buildVoiceEnhancerCard(
+function getShortPresetName(preset: VoiceSttPreset, zh: boolean): string {
+  const mapped = SHORT_PRESET_LABELS[preset.id];
+  if (mapped) return zh ? mapped.zh : mapped.en;
+  const parts = preset.model.split("/");
+  return parts[parts.length - 1] || preset.model;
+}
+
+function buildNativeVoiceSheetRows(
   doc: Document,
   client: VoiceSttWebClient,
-  surface: "sheet" | "settings-page",
   testId: string,
 ): HTMLElement {
   const { copy, zh } = getCopy(client.getLocale?.());
-  const theme = syncPaseoThemeCssVariables(doc);
+  const theme = syncPaseoThemeCssVariables(doc as never);
   const container = doc.createElement("div");
   container.setAttribute("data-testid", testId);
   container.style.cssText = [
-    "margin-top: 12px",
-    "margin-bottom: 8px",
+    "margin-top: 8px",
     "padding: 12px 14px",
-    "border-radius: 8px",
-    `background: ${theme.surface1}`,
+    "border-radius: 10px",
+    `background: ${theme.surface0}`,
     `border: 1px solid ${theme.border}`,
     "display: flex",
     "flex-direction: column",
@@ -132,41 +127,94 @@ function buildVoiceEnhancerCard(
     "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif",
   ].join(";");
 
-  // 1. Header Row
-  const headerRow = doc.createElement("div");
-  headerRow.style.cssText =
-    "display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;";
+  // Row 1: Left label ("Custom model") + Right compact input & quiet buttons (matches Paseo "Base URL" row)
+  const mainRow = doc.createElement("div");
+  mainRow.style.cssText =
+    "display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;";
 
-  const titleEl = doc.createElement("div");
-  titleEl.textContent = copy.panelTitle;
-  titleEl.style.cssText = `font-size: 12.5px; font-weight: 600; color: ${theme.foreground};`;
+  const labelEl = doc.createElement("div");
+  labelEl.textContent = copy.customModelLabel;
+  labelEl.style.cssText = `font-size: 13px; font-weight: 400; color: ${theme.foreground}; flex-shrink: 0;`;
 
-  const statusBadge = doc.createElement("div");
-  statusBadge.setAttribute("data-testid", `${testId}-status-badge`);
-  statusBadge.textContent = copy.gatewayOnlineBadge;
-  statusBadge.style.cssText = [
-    "font-size: 11px",
-    "font-weight: 500",
-    "padding: 2px 8px",
-    "border-radius: 999px",
+  const controlsRight = doc.createElement("div");
+  controlsRight.style.cssText =
+    "display: flex; flex-direction: row; align-items: center; gap: 6px; flex: 1; justify-content: flex-end; min-width: 220px;";
+
+  const modelInput = doc.createElement("input");
+  modelInput.type = "text";
+  modelInput.setAttribute("data-testid", `${testId}-model-input`);
+  modelInput.placeholder = copy.customModelPlaceholder;
+  modelInput.style.cssText = [
+    "width: 175px",
+    "max-width: 100%",
+    "padding: 6px 10px",
+    "border-radius: 6px",
     `background: ${theme.surface2}`,
-    `color: ${theme.statusSuccess}`,
-    `border: 1px solid ${theme.border}`,
+    "border: 1px solid transparent",
+    `color: ${theme.foreground}`,
+    "font-size: 12.5px",
+    "outline: none",
   ].join(";");
 
-  headerRow.appendChild(titleEl);
-  headerRow.appendChild(statusBadge);
-  container.appendChild(headerRow);
+  const applyBtn = doc.createElement("button");
+  applyBtn.type = "button";
+  applyBtn.setAttribute("data-testid", `${testId}-apply-btn`);
+  applyBtn.textContent = copy.applyBtn;
+  applyBtn.style.cssText = [
+    "padding: 6px 10px",
+    "border-radius: 6px",
+    `background: ${theme.surface2}`,
+    `color: ${theme.foreground}`,
+    "font-size: 12px",
+    "font-weight: 500",
+    `border: 1px solid ${theme.border}`,
+    "cursor: pointer",
+    "flex-shrink: 0",
+  ].join(";");
 
-  // 2. Subtitle
-  const subEl = doc.createElement("div");
-  subEl.textContent = copy.panelSubtitle;
-  subEl.style.cssText = `font-size: 11.5px; color: ${theme.foregroundMuted}; line-height: 1.4;`;
-  container.appendChild(subEl);
+  const testBtn = doc.createElement("button");
+  testBtn.type = "button";
+  testBtn.setAttribute("data-testid", `${testId}-test-btn`);
+  testBtn.textContent = copy.testBtn;
+  testBtn.style.cssText = [
+    "padding: 6px 10px",
+    "border-radius: 6px",
+    "background: transparent",
+    `color: ${theme.foregroundMuted}`,
+    "font-size: 12px",
+    "font-weight: 500",
+    `border: 1px solid ${theme.border}`,
+    "cursor: pointer",
+    "flex-shrink: 0",
+  ].join(";");
 
-  // 3. Preset Chips Row
-  const chipsRow = doc.createElement("div");
-  chipsRow.style.cssText = "display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px;";
+  controlsRight.appendChild(modelInput);
+  controlsRight.appendChild(applyBtn);
+  controlsRight.appendChild(testBtn);
+  mainRow.appendChild(labelEl);
+  mainRow.appendChild(controlsRight);
+  container.appendChild(mainRow);
+
+  // Row 2: Subtle hairline divider + compact segmented preset pills (matches Paseo "Local | OpenAI" segmented style)
+  const presetsRow = doc.createElement("div");
+  presetsRow.style.cssText = [
+    "display: flex",
+    "flex-direction: row",
+    "align-items: center",
+    "justify-content: space-between",
+    "gap: 8px",
+    "flex-wrap: wrap",
+    "padding-top: 8px",
+    `border-top: 1px solid ${theme.borderAccent}`,
+  ].join(";");
+
+  const presetsLabel = doc.createElement("div");
+  presetsLabel.textContent = copy.presetsLabel;
+  presetsLabel.style.cssText = `font-size: 12px; font-weight: 400; color: ${theme.foregroundMuted}; flex-shrink: 0;`;
+
+  const chipsGroup = doc.createElement("div");
+  chipsGroup.style.cssText =
+    "display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px; justify-content: flex-end; flex: 1;";
 
   let activeModelValue = "";
   const presetButtons = new Map<string, HTMLButtonElement>();
@@ -177,89 +225,32 @@ function buildVoiceEnhancerCard(
       const btn = presetButtons.get(preset.id);
       if (!btn) continue;
       const isSelected = preset.model.toLowerCase() === modelId.trim().toLowerCase();
-      btn.style.background = isSelected ? theme.primary : theme.surface0;
-      btn.style.borderColor = isSelected ? theme.primary : theme.border;
-      btn.style.color = isSelected ? theme.primaryForeground : theme.foregroundMuted;
+      btn.style.background = isSelected ? theme.surface2 : "transparent";
+      btn.style.borderColor = isSelected ? theme.border : "transparent";
+      btn.style.color = isSelected ? theme.foreground : theme.foregroundMuted;
+      btn.style.fontWeight = isSelected ? "500" : "400";
     }
   };
 
-  // 4. Custom Model Input + Action Buttons Row
-  const inputRow = doc.createElement("div");
-  inputRow.style.cssText =
-    "display: flex; flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap;";
-
-  const modelInput = doc.createElement("input");
-  modelInput.type = "text";
-  modelInput.setAttribute("data-testid", `${testId}-model-input`);
-  modelInput.placeholder = copy.customModelPlaceholder;
-  modelInput.style.cssText = [
-    "flex: 1",
-    "min-width: 210px",
-    "padding: 6px 10px",
-    "border-radius: 6px",
-    `background: ${theme.surface0}`,
-    `border: 1px solid ${theme.border}`,
-    `color: ${theme.foreground}`,
-    "font-size: 12px",
-    "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    "outline: none",
-  ].join(";");
-
-  const applyBtn = doc.createElement("button");
-  applyBtn.type = "button";
-  applyBtn.setAttribute("data-testid", `${testId}-apply-btn`);
-  applyBtn.textContent = copy.applyBtn;
-  applyBtn.style.cssText = [
-    "padding: 6px 12px",
-    "border-radius: 6px",
-    `background: ${theme.primary}`,
-    `color: ${theme.primaryForeground}`,
-    "font-size: 12px",
-    "font-weight: 600",
-    "border: none",
-    "cursor: pointer",
-  ].join(";");
-
-  const testBtn = doc.createElement("button");
-  testBtn.type = "button";
-  testBtn.setAttribute("data-testid", `${testId}-test-btn`);
-  testBtn.textContent = copy.testBtn;
-  testBtn.style.cssText = [
-    "padding: 6px 10px",
-    "border-radius: 6px",
-    `background: ${theme.surface2}`,
-    `color: ${theme.foreground}`,
-    "font-size: 12px",
-    "font-weight: 500",
-    `border: 1px solid ${theme.border}`,
-    "cursor: pointer",
-  ].join(";");
-
-  // Receipt line
+  // Compact 1-line inline receipt (hidden until user clicks Apply or Test)
   const receiptBox = doc.createElement("div");
   receiptBox.setAttribute("data-testid", `${testId}-receipt`);
   receiptBox.style.cssText = [
     "display: none",
-    "padding: 7px 10px",
-    "border-radius: 6px",
-    `background: ${theme.surface0}`,
-    `border: 1px solid ${theme.border}`,
+    "padding-top: 6px",
+    `border-top: 1px solid ${theme.borderAccent}`,
     "font-size: 11.5px",
-    `color: ${theme.foreground}`,
-    "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    "line-height: 1.4",
+    `color: ${theme.foregroundMuted}`,
+    "line-height: 1.35",
   ].join(";");
 
   const showReceipt = (text: string, isError = false) => {
     receiptBox.style.display = "block";
-    receiptBox.style.borderColor = isError ? theme.statusDanger : theme.statusSuccess;
     receiptBox.style.color = isError ? theme.statusDanger : theme.statusSuccess;
     receiptBox.textContent = text;
   };
 
-  // Sync with Paseo's modal inputs when inside SpeechProviderSheet
   const syncSheetNativeInputs = (baseUrl: string) => {
-    if (surface !== "sheet") return;
     const baseUrlInput = doc.querySelector<HTMLInputElement>(
       '[data-testid="voice-base-url-input"]',
     );
@@ -289,12 +280,11 @@ function buildVoiceEnhancerCard(
         action: "apply",
         presetId: opts.preset?.id,
         model: modelToApply,
-        source: surface === "sheet" ? "voice-sheet" : "settings-ui",
+        source: "voice-sheet",
       });
-      statusBadge.textContent = `${copy.activeModelPrefix} ${res.dictationStt.model} (${res.dictationStt.sourceBadge})`;
       syncSheetNativeInputs(res.dictationStt.baseUrl);
       showReceipt(
-        `✓ ${copy.appliedSuccessPrefix} ${res.dictationStt.model} · Base URL: ${res.dictationStt.baseUrl || "local"}`,
+        `${copy.appliedSuccessPrefix}: ${res.dictationStt.model} (${res.dictationStt.sourceBadge})`,
         !res.ok,
       );
     } catch (err) {
@@ -306,23 +296,24 @@ function buildVoiceEnhancerCard(
   };
 
   const triggerTest = async () => {
-    const modelToTest = modelInput.value.trim() || activeModelValue || "FunAudioLLM/SenseVoiceSmall";
+    const modelToTest =
+      modelInput.value.trim() || activeModelValue || "FunAudioLLM/SenseVoiceSmall";
     testBtn.disabled = true;
     testBtn.textContent = copy.testingBtn;
     try {
       const res = await client.call(manageVoiceSttRpc, {
         action: "test",
         model: modelToTest,
-        source: surface === "sheet" ? "voice-sheet" : "settings-ui",
+        source: "voice-sheet",
       });
       if (res.testResult?.ok) {
         showReceipt(
-          `✓ ${copy.testOkPrefix} [${res.testResult.provider} · ${res.testResult.model}] ${res.testResult.latencyMs}ms — "${res.testResult.transcript}"`,
+          `${copy.testOkPrefix} (${res.testResult.latencyMs}ms): "${res.testResult.transcript}"`,
           false,
         );
       } else {
         showReceipt(
-          `✗ ${copy.testFailPrefix}: ${res.testResult?.error ?? res.message}`,
+          `${copy.testFailPrefix}: ${res.testResult?.error ?? res.message}`,
           true,
         );
       }
@@ -338,19 +329,18 @@ function buildVoiceEnhancerCard(
     const chip = doc.createElement("button");
     chip.type = "button";
     chip.setAttribute("data-testid", `${testId}-preset-${preset.id}`);
-    const labelText = zh ? preset.labelZh : preset.label;
-    chip.textContent = `${labelText} (${preset.badge})`;
+    chip.textContent = getShortPresetName(preset, zh);
     chip.title = zh ? preset.descriptionZh : preset.description;
     chip.style.cssText = [
-      "padding: 5px 9px",
-      "border-radius: 999px",
+      "padding: 4px 8px",
+      "border-radius: 6px",
       "font-size: 11.5px",
-      "font-weight: 500",
-      `background: ${theme.surface0}`,
-      `border: 1px solid ${theme.border}`,
+      "font-weight: 400",
+      "background: transparent",
+      "border: 1px solid transparent",
       `color: ${theme.foregroundMuted}`,
       "cursor: pointer",
-      "transition: all 0.12s ease",
+      "transition: background 0.12s ease, color 0.12s ease",
     ].join(";");
     chip.addEventListener("click", (ev) => {
       ev.preventDefault();
@@ -358,10 +348,13 @@ function buildVoiceEnhancerCard(
       void triggerApply({ preset });
     });
     presetButtons.set(preset.id, chip);
-    chipsRow.appendChild(chip);
+    chipsGroup.appendChild(chip);
   }
 
-  container.appendChild(chipsRow);
+  presetsRow.appendChild(presetsLabel);
+  presetsRow.appendChild(chipsGroup);
+  container.appendChild(presetsRow);
+  container.appendChild(receiptBox);
 
   applyBtn.addEventListener("click", (ev) => {
     ev.preventDefault();
@@ -383,22 +376,11 @@ function buildVoiceEnhancerCard(
     void triggerTest();
   });
 
-  inputRow.appendChild(modelInput);
-  inputRow.appendChild(applyBtn);
-  inputRow.appendChild(testBtn);
-  container.appendChild(inputRow);
-  container.appendChild(receiptBox);
-
-  // Initial inspect to populate current state
   void client
     .call(manageVoiceSttRpc, { action: "inspect" })
     .then((snap) => {
       modelInput.value = snap.dictationStt.model;
       updateChipHighlight(snap.dictationStt.model);
-      const gwTag = snap.gateway.reachable
-        ? `${copy.gatewayOnlineBadge} (${snap.gateway.healthyKeys}/${snap.gateway.totalKeys})`
-        : copy.gatewayOfflineBadge;
-      statusBadge.textContent = `${copy.activeModelPrefix} ${snap.dictationStt.model} · ${gwTag}`;
     })
     .catch(() => {});
 
@@ -412,9 +394,14 @@ export function injectVoiceSttEnhancersIntoDom(
   const prefs = readVoiceCustomModelPreferences();
   if (!prefs.enabled) return 0;
 
+  // Remove any legacy duplicate card from the background Voice settings page
+  doc
+    .querySelectorAll('[data-testid="paseo-finder-voice-settings-card"]')
+    .forEach((el) => el.remove());
+
   let injected = 0;
 
-  // 1. Inside Speech-to-text modal (`[data-testid="voice-provider-sheet"]`)
+  // Single-surface exclusive injection: only inside the active Speech-to-text modal sheet
   const sheet = doc.querySelector<HTMLElement>('[data-testid="voice-provider-sheet"]');
   if (sheet && !sheet.querySelector('[data-testid="paseo-finder-voice-stt-sheet-enhancer"]')) {
     const isSttSheet = Boolean(
@@ -423,10 +410,9 @@ export function injectVoiceSttEnhancersIntoDom(
         (sheet.textContent ?? "").includes("语音转文字"),
     );
     if (isSttSheet) {
-      const card = buildVoiceEnhancerCard(
+      const card = buildNativeVoiceSheetRows(
         doc,
         client,
-        "sheet",
         "paseo-finder-voice-stt-sheet-enhancer",
       );
       const saveBtn = sheet.querySelector('[data-testid="voice-provider-save"]');
@@ -438,22 +424,6 @@ export function injectVoiceSttEnhancersIntoDom(
       }
       injected += 1;
     }
-  }
-
-  // 2. Inside Settings -> Voice page (`[data-testid="voice-settings"]`)
-  const voiceSettings = doc.querySelector<HTMLElement>('[data-testid="voice-settings"]');
-  if (
-    voiceSettings &&
-    !voiceSettings.querySelector('[data-testid="paseo-finder-voice-settings-card"]')
-  ) {
-    const card = buildVoiceEnhancerCard(
-      doc,
-      client,
-      "settings-page",
-      "paseo-finder-voice-settings-card",
-    );
-    voiceSettings.appendChild(card);
-    injected += 1;
   }
 
   return injected;

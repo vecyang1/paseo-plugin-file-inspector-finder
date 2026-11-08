@@ -2371,5 +2371,30 @@ test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver i
   assert.equal(readBack.sourceBadge, "plugin-settings");
 });
 
+test("25. Host-Native Chameleon Visual Language & Single-Surface Exclusive Voice Injection (anti-AI-slop gate)", async () => {
+  const voiceWebSrc = await fs.readFile(
+    path.join(process.cwd(), "client", "voice-stt-web.ts"),
+    "utf-8",
+  );
+  // 1) Must not contain verbose AI marketing prose or parenthetical promo badge concatenation
+  assert.equal(
+    voiceWebSrc.includes("Unlock SiliconFlow free ASR"),
+    false,
+    "voice-stt-web.ts must not render verbose marketing paragraphs inside Paseo's native Speech-to-text sheet",
+  );
+  assert.equal(
+    voiceWebSrc.includes("(${preset.badge})"),
+    false,
+    "Preset buttons must use concise model names without noisy parenthetical promo badges",
+  );
+  // 2) Must not inject duplicate enhancer cards on both background [data-testid='voice-settings'] and modal [data-testid='voice-provider-sheet']
+  assert.equal(
+    voiceWebSrc.includes('"settings-page"'),
+    false,
+    "voice-stt-web.ts must only enhance the active Speech-to-text modal sheet, never double-mounting on the background Voice settings page",
+  );
+});
+
+
 
 

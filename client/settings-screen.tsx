@@ -37,7 +37,13 @@ import {
 } from "../shared/contracts";
 import { isChineseLocale, pluginTranslations } from "./i18n";
 import {
+  type ScheduleRunsDomHealthSnapshot,
+  type ScheduleRunsDomSelfTestResult,
+  getScheduleRunsDomHealthSnapshot,
   navigateToPaseoWorkspace,
+  resetScheduleRunsDomCircuitBreaker,
+  runScheduleRunsDomIdempotencySelfTest,
+  syncScheduleRunsPreferences,
   triggerScheduleRunsDrawer,
 } from "./schedule-runs-web";
 import { syncVoiceCustomModelPreferences } from "./voice-stt-web";
@@ -79,6 +85,12 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
     Awaited<ReturnType<typeof inspectScheduleRuns>> | null
   >(null);
+  const [scheduleDomHealth, setScheduleDomHealth] =
+    useState<ScheduleRunsDomHealthSnapshot>(() =>
+      getScheduleRunsDomHealthSnapshot(),
+    );
+  const [scheduleDomSelfTest, setScheduleDomSelfTest] =
+    useState<ScheduleRunsDomSelfTestResult | null>(null);
   const [voiceModelInput, setVoiceModelInput] = useState("FunAudioLLM/SenseVoiceSmall");
   const [voiceBaseUrlInput, setVoiceBaseUrlInput] = useState("http://127.0.0.1:8787/v1");
   const [voiceSnapData, setVoiceSnapData] = useState<
@@ -102,6 +114,11 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         enableCommandCenterProjectItems: settings.values.enableCommandCenterProjectItems,
         quickJumpDefaultAction: settings.values.quickJumpDefaultAction,
       });
+      syncScheduleRunsPreferences(
+        settings.values.enableScheduleRunsInspector,
+        "plugin-settings",
+      );
+      setScheduleDomHealth(getScheduleRunsDomHealthSnapshot());
       syncVoiceCustomModelPreferences(settings.values.enableVoiceCustomModelHelper);
     }
   }, [settings]);
@@ -517,6 +534,25 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSwitch
+            label={
+              isZh
+                ? "在 Schedules 页面显示「运行记录 (Runs)」胶囊与抽屉 (⌘⇧H)"
+                : "Enhance Schedules screen with Runs (N) pills & Runs Drawer (⌘⇧H)"
+            }
+            hint={
+              isZh
+                ? "采用 rAF 帧合并 + 签名幂等防抖 + 熔断保护器，零微任务重入地注入历史运行次数与会话穿透入口"
+                : "Idempotent rAF-coalesced DOM decorator with rolling-window circuit breaker for 1-click schedule run drill-down"
+            }
+            value={values.enableScheduleRunsInspector}
+            onValueChange={(next) => {
+              syncScheduleRunsPreferences(next, "plugin-settings");
+              setScheduleDomHealth(getScheduleRunsDomHealthSnapshot());
+              void save({ ...values, enableScheduleRunsInspector: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
             label={t("settings.voiceHelperEnabledLabel")}
             hint={t("settings.voiceHelperEnabledHint")}
             value={values.enableVoiceCustomModelHelper}
@@ -891,16 +927,52 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       <SettingsSection
         title={
           isZh
-            ? "定时任务运行历史与会话穿透对账器 (Schedules Runs & Session Drill-Down)"
-            : "Schedule Runs & Session Drill-Down Inspector (⌘⇧H)"
+            ? "定时任务运行历史与防卡死对账器 (Schedules Runs & Anti-Freeze Inspector)"
+            : "Schedule Runs & Anti-Freeze DOM Inspector (⌘⇧H)"
         }
       >
         <View style={styles.diagBox}>
           <Text style={styles.label}>
             {isZh
-              ? "实时读取 Paseo 全部定时任务与 AG 灾备孪生运行历史（runs[]），一键打开「运行记录抽屉 (⌘⇧H)」或自动解档并跳转进入任意历史运行会话："
-              : "Inspect live Paseo schedule run history across all native & standby schedules, open the Runs Drawer (⌘⇧H), or unarchive and jump directly into any run conversation:"}
+              ? "实时读取 Paseo 全部定时任务与 AG 灾备孪生运行历史（runs[]），监控 Schedules DOM 观察器与防卡死熔断器状态（能读 / 能试 / 能调）："
+              : "Inspect live Paseo schedule run history, monitor the Schedules DOM observer & anti-freeze circuit breaker, or run an idempotency self-test:"}
           </Text>
+
+          <View
+            style={{
+              padding: 8,
+              borderRadius: 6,
+              backgroundColor: theme.colors.surface0,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              gap: 4,
+            }}
+          >
+            <Text style={styles.label}>
+              • DOM Guard:{" "}
+              {!scheduleDomHealth.enabled
+                ? "DISABLED"
+                : scheduleDomHealth.circuitBreakerTripped
+                  ? "TRIPPED (Auto-Protected)"
+                  : "HEALTHY · rAF Coalesced + Idempotent"}
+              {" · "}source={scheduleDomHealth.sourceBadge}
+              {" · "}observer={scheduleDomHealth.observerConnected ? "connected" : "idle"}
+            </Text>
+            <Text style={styles.detail}>
+              • Passes: {scheduleDomHealth.totalPasses} (writes={scheduleDomHealth.writePasses}, no-op skipped={scheduleDomHealth.skippedNoOpPasses}, self-mutations ignored={scheduleDomHealth.ignoredSelfMutationBatches}) · lastPass={scheduleDomHealth.lastPassDurationMs}ms · rows={scheduleDomHealth.lastDecoratedRowCount} · cachedSchedules={scheduleDomHealth.cachedScheduleCount}
+            </Text>
+            {scheduleDomHealth.circuitBreakerReason ? (
+              <Text style={styles.label}>
+                • Reason: {scheduleDomHealth.circuitBreakerReason}
+              </Text>
+            ) : null}
+            {scheduleDomSelfTest ? (
+              <Text style={styles.label}>
+                • Self-Test: {scheduleDomSelfTest.summary}
+              </Text>
+            ) : null}
+          </View>
+
           <View style={styles.row}>
             <TextInput
               value={scheduleRunsQueryInput}
@@ -915,21 +987,60 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             />
             <Pressable
               accessibilityRole="button"
-              onPress={() =>
-                inspectScheduleRuns({
+              onPress={() => {
+                setScheduleDomHealth(getScheduleRunsDomHealthSnapshot());
+                void inspectScheduleRuns({
                   query: scheduleRunsQueryInput.trim() || undefined,
                   onlyWithRuns: !scheduleRunsQueryInput.trim(),
                   includeWorkspaceNames: true,
                   maxRunsPerSchedule: 15,
                 }).then((res) => {
                   setScheduleRunsDiagData(res);
-                })
-              }
+                  setScheduleDomHealth(getScheduleRunsDomHealthSnapshot());
+                });
+              }}
               style={styles.btn}
             >
               <Icon name="Clock" size={14} color={theme.colors.accentForeground} />
               <Text style={styles.btnText}>
                 {isZh ? "读取运行账本" : "Inspect Runs"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const testRes = runScheduleRunsDomIdempotencySelfTest();
+                setScheduleDomSelfTest(testRes);
+                setScheduleDomHealth(getScheduleRunsDomHealthSnapshot());
+                if (testRes.ok) {
+                  toast.show(testRes.summary, { variant: "success" });
+                } else {
+                  toast.error(testRes.summary);
+                }
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "防卡死幂等自检 (能试)" : "DOM Self-Test"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const nextSnap = resetScheduleRunsDomCircuitBreaker();
+                setScheduleDomHealth(nextSnap);
+                toast.show(
+                  isZh
+                    ? "已重置熔断保护器并刷新 Schedules 缓存"
+                    : "Reset DOM circuit breaker & refreshed schedule cache",
+                  { variant: "success" },
+                );
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "重置熔断并刷新 (能调)" : "Reset & Refresh"}
               </Text>
             </Pressable>
             <Pressable
