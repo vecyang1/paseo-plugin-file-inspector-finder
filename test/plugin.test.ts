@@ -22,6 +22,8 @@ import {
   stripLeadingDatePrefix,
   VOICE_STT_PRESETS,
   manageVoiceSttRpc,
+  manageAgentHistoryRpc,
+  reconcilePaseoRecoveryRpc,
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
@@ -50,6 +52,8 @@ import {
   handleInspectScheduleRuns,
   handleOpenScheduleRunSession,
   handleManageVoiceStt,
+  handleManageAgentHistory,
+  handleReconcilePaseoRecovery,
   resolveVoicePresetOrShorthand,
   inferSttSourceBadge,
   maskApiKeyPreview,
@@ -2394,6 +2398,87 @@ test("25. Host-Native Chameleon Visual Language & Single-Surface Exclusive Voice
     "voice-stt-web.ts must only enhance the active Speech-to-text modal sheet, never double-mounting on the background Voice settings page",
   );
 });
+
+test("26. Agent History & Session Patch Reconciler (manageAgentHistoryRpc: inspect / probe / heal & agent-timeline-sync-error auto-heal button)", async () => {
+  assert.equal(manageAgentHistoryRpc.name, "finder.manage_agent_history");
+  const mockCtx = createMockContext([]) as never;
+
+  // 1) Live inspect ("能读") returns session patch markers, guard status, and active Paseo workspace conversation armor
+  const inspected = await handleManageAgentHistory({ action: "inspect" }, mockCtx);
+  assert.equal(inspected.ok, true);
+  assert.equal(inspected.action, "inspect");
+  assert.equal(inspected.sessionPatches.ok, true);
+  assert.equal(inspected.sessionPatches.appPatched, true);
+  assert.equal(inspected.sessionPatches.cliPatched, true);
+  assert.ok(inspected.vaultStats.antigravityAgentsCount > 0);
+  assert.equal(
+    inspected.vaultStats.missingDbCount,
+    0,
+    "All active Paseo workspace Antigravity conversations must have restored live .db armor",
+  );
+  assert.equal(
+    inspected.vaultStats.missingTranscriptCount,
+    0,
+    "All active Paseo workspace Antigravity conversations must have transcript replay armor",
+  );
+
+  // 2) Live probe ("能试") on target workspace wks_19f1d13d283b942f / conversation 28403586-fc55-4a80-8dce-eba4f268e26a
+  const probed = await handleManageAgentHistory(
+    {
+      action: "probe",
+      conversationId: "28403586-fc55-4a80-8dce-eba4f268e26a",
+    },
+    mockCtx,
+  );
+  assert.equal(probed.ok, true);
+  assert.equal(probed.action, "probe");
+  assert.ok(probed.targetAgent);
+  assert.equal(
+    probed.targetAgent?.conversationId,
+    "28403586-fc55-4a80-8dce-eba4f268e26a",
+  );
+  assert.equal(probed.targetAgent?.dbExists, true);
+  assert.ok(
+    probed.targetAgent?.brainTranscriptExists ||
+      probed.targetAgent?.shelfTranscriptExists,
+    "Conversation must have a readable transcript fallback",
+  );
+  assert.ok(
+    (probed.targetAgent?.transcriptLines ?? 0) > 10,
+    "Transcript must contain populated history turns",
+  );
+
+  // 3) Verify client/web.ts wires the 1-click heal button into [data-testid='agent-timeline-sync-error'] using host-native theme tokens
+  const webSrc = await fs.readFile(
+    path.join(process.cwd(), "client", "web.ts"),
+    "utf-8",
+  );
+  assert.equal(
+    webSrc.includes("agent-timeline-sync-error"),
+    true,
+    "client/web.ts must detect [data-testid='agent-timeline-sync-error'] and offer 1-click self-healing",
+  );
+  assert.equal(
+    webSrc.includes("paseo-finder-agent-history-heal-btn"),
+    true,
+    "client/web.ts must render data-testid='paseo-finder-agent-history-heal-btn' inside the timeline sync error banner",
+  );
+});
+
+test("27. Startup Auto-Pull-Up & Interrupted Agent Reconciler (reconcilePaseoRecoveryRpc: status / simulate & /pull-up)", async () => {
+  assert.equal(reconcilePaseoRecoveryRpc.name, "finder.reconcile_paseo_recovery");
+  const mockCtx = createMockContext([]) as never;
+
+  const statusRes = await handleReconcilePaseoRecovery({ action: "status" }, mockCtx);
+  assert.equal(statusRes.action, "status");
+  assert.equal(statusRes.resumeOnStartup, true);
+  assert.equal(statusRes.versionCacheOk, true);
+  assert.equal(statusRes.catalogSingleflightOk, true);
+  assert.ok(statusRes.totalScanned > 0);
+  assert.equal(statusRes.unhealedCount, 0);
+  assert.equal(statusRes.ok, true);
+});
+
 
 
 

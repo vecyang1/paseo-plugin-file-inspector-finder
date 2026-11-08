@@ -17,16 +17,20 @@ import {
   inspectScheduleRunsRpc,
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
+  manageAgentHistoryRpc,
+  reconcilePaseoRecoveryRpc,
 } from "./shared/contracts";
 import {
   handleDiagnosePath,
   handleImportFolderWorkspace,
   handleInspectFile,
   handleListWorkspaceMedia,
+  handleManageAgentHistory,
   handleManageVoiceStt,
   handleManageWorkspaceLabels,
   handleOpenFileTarget,
   handleQuickJumpWorkspace,
+  handleReconcilePaseoRecovery,
   handleRenameThread,
 } from "./server/handlers";
 import {
@@ -56,6 +60,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(inspectScheduleRunsRpc, handleInspectScheduleRuns);
   server.handle(openScheduleRunSessionRpc, handleOpenScheduleRunSession);
   server.handle(manageVoiceSttRpc, handleManageVoiceStt);
+  server.handle(manageAgentHistoryRpc, handleManageAgentHistory);
+  server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
 
   const revealTool = defineAgentTool({
     name: "reveal_in_finder",
@@ -343,6 +349,84 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const agentHistoryTool = defineAgentTool({
+    name: "manage_agent_history",
+    title: "Inspect, Probe, or Self-Heal Paseo Antigravity Agent History & Session Patches",
+    description:
+      "Inspect Paseo Antigravity session.ts patches & CLI Conversation Vault health (能读), probe a workspace/agent/conversation's .db & transcript status (能试), or trigger 1-click self-healing from local/GDrive vault + antigravity-ops doctor --fix (能调).",
+    input: z.object({
+      action: z
+        .enum(["inspect", "probe", "heal"])
+        .optional()
+        .describe("inspect (default), probe, or heal"),
+      workspaceId: z
+        .string()
+        .optional()
+        .describe("Optional workspace ID or title query to inspect/heal"),
+      agentId: z.string().optional().describe("Optional agent ID"),
+      conversationId: z.string().optional().describe("Optional Antigravity conversation UUID"),
+    }),
+    async execute(input, { agent, paseo }) {
+      const result = await handleManageAgentHistory(
+        {
+          action: input.action ?? "inspect",
+          workspaceId: input.workspaceId ?? agent.workspaceId ?? undefined,
+          agentId: input.agentId,
+          conversationId: input.conversationId,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
+  const paseoRecoveryTool = defineAgentTool({
+    name: "reconcile_paseo_recovery",
+    title: "Inspect, Simulate, or Auto-Pull-Up Interrupted Paseo Agents",
+    description:
+      "Inspect Paseo's startup auto-pull-up state & tool replay trajectory (能读), simulate interrupted agent detection (能试), or automatically pull up interrupted/startup-failed Paseo agents via antigravity-ops paseo-recovery (能调).",
+    input: z.object({
+      action: z
+        .enum(["status", "simulate", "heal", "reset"])
+        .optional()
+        .describe("status (default), simulate, heal, or reset"),
+      agentId: z
+        .string()
+        .optional()
+        .describe("Optional specific agent ID or prefix to inspect/pull up"),
+      maxAgeHours: z
+        .number()
+        .optional()
+        .describe("Transcript activity window in hours (default 12)"),
+      prompt: z
+        .string()
+        .optional()
+        .describe("Optional custom resume prompt when action is heal"),
+    }),
+    async execute(input, { paseo }) {
+      const result = await handleReconcilePaseoRecovery(
+        {
+          action: input.action ?? "status",
+          agentId: input.agentId,
+          maxAgeHours: input.maxAgeHours,
+          prompt: input.prompt,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
@@ -354,6 +438,8 @@ export default function contribute(server: PluginServerContext) {
         quickJumpTool,
         scheduleRunsTool,
         voiceSttTool,
+        agentHistoryTool,
+        paseoRecoveryTool,
       ],
     };
   });

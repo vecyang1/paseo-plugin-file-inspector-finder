@@ -12,10 +12,12 @@ import {
   extractProjectSearchKeywords,
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
+  manageAgentHistoryRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   quickJumpWorkspaceRpc,
+  reconcilePaseoRecoveryRpc,
   renameWorkspaceOrAgentRpc,
 } from "./shared/contracts";
 import { getCatalogForLocale, pluginTranslations } from "./client/i18n";
@@ -358,6 +360,105 @@ export default function contribute(client: PluginClientContext) {
           action: "apply",
           presetId: trimmed,
           model: trimmed,
+          source: "slash-command",
+        });
+      },
+    });
+  }
+
+  client.addCommandCenterItem({
+    id: "heal-agent-history",
+    title: "Agent History: Inspect & Auto-Heal Timeline Sync (聊天记录恢复与对账)",
+    icon: "Activity",
+    keywords: [
+      "history",
+      "timeline",
+      "sync",
+      "heal",
+      "restore",
+      "vault",
+      "antigravity",
+      "聊天记录",
+      "恢复",
+      "无法获取",
+    ],
+    context: "workspace",
+    async onSelect({ workspace, rpc }) {
+      await rpc(manageAgentHistoryRpc, {
+        action: "heal",
+        workspaceId: workspace.id,
+        source: "command-center",
+      });
+      const g = globalThis as { document?: { querySelector?: (s: string) => { click?: () => void } | null } };
+      g.document?.querySelector?.('[data-testid="agent-timeline-sync-retry"]')?.click?.();
+    },
+  });
+
+  client.addSlashCommand({
+    name: "heal-history",
+    description:
+      "Inspect or auto-heal Paseo Antigravity agent conversation history & session.ts patches",
+    argumentHint: "[workspace-id or conversation-id]",
+    context: "workspace",
+    async onSubmit({ args, workspace, rpc }) {
+      const q = args.trim();
+      await rpc(manageAgentHistoryRpc, {
+        action: "heal",
+        workspaceId: q || workspace.id,
+        conversationId: /^[0-9a-f-]{32,36}$/i.test(q) ? q : undefined,
+        source: "slash-command",
+      });
+      const g = globalThis as { document?: { querySelector?: (s: string) => { click?: () => void } | null } };
+      g.document?.querySelector?.('[data-testid="agent-timeline-sync-retry"]')?.click?.();
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "pull-up-interrupted-agents",
+    title: "Startup Recovery: Inspect & Auto-Pull-Up Interrupted Agents (中断智能体自动拉起)",
+    icon: "Activity",
+    keywords: [
+      "pull-up",
+      "recovery",
+      "resume",
+      "startup",
+      "interrupted",
+      "stalled",
+      "agent",
+      "拉起",
+      "恢复",
+      "中断",
+      "自动拉起",
+    ],
+    context: "global",
+    async onSelect({ rpc }) {
+      await rpc(reconcilePaseoRecoveryRpc, {
+        action: "heal",
+        source: "command-center",
+      });
+    },
+  });
+
+  for (const cmdName of ["pull-up", "resume-interrupted"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description:
+        "Inspect, simulate, or auto-pull-up interrupted/startup-failed Paseo agents",
+      argumentHint: "[status | simulate | heal | reset | <agent-id>]",
+      context: "workspace",
+      async onSubmit({ args, rpc }) {
+        const trimmed = args.trim();
+        const lower = trimmed.toLowerCase();
+        if (lower === "status" || lower === "simulate" || lower === "heal" || lower === "reset") {
+          await rpc(reconcilePaseoRecoveryRpc, {
+            action: lower,
+            source: "slash-command",
+          });
+          return;
+        }
+        await rpc(reconcilePaseoRecoveryRpc, {
+          action: "heal",
+          agentId: trimmed || undefined,
           source: "slash-command",
         });
       },
@@ -855,6 +956,17 @@ export default function contribute(client: PluginClientContext) {
         targetProjectId: res.targetProjectId,
         targetProjectKey: res.targetProjectKey,
         targetProjectName: res.targetProjectName,
+        message: res.message,
+      };
+    },
+    onHealAgentHistory: async (workspaceId?: string) => {
+      const res = await client.rpc(manageAgentHistoryRpc, {
+        action: "heal",
+        workspaceId: workspaceId ?? lastKnownWorkspaceId,
+        source: "timeline-banner",
+      });
+      return {
+        ok: res.ok,
         message: res.message,
       };
     },

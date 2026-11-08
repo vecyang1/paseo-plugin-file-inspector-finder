@@ -27,12 +27,14 @@ import {
   diagnosePathRpc,
   importFolderWorkspaceRpc,
   inspectScheduleRunsRpc,
+  manageAgentHistoryRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   openScheduleRunSessionRpc,
   pluginSettings,
   quickJumpWorkspaceRpc,
+  reconcilePaseoRecoveryRpc,
   renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { isChineseLocale, pluginTranslations } from "./i18n";
@@ -71,6 +73,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const inspectScheduleRuns = useRpc(inspectScheduleRunsRpc);
   const openScheduleRunSession = useRpc(openScheduleRunSessionRpc);
   const manageVoiceStt = useRpc(manageVoiceSttRpc);
+  const manageAgentHistory = useRpc(manageAgentHistoryRpc);
+  const reconcilePaseoRecovery = useRpc(reconcilePaseoRecoveryRpc);
   const isZh = isChineseLocale(
     typeof navigator !== "undefined" ? navigator.language : undefined,
   );
@@ -95,6 +99,14 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [voiceBaseUrlInput, setVoiceBaseUrlInput] = useState("http://127.0.0.1:8787/v1");
   const [voiceSnapData, setVoiceSnapData] = useState<
     Awaited<ReturnType<typeof manageVoiceStt>> | null
+  >(null);
+  const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
+  const [agentHistorySnapData, setAgentHistorySnapData] = useState<
+    Awaited<ReturnType<typeof manageAgentHistory>> | null
+  >(null);
+  const [recoveryAgentInput, setRecoveryAgentInput] = useState("");
+  const [recoverySnapData, setRecoverySnapData] = useState<
+    Awaited<ReturnType<typeof reconcilePaseoRecovery>> | null
   >(null);
 
   useEffect(() => {
@@ -131,7 +143,17 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         if (res.dictationStt.baseUrl) setVoiceBaseUrlInput(res.dictationStt.baseUrl);
       })
       .catch(() => {});
-  }, [manageVoiceStt]);
+    void manageAgentHistory({ action: "inspect", source: "settings-ui" })
+      .then((res) => {
+        setAgentHistorySnapData(res);
+      })
+      .catch(() => {});
+    void reconcilePaseoRecovery({ action: "status", source: "settings-ui" })
+      .then((res) => {
+        setRecoverySnapData(res);
+      })
+      .catch(() => {});
+  }, [manageVoiceStt, manageAgentHistory, reconcilePaseoRecovery]);
 
   const resolveActiveWsId = (): string | undefined => {
     const g = globalThis as { document?: unknown; window?: unknown };
@@ -1289,6 +1311,257 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                     : voiceSnapData.testResult.error}
                 </Text>
               ) : null}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "会话聊天记录回放与保险库对账器 (Agent History & Session Patch Reconciler)"
+            : "Agent History & Session Patch Reconciler (Timeline Sync Guard)"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {isZh
+              ? "双层架构对账（能读 / 能试 / 能调）：底层协议补丁 (session.ts 历史回放 + 本地/云端保险库自动恢复守卫) + 插件层自动拦截「Couldn't refresh agent history」并一键自愈："
+              : "Dual-layer architecture reconciler: inspect session.ts replay patches & CLI Conversation Vault armor, probe any workspace's .db/transcript, or trigger 1-click self-healing:"}
+          </Text>
+
+          <View style={styles.row}>
+            <TextInput
+              value={agentHistoryQueryInput}
+              onChangeText={setAgentHistoryQueryInput}
+              placeholder={
+                isZh
+                  ? "输入 Workspace ID / 标题关键词 / Conversation UUID（留空自动检测当前活跃工作区）..."
+                  : "Enter Workspace ID / title / Conversation UUID (leave empty for active workspace)..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const q = agentHistoryQueryInput.trim();
+                void manageAgentHistory({
+                  action: q ? "probe" : "inspect",
+                  workspaceId: q || resolveActiveWsId(),
+                  conversationId: /^[0-9a-f-]{32,36}$/i.test(q) ? q : undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setAgentHistorySnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "对账与探活 (能读/能试)" : "Inspect & Probe"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const q = agentHistoryQueryInput.trim();
+                void manageAgentHistory({
+                  action: "heal",
+                  workspaceId: q || resolveActiveWsId(),
+                  conversationId: /^[0-9a-f-]{32,36}$/i.test(q) ? q : undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setAgentHistorySnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "⚡ 一键恢复聊天记录与补丁 (能调)" : "⚡ Auto-Heal History & Patches"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {agentHistorySnapData ? (
+            <View style={{ gap: 5, marginTop: 6 }}>
+              <Text style={styles.label}>
+                • Session Patch:{" "}
+                {agentHistorySnapData.sessionPatches.ok ? "✓ HEALTHY" : "✕ NEEDS HEAL"} (
+                {agentHistorySnapData.sessionPatches.details}) ·{" "}
+                {agentHistorySnapData.sessionPatches.configSummary}
+              </Text>
+              <Text style={styles.detail}>
+                • CLI Conversation Vault: {agentHistorySnapData.vaultStats.healthyConversationsCount}/
+                {agentHistorySnapData.vaultStats.antigravityAgentsCount} active Antigravity agents
+                healthy · missing .db={agentHistorySnapData.vaultStats.missingDbCount} · missing
+                transcript={agentHistorySnapData.vaultStats.missingTranscriptCount} · shelved
+                transcripts={agentHistorySnapData.vaultStats.shelvedTranscriptCount}
+              </Text>
+              {agentHistorySnapData.targetAgent ? (
+                <Text style={styles.label}>
+                  • Target Workspace: {agentHistorySnapData.targetAgent.workspaceName || "-"} (
+                  {agentHistorySnapData.targetAgent.workspaceId || "-"}) · cid=
+                  {agentHistorySnapData.targetAgent.conversationId?.slice(0, 8) || "-"} ·{" "}
+                  {agentHistorySnapData.targetAgent.detail}
+                </Text>
+              ) : null}
+              {agentHistorySnapData.actionsTaken.length > 0 ? (
+                <Text style={styles.detail}>
+                  • Healed Actions: {agentHistorySnapData.actionsTaken.join(" | ")}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "启动自动拉起与中断智能体自愈对账器 (Startup Auto-Pull-Up & Interrupted Agent Reconciler)"
+            : "Startup Auto-Pull-Up & Interrupted Agent Reconciler (/pull-up)"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {isZh
+              ? "核验 Paseo 启动自动拉起配置 (resumeOnStartup + version.cache + catalog.ts 单飞锁)，扫描因启动并发超时或 :8045 闪断掉线的会话并一键拉起续跑（能读 / 能试 / 能调）："
+              : "Inspect Paseo startup auto-pull-up guards (resumeOnStartup + version.cache + catalog.ts singleflight), simulate interrupted agent detection, or pull up stalled agents:"}
+          </Text>
+
+          <View style={styles.row}>
+            <TextInput
+              value={recoveryAgentInput}
+              onChangeText={setRecoveryAgentInput}
+              placeholder={
+                isZh
+                  ? "筛选 Agent ID 前缀（留空默认扫描最近 12 小时全部活跃会话）..."
+                  : "Optional Agent ID prefix (leave empty to scan all recent active agents)..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void reconcilePaseoRecovery({
+                  action: "simulate",
+                  agentId: recoveryAgentInput.trim() || undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setRecoverySnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "扫描与模拟 (能读/能试)" : "Simulate Scan"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void reconcilePaseoRecovery({
+                  action: "heal",
+                  agentId: recoveryAgentInput.trim() || undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setRecoverySnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "⚡ 一键拉起中断智能体 (能调)" : "⚡ Auto-Pull-Up Interrupted"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void reconcilePaseoRecovery({
+                  action: "reset",
+                  source: "settings-ui",
+                }).then((res) => {
+                  setRecoverySnapData(res);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "重置熔断计数" : "Reset Breaker"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {recoverySnapData ? (
+            <View style={{ gap: 5, marginTop: 6 }}>
+              <Text style={styles.label}>
+                • Guards: resumeOnStartup={recoverySnapData.resumeOnStartup ? "✓ true" : "✕ false"} ·
+                version.cache={recoverySnapData.versionCacheOk ? "✓ fast" : "✕ missing"} ·
+                catalog.ts={recoverySnapData.catalogSingleflightOk ? "✓ singleflight" : "✕ unpatched"}{" "}
+                · Proxy(:8045)={recoverySnapData.proxyHealthy ? "✓ ONLINE" : "✕ OFFLINE"}
+              </Text>
+              <Text style={styles.detail}>
+                • Scanned: {recoverySnapData.totalScanned} active agents · Startup failed in daemon.log:{" "}
+                {recoverySnapData.daemonStartupFailedCount} · Interrupted:{" "}
+                {recoverySnapData.interruptedCount} · Healed: {recoverySnapData.healedCount} ·
+                Circuit breaker skipped: {recoverySnapData.circuitBreakerCount}
+              </Text>
+              {recoverySnapData.agents.slice(0, 6).map((ag) => (
+                <View
+                  key={ag.agentId}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    paddingVertical: 3,
+                  }}
+                >
+                  <Text style={[styles.detail, { flex: 1 }]} numberOfLines={1}>
+                    • [{ag.status}] {ag.agentId.slice(0, 8)} ({ag.workspaceId || "-"}) · [
+                    {ag.toolSummary}] {ag.title} — {ag.reason}
+                  </Text>
+                  {ag.workspaceId ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => {
+                        if (ag.workspaceId) {
+                          navigateToPaseoWorkspace(ag.workspaceId, ag.agentId);
+                        }
+                      }}
+                      style={styles.secondaryBtn}
+                    >
+                      <Text style={styles.secondaryBtnText}>
+                        {isZh ? "打开会话 ↗" : "Open ↗"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ))}
             </View>
           ) : null}
         </View>

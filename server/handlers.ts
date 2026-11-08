@@ -1766,6 +1766,7 @@ export async function handleQuickJumpWorkspace(
 
 export * from "./schedule-runs-handlers";
 export * from "./voice-stt-handlers";
+export * from "./agent-history-handlers";
 
 
 

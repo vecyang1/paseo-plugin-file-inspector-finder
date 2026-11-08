@@ -43,6 +43,7 @@ export const ActionLogTargetSchema = z.union([
   z.literal("workspace-meta"),
   z.literal("workspace-jump"),
   z.literal("voice-stt"),
+  z.literal("agent-history"),
 ]);
 
 export type ActionLogTarget = z.infer<typeof ActionLogTargetSchema>;
@@ -102,6 +103,7 @@ export const pluginSettings = defineSettings({
     quickJumpDefaultAction: QuickJumpActionSchema.default("open-latest"),
     enableScheduleRunsInspector: z.boolean().default(true),
     enableVoiceCustomModelHelper: z.boolean().default(true),
+    enableAgentHistoryAutoHeal: z.boolean().default(true),
     showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),
   }),
@@ -505,6 +507,135 @@ export const manageVoiceSttRpc = defineRpc({
     message: z.string(),
     durationMs: z.number(),
     recentActions: z.array(ActionLogEntrySchema),
+  }),
+});
+
+export const AgentHistoryTargetReceiptSchema = z.object({
+  workspaceId: z.string().nullable(),
+  workspaceName: z.string().nullable(),
+  agentId: z.string().nullable(),
+  conversationId: z.string().nullable(),
+  status: z.string().nullable(),
+  lastError: z.string().nullable(),
+  dbExists: z.boolean(),
+  dbSizeFormatted: z.string(),
+  brainTranscriptExists: z.boolean(),
+  shelfTranscriptExists: z.boolean(),
+  transcriptLines: z.number(),
+  healable: z.boolean(),
+  healed: z.boolean(),
+  detail: z.string(),
+});
+
+export type AgentHistoryTargetReceipt = z.infer<typeof AgentHistoryTargetReceiptSchema>;
+
+export const manageAgentHistoryRpc = defineRpc({
+  name: "finder.manage_agent_history",
+  input: z.object({
+    action: z.enum(["inspect", "probe", "heal"]).default("inspect"),
+    workspaceId: z.string().optional(),
+    agentId: z.string().optional(),
+    conversationId: z.string().optional(),
+    source: z
+      .enum([
+        "settings-ui",
+        "slash-command",
+        "command-center",
+        "timeline-banner",
+        "agent-tool",
+      ])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.enum(["inspect", "probe", "heal"]),
+    sessionPatches: z.object({
+      ok: z.boolean(),
+      appPatched: z.boolean(),
+      cliPatched: z.boolean(),
+      configSummary: z.string(),
+      details: z.string(),
+    }),
+    vaultStats: z.object({
+      activeWorkspacesCount: z.number(),
+      antigravityAgentsCount: z.number(),
+      healthyConversationsCount: z.number(),
+      missingDbCount: z.number(),
+      missingTranscriptCount: z.number(),
+      shelvedTranscriptCount: z.number(),
+    }),
+    targetAgent: AgentHistoryTargetReceiptSchema.nullable(),
+    actionsTaken: z.array(z.string()),
+    message: z.string(),
+    durationMs: z.number(),
+    recentActions: z.array(ActionLogEntrySchema),
+  }),
+});
+
+export const PaseoRecoveryAgentItemSchema = z.object({
+  agentId: z.string(),
+  workspaceId: z.string().nullable(),
+  title: z.string(),
+  status: z.string(),
+  persistedStatus: z.string().nullable().optional(),
+  conversationId: z.string(),
+  epochs: z.number(),
+  totalSteps: z.number(),
+  lastStepIndex: z.number(),
+  lastStepType: z.string(),
+  shellCallsInTurn: z.number(),
+  otherToolCallsInTurn: z.number(),
+  toolSummary: z.string(),
+  wasStartupRecoveryFailed: z.boolean(),
+  lastErrorText: z.string().nullable(),
+  ageHours: z.number(),
+  classification: z.string(),
+  needsPullUp: z.boolean(),
+  reason: z.string(),
+  attemptsAtCurrentStep: z.number(),
+  healed: z.boolean(),
+  healError: z.string().nullable().optional(),
+});
+
+export type PaseoRecoveryAgentItem = z.infer<typeof PaseoRecoveryAgentItemSchema>;
+
+export const reconcilePaseoRecoveryRpc = defineRpc({
+  name: "finder.reconcile_paseo_recovery",
+  input: z.object({
+    action: z.enum(["status", "simulate", "heal", "reset"]).default("status"),
+    agentId: z.string().optional(),
+    maxAgeHours: z.number().optional(),
+    prompt: z.string().optional(),
+    source: z
+      .enum([
+        "settings-ui",
+        "slash-command",
+        "command-center",
+        "agent-tool",
+      ])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.enum(["status", "simulate", "heal", "reset"]),
+    resumeOnStartup: z.boolean(),
+    versionCacheOk: z.boolean(),
+    catalogSingleflightOk: z.boolean(),
+    proxyHealthy: z.boolean(),
+    daemonRunning: z.boolean(),
+    daemonStartupFailedCount: z.number(),
+    interruptedCount: z.number(),
+    healedCount: z.number(),
+    unhealedCount: z.number(),
+    circuitBreakerCount: z.number(),
+    totalScanned: z.number(),
+    agents: z.array(PaseoRecoveryAgentItemSchema),
+    interruptedAgents: z.array(PaseoRecoveryAgentItemSchema),
+    healedAgents: z.array(PaseoRecoveryAgentItemSchema),
+    actions: z.array(z.string()),
+    issues: z.array(z.string()),
+    message: z.string(),
+    durationMs: z.number(),
   }),
 });
 

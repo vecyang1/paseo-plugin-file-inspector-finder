@@ -1140,6 +1140,7 @@ export interface DesktopRevealHelperCallbacks {
     jumpMode?: QuickJumpAction;
     source?: "quick-switcher";
   }): Promise<QuickJumpExecutionSummary | null>;
+  onHealAgentHistory?(workspaceId?: string): Promise<{ ok: boolean; message: string } | null>;
 }
 
 const PASEO_INTERNAL_FILE_DRAG_MIME = "application/x-paseo-workspace-file";
@@ -2776,9 +2777,86 @@ export function installDesktopRevealHelpers(
 
   let tabMenuRafId: number | null = null;
   let observer: InstanceType<NonNullable<MinimalWindow["MutationObserver"]>> | null = null;
+  const autoHealedBannerByWs = new Map<string, number>();
+
+  const decorateTimelineSyncErrorBanner = (): number => {
+    if (!callbacks.onHealAgentHistory) return 0;
+    const banners = doc.querySelectorAll('[data-testid="agent-timeline-sync-error"]');
+    if (!banners || banners.length === 0) return 0;
+    let decorated = 0;
+    const isZh = (resolveLocale() ?? "").toLowerCase().startsWith("zh");
+    for (let i = 0; i < banners.length; i += 1) {
+      const banner = banners[i];
+      if (!banner) continue;
+      if (banner.getAttribute?.("data-paseo-finder-history-heal") === "true") continue;
+      banner.setAttribute?.("data-paseo-finder-history-heal", "true");
+      const retryBtn = banner.querySelector?.('[data-testid="agent-timeline-sync-retry"]');
+      const parent = retryBtn?.parentElement ?? banner;
+      const tokens = syncPaseoThemeCssVariables(doc, win);
+      const healBtn = doc.createElement("div");
+      healBtn.setAttribute?.("data-testid", "paseo-finder-agent-history-heal-btn");
+      healBtn.setAttribute?.("role", "button");
+      healBtn.textContent = isZh ? "恢复记录" : "Heal History";
+      if (healBtn.style) {
+        healBtn.style.display = "inline-flex";
+        healBtn.style.alignItems = "center";
+        healBtn.style.padding = "4px 9px";
+        healBtn.style.marginLeft = "6px";
+        healBtn.style.borderRadius = "6px";
+        healBtn.style.fontSize = "11.5px";
+        healBtn.style.fontWeight = "600";
+        healBtn.style.cursor = "pointer";
+        healBtn.style.userSelect = "none";
+        healBtn.style.backgroundColor = tokens.surface2;
+        healBtn.style.border = `1px solid ${tokens.border}`;
+        healBtn.style.color = tokens.foreground;
+      }
+      const triggerHeal = (autoTriggered: boolean) => {
+        const wsId =
+          resolveCurrentActiveWorkspaceId(doc, win) ?? callbacks.getFallbackWorkspaceId?.();
+        healBtn.textContent = isZh ? "正在恢复..." : "Healing...";
+        void callbacks
+          .onHealAgentHistory?.(wsId)
+          .then((res) => {
+            healBtn.textContent = isZh ? "已恢复 · 重试中" : "Healed · Retrying";
+            const liveRetry = doc.querySelector('[data-testid="agent-timeline-sync-retry"]');
+            liveRetry?.click?.();
+            if (res?.message && !autoTriggered) {
+              showDropReceiptToast(res.message, !res.ok);
+            }
+          })
+          .catch(() => {
+            healBtn.textContent = isZh ? "恢复记录" : "Heal History";
+          });
+      };
+      healBtn.addEventListener?.("click", (ev) => {
+        const me = ev as MinimalMouseEvent;
+        me.preventDefault?.();
+        me.stopPropagation?.();
+        triggerHeal(false);
+      });
+      parent.appendChild?.(healBtn);
+      decorated += 1;
+
+      const wsKey =
+        resolveCurrentActiveWorkspaceId(doc, win) ??
+        callbacks.getFallbackWorkspaceId?.() ??
+        "default";
+      const lastAt = autoHealedBannerByWs.get(wsKey) ?? 0;
+      if (Date.now() - lastAt > 45_000) {
+        autoHealedBannerByWs.set(wsKey, Date.now());
+        setTimeout(() => {
+          triggerHeal(true);
+        }, 120);
+      }
+    }
+    return decorated;
+  };
 
   const runTabMenuInjectPass = () => {
-    const count = injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
+    const count =
+      injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win) +
+      decorateTimelineSyncErrorBanner();
     if (count > 0) {
       observer?.takeRecords?.();
     }
