@@ -88,6 +88,9 @@ import {
   readInlineRenamePreferences,
   resolveCurrentActiveWorkspaceId,
   resolveInlineRenameTarget,
+  revealWorkspaceInSidebar,
+  extractActiveWorkspaceHeaderProjectName,
+  extractCommandCenterSelectionHint,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
 } from "../client/web";
@@ -2477,6 +2480,148 @@ test("27. Startup Auto-Pull-Up & Interrupted Agent Reconciler (reconcilePaseoRec
   assert.ok(statusRes.totalScanned > 0);
   assert.equal(statusRes.unhealedCount, 0);
   assert.equal(statusRes.ok, true);
+});
+
+test("28. Search (⌘F / ⌘K) & Route Navigation Left-Sidebar Auto-Reveal, Uncollapse & Scroll-Into-Vision (revealWorkspaceInSidebar)", async () => {
+  const body = createInteractiveDomNode("div", { "data-testid": "body" });
+
+  // 1) Build WorkspaceHeader DOM matching Paseo's `va(e)` layout:
+  //    headerTitleTextGroup -> [ScreenTitle("workspace-header-title"), WorkspaceHeaderProjectRow("2026-11-08 Job hunting")]
+  const headerGroup = createInteractiveDomNode("div");
+  const headerTitle = createInteractiveDomNode("div", {
+    "data-testid": "workspace-header-title",
+  });
+  headerTitle.textContent = "Init job hunting router; check HR replies";
+  const headerProjectSubtitle = createInteractiveDomNode("div");
+  headerProjectSubtitle.textContent = "2026-11-08 Job hunting";
+  headerGroup.appendChild?.(headerTitle);
+  headerGroup.appendChild?.(headerProjectSubtitle);
+  body.appendChild?.(headerGroup);
+
+  // 2) Build LeftSidebar DOM where `2026-11-08 Job hunting` is initially COLLAPSED
+  //    (so `sidebar-workspace-list-local:proj_job` and `sidebar-workspace-row-local:ws_job_router` do NOT exist in DOM until project row is clicked!)
+  const projectGroup = createInteractiveDomNode("div", {
+    role: "group",
+    "aria-label": "2026-11-08 Job hunting",
+  });
+  const projectRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-project-row-local:proj_job",
+  });
+  projectRow.textContent = "2026-11-08 Job hunting";
+
+  let projectRowUncollapsed = false;
+  let workspaceRowScrolled = false;
+  let showMoreExpanded = false;
+
+  const workspaceRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:ws_job_router",
+  });
+  workspaceRow.textContent = "Init job hunting router; check HR replies";
+  workspaceRow.scrollIntoView = () => {
+    workspaceRowScrolled = true;
+  };
+
+  const showMoreBtn = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-project-show-more-local:proj_job",
+    "aria-expanded": "false",
+  });
+  const workspaceList = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-list-local:proj_job",
+  });
+
+  showMoreBtn.click = () => {
+    showMoreExpanded = true;
+    showMoreBtn.setAttribute?.("aria-expanded", "true");
+    workspaceList.appendChild?.(workspaceRow);
+  };
+  workspaceList.appendChild?.(showMoreBtn);
+
+  projectRow.click = () => {
+    projectRowUncollapsed = true;
+    projectGroup.appendChild?.(workspaceList);
+  };
+  projectGroup.appendChild?.(projectRow);
+  body.appendChild?.(projectGroup);
+
+  // 3) Build CommandCenter result row matching Paseo's `Ee(e)` layout
+  const ccPanel = createInteractiveDomNode("div", {
+    "data-testid": "command-center-panel",
+  });
+  const ccWsRow = createInteractiveDomNode("div", {
+    "data-testid": "command-center-workspace-local:ws_job_router",
+  });
+  const ccSubtitle = createInteractiveDomNode("div", {
+    "data-testid": "command-center-workspace-subtitle",
+  });
+  ccSubtitle.textContent = "2026-11-08 Job hunting \u00b7 main";
+  ccWsRow.appendChild?.(ccSubtitle);
+  ccPanel.appendChild?.(ccWsRow);
+  body.appendChild?.(ccPanel);
+
+  const mockDoc: MinimalDocument = {
+    body,
+    head: createInteractiveDomNode("head"),
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    querySelector: (sel: string) => body.querySelector?.(sel) ?? null,
+    querySelectorAll: (sel: string) => body.querySelectorAll?.(sel) ?? [],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const mockWin: MinimalWindow = {
+    document: mockDoc,
+    location: { pathname: "/h/local/workspace/ws_job_router" },
+    innerWidth: 1280,
+    innerHeight: 800,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // Verify header project name extraction and CommandCenter subtitle extraction
+  assert.equal(
+    extractActiveWorkspaceHeaderProjectName(mockDoc),
+    "2026-11-08 Job hunting",
+  );
+  const ccHint = extractCommandCenterSelectionHint(ccSubtitle, mockDoc);
+  assert.equal(ccHint?.workspaceId, "ws_job_router");
+  assert.deepEqual(ccHint?.candidateProjectNames, ["2026-11-08 Job hunting"]);
+
+  // Execute revealWorkspaceInSidebar -> must uncollapse project row, click Show More, scroll workspace row into center, and flash both rows!
+  const revealed = revealWorkspaceInSidebar(
+    {
+      workspaceId: "ws_job_router",
+      candidateProjectNames: ccHint?.candidateProjectNames,
+      highlightFlash: true,
+    },
+    mockDoc,
+    mockWin,
+  );
+  assert.equal(revealed, true);
+  assert.equal(
+    projectRowUncollapsed,
+    true,
+    "Collapsed parent project row in left sidebar must be clicked to uncollapse",
+  );
+  assert.equal(
+    showMoreExpanded,
+    true,
+    "Show-more button in left sidebar project group must be clicked when target workspace is hidden behind truncation",
+  );
+  assert.equal(
+    workspaceRowScrolled,
+    true,
+    "Target workspace row in left sidebar must be scrolled into user vision",
+  );
+  assert.equal(
+    workspaceRow.getAttribute?.("data-paseo-workspace-jump-flash"),
+    "true",
+    "Target workspace row must receive theme-aware highlight flash",
+  );
+  assert.equal(
+    projectRow.getAttribute?.("data-paseo-project-jump-flash"),
+    "true",
+    "Parent project row must receive theme-aware highlight flash",
+  );
 });
 
 

@@ -203,6 +203,7 @@ const QUICK_JUMP_STORAGE_KEY = "paseo:finder-plugin:quick-jump-config";
 export interface QuickJumpPreferences {
   enableWorkspaceQuickJump: boolean;
   enableCommandCenterProjectItems: boolean;
+  autoRevealActiveWorkspaceInSidebar: boolean;
   quickJumpDefaultAction: QuickJumpAction;
 }
 
@@ -220,6 +221,9 @@ export function syncQuickJumpPreferences(
         prefs.enableWorkspaceQuickJump ?? existing.enableWorkspaceQuickJump,
       enableCommandCenterProjectItems:
         prefs.enableCommandCenterProjectItems ?? existing.enableCommandCenterProjectItems,
+      autoRevealActiveWorkspaceInSidebar:
+        prefs.autoRevealActiveWorkspaceInSidebar ??
+        existing.autoRevealActiveWorkspaceInSidebar,
       quickJumpDefaultAction:
         prefs.quickJumpDefaultAction ?? existing.quickJumpDefaultAction,
     };
@@ -235,6 +239,7 @@ export function readQuickJumpPreferences(
   const defaults: QuickJumpPreferences = {
     enableWorkspaceQuickJump: true,
     enableCommandCenterProjectItems: true,
+    autoRevealActiveWorkspaceInSidebar: true,
     quickJumpDefaultAction: "open-latest",
   };
   if (!storage) return defaults;
@@ -246,6 +251,8 @@ export function readQuickJumpPreferences(
     return {
       enableWorkspaceQuickJump: parsed.enableWorkspaceQuickJump !== false,
       enableCommandCenterProjectItems: parsed.enableCommandCenterProjectItems !== false,
+      autoRevealActiveWorkspaceInSidebar:
+        parsed.autoRevealActiveWorkspaceInSidebar !== false,
       quickJumpDefaultAction:
         action === "locate-sidebar" || action === "create-new" ? action : "open-latest",
     };
@@ -1134,6 +1141,20 @@ export interface DesktopRevealHelperCallbacks {
     options: { forceNew: boolean },
   ): Promise<FolderDropResultSummary | null>;
   onListJumpProjects?(query?: string): Promise<ProjectJumpCandidate[]>;
+  onResolveWorkspaceProject?(
+    workspaceId: string,
+  ):
+    | {
+        projectId?: string | null;
+        projectKey?: string | null;
+        projectName?: string | null;
+      }
+    | null
+    | Promise<{
+        projectId?: string | null;
+        projectKey?: string | null;
+        projectName?: string | null;
+      } | null>;
   onExecuteQuickJump?(input: {
     projectId?: string;
     query?: string;
@@ -1435,6 +1456,345 @@ export function locateProjectInSidebar(
   return true;
 }
 
+export function extractActiveWorkspaceHeaderProjectName(
+  doc: MinimalDocument,
+): string | null {
+  const headerTitle = doc.querySelector('[data-testid="workspace-header-title"]');
+  if (!headerTitle) return null;
+  const sibling = headerTitle.nextSibling ?? null;
+  const siblingText = (sibling?.textContent ?? "").trim();
+  if (siblingText) {
+    return siblingText;
+  }
+  const parent = headerTitle.parentElement;
+  const children = parent?.children;
+  if (children && children.length >= 2) {
+    for (let i = 0; i < children.length; i += 1) {
+      const child = children[i];
+      if (!child || child === headerTitle) continue;
+      if (child.getAttribute?.("data-testid") === "workspace-header-title") continue;
+      const txt = (child.textContent ?? "").trim();
+      if (txt) {
+        return txt;
+      }
+    }
+  }
+  const titleText = (headerTitle.textContent ?? "").trim();
+  return titleText || null;
+}
+
+export function extractCommandCenterSelectionHint(
+  target: MinimalElement | null,
+  doc: MinimalDocument,
+): {
+  workspaceId?: string;
+  candidateProjectNames: string[];
+} | null {
+  const panel = doc.querySelector('[data-testid="command-center-panel"]');
+  let rowEl: MinimalElement | null = null;
+  let curr: MinimalElement | null = target;
+  for (let depth = 0; curr && depth < 12; depth += 1) {
+    const tid = curr.getAttribute?.("data-testid") ?? "";
+    if (
+      tid.startsWith("command-center-workspace-") &&
+      tid !== "command-center-workspace-subtitle"
+    ) {
+      rowEl = curr;
+      break;
+    }
+    if (
+      tid.startsWith("command-center-agent-") &&
+      tid !== "command-center-agent-subtitle"
+    ) {
+      rowEl = curr;
+      break;
+    }
+    curr = curr.parentElement ?? null;
+  }
+
+  if (!rowEl && panel) {
+    rowEl =
+      panel.querySelector?.('[data-testid^="command-center-workspace-"]') ??
+      panel.querySelector?.('[data-testid^="command-center-agent-"]') ??
+      null;
+  }
+  if (!rowEl) return null;
+
+  const rowTid = rowEl.getAttribute?.("data-testid") ?? "";
+  let workspaceId: string | undefined;
+  if (rowTid.startsWith("command-center-workspace-")) {
+    const rawKey = rowTid.slice("command-center-workspace-".length);
+    const colonIdx = rawKey.lastIndexOf(":");
+    workspaceId = colonIdx > 0 ? rawKey.slice(colonIdx + 1) : rawKey;
+  }
+
+  const subtitleEl =
+    rowEl.querySelector?.('[data-testid="command-center-workspace-subtitle"]') ??
+    rowEl.querySelector?.('[data-testid="command-center-agent-subtitle"]') ??
+    null;
+  const rawSubtitle = (subtitleEl?.textContent ?? "").trim();
+  const candidateProjectNames: string[] = [];
+  if (rawSubtitle) {
+    const parts = rawSubtitle
+      .split(/\s*\u00b7\s*/)
+      .map((s) => s.replace(/\u00a0/g, " ").trim())
+      .filter(Boolean);
+    for (const part of parts) {
+      if (
+        part &&
+        part !== "main" &&
+        part !== "master" &&
+        !/^(?:just now|\d+\s*(?:s|m|h|d|w|mo|y)|yesterday)/i.test(part) &&
+        !candidateProjectNames.includes(part)
+      ) {
+        candidateProjectNames.push(part);
+      }
+    }
+  }
+
+  return {
+    workspaceId,
+    candidateProjectNames,
+  };
+}
+
+export interface RevealWorkspaceSidebarOptions {
+  workspaceId?: string | null;
+  projectId?: string | null;
+  projectKey?: string | null;
+  projectName?: string | null;
+  candidateProjectNames?: string[];
+  highlightFlash?: boolean;
+}
+
+function findSidebarWorkspaceRow(
+  doc: MinimalDocument,
+  cleanWorkspaceId: string,
+): MinimalElement | null {
+  if (!cleanWorkspaceId) {
+    return doc.querySelector(
+      '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
+    );
+  }
+  const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (!row) continue;
+    const tid = row.getAttribute?.("data-testid") ?? "";
+    if (
+      tid.endsWith(`:${cleanWorkspaceId}`) ||
+      tid === `sidebar-workspace-row-${cleanWorkspaceId}`
+    ) {
+      return row;
+    }
+  }
+  return null;
+}
+
+function flashAndScrollWorkspaceRow(
+  row: MinimalElement,
+  doc: MinimalDocument,
+  win: MinimalWindow | null,
+  highlightFlash = true,
+): void {
+  try {
+    row.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  } catch {
+    try {
+      row.scrollIntoView?.(true);
+    } catch {
+      // Ignore if scrollIntoView is unsupported in mock DOM
+    }
+  }
+
+  if (!highlightFlash) return;
+
+  const tokens = syncPaseoThemeCssVariables(doc, win);
+  row.setAttribute?.("data-paseo-workspace-jump-flash", "true");
+  if (row.style) {
+    const prevBg = row.style.backgroundColor ?? "";
+    const prevOutline = row.style.outline ?? "";
+    const prevRadius = row.style.borderRadius ?? "";
+    row.style.backgroundColor = tokens.surfaceSidebarSelected;
+    row.style.outline = `1.5px solid ${tokens.primary}`;
+    row.style.borderRadius = "6px";
+    setTimeout(() => {
+      if (row.style) {
+        row.style.backgroundColor = prevBg;
+        row.style.outline = prevOutline;
+        row.style.borderRadius = prevRadius;
+      }
+      row.removeAttribute?.("data-paseo-workspace-jump-flash");
+    }, 1800);
+  }
+
+  const groupEl = row.closest?.('[role="group"]') ?? row.parentElement?.parentElement ?? null;
+  const parentProjRow =
+    groupEl?.querySelector?.('[data-testid^="sidebar-project-row-"]') ?? null;
+  if (
+    parentProjRow &&
+    parentProjRow.getAttribute?.("data-paseo-project-jump-flash") !== "true"
+  ) {
+    parentProjRow.setAttribute?.("data-paseo-project-jump-flash", "true");
+    if (parentProjRow.style) {
+      const prevBg = parentProjRow.style.backgroundColor ?? "";
+      const prevOutline = parentProjRow.style.outline ?? "";
+      const prevRadius = parentProjRow.style.borderRadius ?? "";
+      parentProjRow.style.backgroundColor = tokens.surfaceSidebarSelected;
+      parentProjRow.style.outline = `1px solid ${tokens.border}`;
+      parentProjRow.style.borderRadius = "6px";
+      setTimeout(() => {
+        if (parentProjRow.style) {
+          parentProjRow.style.backgroundColor = prevBg;
+          parentProjRow.style.outline = prevOutline;
+          parentProjRow.style.borderRadius = prevRadius;
+        }
+        parentProjRow.removeAttribute?.("data-paseo-project-jump-flash");
+      }, 1600);
+    }
+  }
+}
+
+export function revealWorkspaceInSidebar(
+  options: RevealWorkspaceSidebarOptions,
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): boolean {
+  const win = winOverride ?? getWebWindow();
+  const doc = docOverride ?? win?.document ?? null;
+  if (!doc) return false;
+
+  const cleanWorkspaceId = (
+    options.workspaceId ??
+    resolveCurrentActiveWorkspaceId(doc, win) ??
+    ""
+  ).trim();
+  const highlightFlash = options.highlightFlash !== false;
+
+  const tryExpandParentProjectAndShowMore = (): boolean => {
+    const candidateNames: string[] = [];
+    const pushName = (n?: string | null) => {
+      const trimmed = (n ?? "").trim();
+      if (trimmed && !candidateNames.includes(trimmed)) {
+        candidateNames.push(trimmed);
+      }
+    };
+    pushName(options.projectName);
+    for (const extra of options.candidateProjectNames ?? []) {
+      pushName(extra);
+    }
+    pushName(extractActiveWorkspaceHeaderProjectName(doc));
+
+    let projectLocated = false;
+    if (options.projectId || options.projectKey || options.projectName) {
+      projectLocated = locateProjectInSidebar(
+        {
+          projectId: options.projectId,
+          projectKey: options.projectKey,
+          projectName: options.projectName,
+          expandIfCollapsed: true,
+          highlightFlash,
+        },
+        doc,
+        win,
+      );
+    }
+    if (!projectLocated) {
+      for (const candidateName of candidateNames) {
+        if (
+          locateProjectInSidebar(
+            {
+              projectName: candidateName,
+              expandIfCollapsed: true,
+              highlightFlash,
+            },
+            doc,
+            win,
+          )
+        ) {
+          projectLocated = true;
+          break;
+        }
+      }
+    }
+
+    // If the workspace row is still hidden because the project has >5 workspaces behind "Show more", click it
+    if (cleanWorkspaceId && !findSidebarWorkspaceRow(doc, cleanWorkspaceId)) {
+      const showMoreBtns = doc.querySelectorAll(
+        '[data-testid^="sidebar-project-show-more-"]',
+      );
+      for (let i = 0; i < showMoreBtns.length; i += 1) {
+        const btn = showMoreBtns[i];
+        if (!btn) continue;
+        if (btn.getAttribute?.("aria-expanded") === "true") continue;
+        const btid = btn.getAttribute?.("data-testid") ?? "";
+        const viewKey = btid.replace(/^sidebar-project-show-more-/, "");
+        const cleanKey = (options.projectKey ?? "").trim();
+        const cleanId = (options.projectId ?? "").trim();
+        const groupEl = btn.closest?.('[role="group"]');
+        const projRowForKey = viewKey
+          ? doc.querySelector(`[data-testid="sidebar-project-row-${viewKey}"]`)
+          : null;
+        const projRowText = (projRowForKey?.textContent ?? "").trim().toLowerCase();
+        const groupLabel =
+          (groupEl?.getAttribute?.("aria-label") ?? "").trim().toLowerCase() ||
+          projRowText;
+        const matchesProject =
+          (cleanKey && (btid.endsWith(`:${cleanKey}`) || viewKey === cleanKey)) ||
+          (cleanId && (btid.endsWith(`:${cleanId}`) || viewKey === cleanId)) ||
+          (groupLabel &&
+            candidateNames.some((n) => n.toLowerCase() === groupLabel));
+        if (matchesProject || (!options.projectId && !options.projectKey && candidateNames.length === 0)) {
+          btn.click?.();
+        }
+      }
+    }
+
+    return projectLocated;
+  };
+
+  // Fast path: if the workspace row is already rendered in the left sidebar, scroll and flash immediately
+  const existingRow = findSidebarWorkspaceRow(doc, cleanWorkspaceId);
+  if (existingRow) {
+    flashAndScrollWorkspaceRow(existingRow, doc, win, highlightFlash);
+    return true;
+  }
+
+  // Otherwise, uncollapse the parent project (and "Show more" if truncated)
+  const projectExpanded = tryExpandParentProjectAndShowMore();
+
+  // Check synchronously in case `.click()` mounted the workspace list immediately
+  const rowAfterSyncExpand = findSidebarWorkspaceRow(doc, cleanWorkspaceId);
+  if (rowAfterSyncExpand) {
+    flashAndScrollWorkspaceRow(rowAfterSyncExpand, doc, win, highlightFlash);
+    return true;
+  }
+
+  // Schedule staged retries for asynchronous React sidebar expansion / route header hydration
+  let revealed = false;
+  for (const delayMs of [45, 120, 240, 420, 700]) {
+    setTimeout(() => {
+      if (revealed) return;
+      const targetWsId =
+        cleanWorkspaceId || (resolveCurrentActiveWorkspaceId(doc, win) ?? "").trim();
+      const row = findSidebarWorkspaceRow(doc, targetWsId);
+      if (row) {
+        revealed = true;
+        flashAndScrollWorkspaceRow(row, doc, win, highlightFlash);
+        return;
+      }
+      tryExpandParentProjectAndShowMore();
+      const rowAfterRetry = findSidebarWorkspaceRow(doc, targetWsId);
+      if (rowAfterRetry) {
+        revealed = true;
+        flashAndScrollWorkspaceRow(rowAfterRetry, doc, win, highlightFlash);
+      }
+    }, delayMs);
+  }
+
+  return projectExpanded;
+}
+
 export function focusWorkspaceInApp(
   workspaceId: string,
   projectId?: string | null,
@@ -1468,22 +1828,24 @@ export function focusWorkspaceInApp(
     return Boolean(projectId || projectMeta?.projectKey || projectMeta?.projectName);
   }
 
-  const tryClickRowOnce = (allowExpandCollapsedProject: boolean): boolean => {
-    const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
-    for (let i = 0; i < rows.length; i += 1) {
-      const row = rows[i];
-      const tid = row?.getAttribute?.("data-testid") ?? "";
-      if (tid.endsWith(`:${cleanId}`) || tid === `sidebar-workspace-row-${cleanId}`) {
-        try {
-          row?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
-        } catch {
-          // Ignore scrollIntoView error
-        }
-        row?.click?.();
-        return true;
+  const isAlreadyOnTargetRoute = (): boolean => {
+    const currentPath = win?.location?.pathname ?? "";
+    return currentPath.endsWith(`/workspace/${encodeURIComponent(cleanId)}`);
+  };
+
+  const tryFocusAndRevealOnce = (allowExpandCollapsedProject: boolean): boolean => {
+    const row = findSidebarWorkspaceRow(doc, cleanId);
+    if (row) {
+      flashAndScrollWorkspaceRow(row, doc, win, true);
+      if (!isAlreadyOnTargetRoute()) {
+        row.click?.();
       }
+      return true;
     }
-    if (allowExpandCollapsedProject && (projectId || projectMeta?.projectKey || projectMeta?.projectName)) {
+    if (
+      allowExpandCollapsedProject &&
+      (projectId || projectMeta?.projectKey || projectMeta?.projectName)
+    ) {
       locateProjectInSidebar(
         {
           projectId,
@@ -1495,26 +1857,46 @@ export function focusWorkspaceInApp(
         doc,
         win,
       );
+      const rowAfterSyncExpand = findSidebarWorkspaceRow(doc, cleanId);
+      if (rowAfterSyncExpand) {
+        flashAndScrollWorkspaceRow(rowAfterSyncExpand, doc, win, true);
+        if (!isAlreadyOnTargetRoute()) {
+          rowAfterSyncExpand.click?.();
+        }
+        return true;
+      }
     }
     return false;
   };
 
-  if (tryClickRowOnce(false)) {
+  if (tryFocusAndRevealOnce(true)) {
     return true;
   }
 
   let expandedTried = false;
-  const retryDelays = [70, 160, 300, 520, 820];
+  let completed = false;
+  const retryDelays = [60, 150, 280, 500, 800];
   for (const delay of retryDelays) {
     setTimeout(() => {
-      const currentPath = win?.location?.pathname ?? "";
-      if (currentPath.endsWith(`/workspace/${encodeURIComponent(cleanId)}`)) {
+      if (completed) return;
+      const allowExpand = delay >= 150 && !expandedTried;
+      if (allowExpand) expandedTried = true;
+      if (tryFocusAndRevealOnce(allowExpand)) {
+        completed = true;
         return;
       }
-      const allowExpand = delay >= 160 && !expandedTried;
-      if (allowExpand) expandedTried = true;
-      const clicked = tryClickRowOnce(allowExpand);
-      if (!clicked && delay >= 520 && win?.history?.pushState) {
+      revealWorkspaceInSidebar(
+        {
+          workspaceId: cleanId,
+          projectId,
+          projectKey: projectMeta?.projectKey,
+          projectName: projectMeta?.projectName,
+          highlightFlash: true,
+        },
+        doc,
+        win,
+      );
+      if (!isAlreadyOnTargetRoute() && delay >= 500 && win?.history?.pushState) {
         const serverId = inferActiveServerId(doc, win);
         const route = `/h/${encodeURIComponent(serverId)}/workspace/${encodeURIComponent(cleanId)}`;
         try {
@@ -2778,6 +3160,76 @@ export function installDesktopRevealHelpers(
   let tabMenuRafId: number | null = null;
   let observer: InstanceType<NonNullable<MinimalWindow["MutationObserver"]>> | null = null;
   const autoHealedBannerByWs = new Map<string, number>();
+  let lastObservedWorkspaceId: string | undefined = resolveCurrentActiveWorkspaceId(
+    doc,
+    win,
+  );
+  let lastSidebarDirectClickWsId: string | null = null;
+  let lastSidebarDirectClickAtMs = 0;
+  let pendingCommandCenterHint: {
+    workspaceId?: string;
+    candidateProjectNames: string[];
+    atMs: number;
+  } | null = null;
+
+  const triggerAutoRevealForWorkspace = (
+    workspaceId: string,
+    candidateProjectNames?: string[],
+  ) => {
+    const cleanWsId = workspaceId.trim();
+    if (!cleanWsId) return;
+    const jumpPrefs = readQuickJumpPreferences(win.localStorage);
+    if (!jumpPrefs.autoRevealActiveWorkspaceInSidebar) return;
+
+    revealWorkspaceInSidebar(
+      {
+        workspaceId: cleanWsId,
+        candidateProjectNames,
+        highlightFlash: true,
+      },
+      doc,
+      win,
+    );
+
+    if (callbacks.onResolveWorkspaceProject) {
+      void Promise.resolve(callbacks.onResolveWorkspaceProject(cleanWsId))
+        .then((meta) => {
+          if (!meta) return;
+          revealWorkspaceInSidebar(
+            {
+              workspaceId: cleanWsId,
+              projectId: meta.projectId,
+              projectKey: meta.projectKey,
+              projectName: meta.projectName,
+              candidateProjectNames,
+              highlightFlash: true,
+            },
+            doc,
+            win,
+          );
+        })
+        .catch(() => {});
+    }
+  };
+
+  const checkActiveWorkspaceRouteSync = () => {
+    const currentWsId = resolveCurrentActiveWorkspaceId(doc, win);
+    if (!currentWsId || currentWsId === lastObservedWorkspaceId) {
+      return;
+    }
+    lastObservedWorkspaceId = currentWsId;
+    if (
+      lastSidebarDirectClickWsId === currentWsId &&
+      Date.now() - lastSidebarDirectClickAtMs < 650
+    ) {
+      return;
+    }
+    const hintNames =
+      pendingCommandCenterHint && Date.now() - pendingCommandCenterHint.atMs < 3000
+        ? pendingCommandCenterHint.candidateProjectNames
+        : undefined;
+    triggerAutoRevealForWorkspace(currentWsId, hintNames);
+  };
 
   const decorateTimelineSyncErrorBanner = (): number => {
     if (!callbacks.onHealAgentHistory) return 0;
@@ -2854,6 +3306,7 @@ export function installDesktopRevealHelpers(
   };
 
   const runTabMenuInjectPass = () => {
+    checkActiveWorkspaceRouteSync();
     const count =
       injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win) +
       decorateTimelineSyncErrorBanner();
@@ -2911,6 +3364,44 @@ export function installDesktopRevealHelpers(
     if (activeMenuEl && (!me.target || !activeMenuEl.contains?.(me.target))) {
       removeMenu();
     }
+
+    // Track direct clicks on left sidebar workspace rows so we don't re-scroll what's already under the cursor
+    let currClickEl: MinimalElement | null = me.target;
+    for (let depth = 0; currClickEl && depth < 8; depth += 1) {
+      const tid = currClickEl.getAttribute?.("data-testid") ?? "";
+      if (tid.startsWith("sidebar-workspace-row-")) {
+        const parsed = parseSidebarWorkspaceRowTestId(tid);
+        if (parsed?.workspaceId) {
+          lastSidebarDirectClickWsId = parsed.workspaceId;
+          lastSidebarDirectClickAtMs = Date.now();
+        }
+        break;
+      }
+      currClickEl = currClickEl.parentElement ?? null;
+    }
+
+    // Detect clicks on Workspace or Agent rows inside Paseo's native Search / CommandCenter (⌘K / ⌘F)
+    const ccHint = extractCommandCenterSelectionHint(me.target, doc);
+    if (ccHint) {
+      pendingCommandCenterHint = {
+        ...ccHint,
+        atMs: Date.now(),
+      };
+      if (ccHint.workspaceId) {
+        lastObservedWorkspaceId = ccHint.workspaceId;
+        triggerAutoRevealForWorkspace(
+          ccHint.workspaceId,
+          ccHint.candidateProjectNames,
+        );
+      } else {
+        for (const delayMs of [35, 130, 280]) {
+          setTimeout(() => {
+            checkActiveWorkspaceRouteSync();
+          }, delayMs);
+        }
+      }
+    }
+
     // Option+Click (Alt+Click) on any file link or file tab immediately reveals in Finder
     if (me.altKey && me.button === 0) {
       const detected = extractFilePathFromElement(me.target, doc);
@@ -3066,6 +3557,26 @@ export function installDesktopRevealHelpers(
     if (ke.key === "Escape") {
       removeMenu();
       return;
+    }
+    // When pressing Enter inside Paseo's native Search / CommandCenter (⌘K / ⌘F), auto-reveal the selected workspace in the left sidebar
+    if (
+      ke.key === "Enter" &&
+      !ke.isComposing &&
+      ke.keyCode !== 229 &&
+      doc.querySelector('[data-testid="command-center-panel"]')
+    ) {
+      const ccHint = extractCommandCenterSelectionHint(ke.target ?? null, doc);
+      if (ccHint) {
+        pendingCommandCenterHint = {
+          ...ccHint,
+          atMs: Date.now(),
+        };
+      }
+      for (const delayMs of [30, 110, 240]) {
+        setTimeout(() => {
+          checkActiveWorkspaceRouteSync();
+        }, delayMs);
+      }
     }
     // Cmd+Shift+R reveals active file tab in Finder
     if ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "r") {
@@ -3404,6 +3915,10 @@ export function installDesktopRevealHelpers(
       });
   };
 
+  const onPopState = () => {
+    checkActiveWorkspaceRouteSync();
+  };
+
   doc.addEventListener("pointerdown", onPointerDownCapture, true);
   doc.addEventListener("mousedown", onPointerDownCapture, true);
   doc.addEventListener("click", onClickCapture, true);
@@ -3415,6 +3930,7 @@ export function installDesktopRevealHelpers(
   doc.addEventListener("dragend", hideSidebarDropOverlay, true);
   doc.addEventListener("drop", onDropCapture, true);
   win.addEventListener("keydown", onKeyDownCapture, true);
+  win.addEventListener("popstate", onPopState, false);
   win.addEventListener("blur", hideSidebarDropOverlay, false);
 
   return () => {
@@ -3439,6 +3955,7 @@ export function installDesktopRevealHelpers(
     doc.removeEventListener("dragend", hideSidebarDropOverlay, true);
     doc.removeEventListener("drop", onDropCapture, true);
     win.removeEventListener("keydown", onKeyDownCapture, true);
+    win.removeEventListener("popstate", onPopState, false);
     win.removeEventListener("blur", hideSidebarDropOverlay, false);
   };
 }

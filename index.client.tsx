@@ -651,9 +651,44 @@ export default function contribute(client: PluginClientContext) {
   // 7. Dynamically register Top-Right Workspace Header Button + Command Center (⌘K) Project Jump Items
   const headerButtons = new Map<string, PluginButtonRegistration>();
   const projectCommandCleanups = new Map<string, () => void>();
+  const workspaceToProjectMap = new Map<
+    string,
+    {
+      projectId: string;
+      projectKey: string | null;
+      projectName: string;
+    }
+  >();
   const lifetime = new AbortController();
   let lastKnownWorkspaceId: string | undefined;
   let syncProjectsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const updateWorkspaceProjectCache = (
+    candidates: Array<{
+      projectId: string;
+      projectKey: string | null;
+      projectName: string;
+      primaryWorkspaceId: string | null;
+      workspaceIds?: string[];
+    }>,
+  ) => {
+    for (const cand of candidates) {
+      const ids = cand.workspaceIds?.length
+        ? cand.workspaceIds
+        : cand.primaryWorkspaceId
+          ? [cand.primaryWorkspaceId]
+          : [];
+      for (const wsId of ids) {
+        if (wsId) {
+          workspaceToProjectMap.set(wsId, {
+            projectId: cand.projectId,
+            projectKey: cand.projectKey,
+            projectName: cand.projectName,
+          });
+        }
+      }
+    }
+  };
 
   const clearProjectCommandItems = () => {
     for (const cleanup of projectCommandCleanups.values()) {
@@ -676,6 +711,7 @@ export default function contribute(client: PluginClientContext) {
       })
       .catch(() => null);
     if (!res || lifetime.signal.aborted) return;
+    updateWorkspaceProjectCache(res.candidates);
 
     const jumpPrefs = readQuickJumpPreferences();
     if (!jumpPrefs.enableCommandCenterProjectItems) {
@@ -931,7 +967,23 @@ export default function contribute(client: PluginClientContext) {
         limit: 50,
         source: "quick-switcher",
       });
+      updateWorkspaceProjectCache(res.candidates);
       return res.candidates;
+    },
+    onResolveWorkspaceProject: async (workspaceId: string) => {
+      const cached = workspaceToProjectMap.get(workspaceId);
+      if (cached) return cached;
+      const res = await client
+        .rpc(quickJumpWorkspaceRpc, {
+          action: "list",
+          limit: 100,
+          source: "command-center",
+        })
+        .catch(() => null);
+      if (res?.candidates) {
+        updateWorkspaceProjectCache(res.candidates);
+      }
+      return workspaceToProjectMap.get(workspaceId) ?? null;
     },
     onExecuteQuickJump: async (input: {
       projectId?: string;

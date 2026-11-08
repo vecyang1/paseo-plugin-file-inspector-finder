@@ -148,6 +148,10 @@ export const enMessages = {
     commandCenterProjectsLabel: "Pin direct Project Jump actions at top of Cmd+K",
     commandCenterProjectsHint:
       "Register one direct 'Jump to Workspace' action per project folder above thread results in Cmd+K",
+    autoRevealSidebarLabel:
+      "Auto-reveal & scroll left sidebar when switching workspace from Search (Cmd+F / Cmd+K)",
+    autoRevealSidebarHint:
+      "Automatically uncollapse the parent project folder, scroll the left sidebar into vision, and highlight the active workspace row whenever selecting a Workspace or Agent in Search",
     quickJumpModeLabel: "Default Enter action in Quick Workspace Switcher",
     quickJumpModeHint:
       "What pressing Enter on a project folder does (Shift+Enter always locates in sidebar; Option+Enter creates a new thread)",
@@ -198,6 +202,7 @@ export const enMessages = {
     quickJumpPreviewBtn: "Preview rank",
     quickJumpTestBtn: "Jump now",
     quickJumpLocateBtn: "Sidebar only",
+    quickJumpRevealActiveBtn: "Reveal active in sidebar",
     quickJumpOpenModalBtn: "Open Cmd+J Switcher",
     quickJumpSummaryPrefix: "Indexed projects:",
     quickJumpActiveThreadsPrefix: "Active threads:",
@@ -397,6 +402,9 @@ export const zhMessages: PluginMessageCatalog = {
     commandCenterProjectsLabel: "在 Cmd+K 顶部置顶项目工作区直达项",
     commandCenterProjectsHint:
       "在 Cmd+K 搜索结果顶部为每个项目文件夹生成一条「跳转工作区」直达动作，排在所有子会话上方",
+    autoRevealSidebarLabel: "搜索跳转后左侧边栏自动展开并滚动定位到当前工作区 (Cmd+F / Cmd+K)",
+    autoRevealSidebarHint:
+      "在搜索面板 (Cmd+F / Cmd+K) 点击任意工作区或智能体会话后，自动展开其所属项目目录、将左侧边栏滚动到视野中央并高亮闪烁对应工作区行",
     quickJumpModeLabel: "快速跳转面板默认回车动作",
     quickJumpModeHint:
       "选中项目后直接按回车时的默认行为（按 Shift+回车 始终仅定位左侧边栏，按 Option+回车 始终新建会话）",
@@ -445,6 +453,7 @@ export const zhMessages: PluginMessageCatalog = {
     quickJumpPreviewBtn: "预检排序",
     quickJumpTestBtn: "立即跳转",
     quickJumpLocateBtn: "仅定位边栏",
+    quickJumpRevealActiveBtn: "定位当前工作区到左栏",
     quickJumpOpenModalBtn: "打开 Cmd+J 面板",
     quickJumpSummaryPrefix: "已索引项目数：",
     quickJumpActiveThreadsPrefix: "活跃子会话数：",

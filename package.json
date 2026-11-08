@@ -2,7 +2,7 @@
   "name": "file-inspector-finder",
   "type": "module",
   "private": false,
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Paseo plugin for Custom Voice & STT Models (SiliconFlow Free SenseVoiceSmall / OpenWhispr Qwen3-ASR / Gemini 6-Key Pool), Schedule Runs History & 1-Click Session Drill-Down (⌘⇧H & inline Runs pills), Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O), zero-popup double-click & F2 inline rename, sidebar folder drag-and-drop workspace import, colored thread labels, Finder/Explorer reveal, macOS Preview/Editor launch, and image metadata inspection.",
   "license": "MIT",
   "repository": {

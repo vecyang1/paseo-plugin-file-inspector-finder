@@ -54,6 +54,7 @@ import {
   locateProjectInSidebar,
   openQuickWorkspaceSwitcherModal,
   resolveCurrentActiveWorkspaceId,
+  revealWorkspaceInSidebar,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
   syncQuickJumpPreferences,
@@ -516,6 +517,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               syncQuickJumpPreferences({
                 enableWorkspaceQuickJump: next,
                 enableCommandCenterProjectItems: values.enableCommandCenterProjectItems,
+                autoRevealActiveWorkspaceInSidebar:
+                  values.autoRevealActiveWorkspaceInSidebar,
                 quickJumpDefaultAction: values.quickJumpDefaultAction,
               });
               void save({ ...values, enableWorkspaceQuickJump: next }, revision);
@@ -530,9 +533,26 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               syncQuickJumpPreferences({
                 enableWorkspaceQuickJump: values.enableWorkspaceQuickJump,
                 enableCommandCenterProjectItems: next,
+                autoRevealActiveWorkspaceInSidebar:
+                  values.autoRevealActiveWorkspaceInSidebar,
                 quickJumpDefaultAction: values.quickJumpDefaultAction,
               });
               void save({ ...values, enableCommandCenterProjectItems: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.autoRevealSidebarLabel")}
+            hint={t("settings.autoRevealSidebarHint")}
+            value={values.autoRevealActiveWorkspaceInSidebar}
+            onValueChange={(next) => {
+              syncQuickJumpPreferences({
+                enableWorkspaceQuickJump: values.enableWorkspaceQuickJump,
+                enableCommandCenterProjectItems: values.enableCommandCenterProjectItems,
+                autoRevealActiveWorkspaceInSidebar: next,
+                quickJumpDefaultAction: values.quickJumpDefaultAction,
+              });
+              void save({ ...values, autoRevealActiveWorkspaceInSidebar: next }, revision);
             }}
           />
 
@@ -549,6 +569,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               syncQuickJumpPreferences({
                 enableWorkspaceQuickJump: values.enableWorkspaceQuickJump,
                 enableCommandCenterProjectItems: values.enableCommandCenterProjectItems,
+                autoRevealActiveWorkspaceInSidebar:
+                  values.autoRevealActiveWorkspaceInSidebar,
                 quickJumpDefaultAction: next,
               });
               void save({ ...values, quickJumpDefaultAction: next }, revision);
@@ -666,6 +688,28 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             >
               <Text style={styles.secondaryBtnText}>
                 {t("settings.quickJumpLocateBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.quickJumpRevealActiveBtn")}
+              onPress={() => {
+                const wsId = resolveActiveWsId();
+                const ok = revealWorkspaceInSidebar({
+                  workspaceId: wsId,
+                  highlightFlash: true,
+                });
+                toast.show(
+                  ok
+                    ? `Revealed active workspace (${wsId ?? "current"}) in left sidebar`
+                    : `Triggered parent project expansion & sidebar scroll for ${wsId ?? "current"}`,
+                  { variant: "success" },
+                );
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.quickJumpRevealActiveBtn")}
               </Text>
             </Pressable>
             <Pressable

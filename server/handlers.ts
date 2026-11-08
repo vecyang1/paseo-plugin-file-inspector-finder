@@ -1586,6 +1586,7 @@ export async function handleQuickJumpWorkspace(
       activeWorkspaceCount: sortedWs.length,
       primaryWorkspaceId: primaryWs?.id ?? null,
       primaryWorkspaceTitle: primaryTitle,
+      workspaceIds: sortedWs.map((w) => w.id),
       hasRunningAgent,
       lastActivityIso,
       lastActivityRelative,
@@ -1638,6 +1639,8 @@ export async function handleQuickJumpWorkspace(
         (c) =>
           c.projectId === explicitProjectId ||
           c.projectKey === explicitProjectId ||
+          c.primaryWorkspaceId === explicitProjectId ||
+          Boolean(c.workspaceIds?.includes(explicitProjectId)) ||
           c.projectName.toLowerCase() === explicitProjectId.toLowerCase(),
       ) ?? matchedCandidates[0] ?? null
     : matchedCandidates[0] ?? null;
