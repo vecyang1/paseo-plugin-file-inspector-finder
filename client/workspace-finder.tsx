@@ -26,6 +26,7 @@ import { pluginTranslations } from "./i18n";
 import {
   LABEL_COLOR_HEX,
   focusWorkspaceInApp,
+  syncInlineRenamePreferences,
   syncSidebarDropPreferences,
 } from "./web";
 
@@ -57,6 +58,14 @@ function FinderBrowserView({
         settingsState.values.enableSidebarFolderDrop,
         settingsState.values.sidebarDropDefaultBehavior,
       );
+      syncInlineRenamePreferences({
+        enableInlineDoubleClickRename:
+          settingsState.values.enableInlineDoubleClickRename,
+        enableQuickRenameAndLabelShortcuts:
+          settingsState.values.enableQuickRenameAndLabelShortcuts,
+        enableDesktopContextMenuHelper:
+          settingsState.values.enableDesktopContextMenuHelper,
+      });
     }
   }, [settingsState]);
 
@@ -115,6 +124,7 @@ function FinderBrowserView({
       renameThread({
         workspaceId,
         title: nextTitle,
+        source: "ui",
       }),
     onSuccess: (res) => {
       void labelsQuery.refetch();

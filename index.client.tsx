@@ -18,8 +18,10 @@ import { pluginTranslations } from "./client/i18n";
 import { ImageInspectorFilePanel } from "./client/image-panel";
 import { FinderPluginSettingsScreen } from "./client/settings-screen";
 import {
+  findF2InlineRenameTarget,
   focusWorkspaceInApp,
   installDesktopRevealHelpers,
+  mountInlineTitleInput,
   syncImagePanelAssociations,
 } from "./client/web";
 import {
@@ -125,7 +127,41 @@ export default function contribute(client: PluginClientContext) {
     icon: "Edit3",
     keywords: ["rename", "title", "thread", "workspace", "name", "f2"],
     context: "workspace",
-    onSelect({ openPanel }) {
+    onSelect({ workspace, openPanel, rpc }) {
+      const g = globalThis as { document?: unknown; window?: unknown };
+      if (g.document && g.window) {
+        const target = findF2InlineRenameTarget(
+          g.document as Parameters<typeof findF2InlineRenameTarget>[0],
+          g.window as Parameters<typeof findF2InlineRenameTarget>[1],
+          workspace.id,
+        );
+        if (target) {
+          setTimeout(() => {
+            mountInlineTitleInput(
+              g.document as Parameters<typeof mountInlineTitleInput>[0],
+              g.window as Parameters<typeof mountInlineTitleInput>[1],
+              target,
+              async (nextTitle, meta) => {
+                const targetWsId = meta?.workspaceId ?? workspace.id;
+                if (targetWsId && !meta?.agentId) {
+                  try {
+                    await client.paseo.workspaces.ref(targetWsId).setTitle(nextTitle);
+                  } catch {
+                    // Fallback to RPC
+                  }
+                }
+                await rpc(renameWorkspaceOrAgentRpc, {
+                  workspaceId: targetWsId,
+                  agentId: meta?.agentId,
+                  title: nextTitle,
+                  source: meta?.source ?? "f2-inline",
+                });
+              },
+            );
+          }, 40);
+          return;
+        }
+      }
       openPanel("finder-panel", { location: "explorer" });
     },
   });
@@ -204,6 +240,7 @@ export default function contribute(client: PluginClientContext) {
         await rpc(renameWorkspaceOrAgentRpc, {
           workspaceId: workspace.id,
           title: normalized,
+          source: "slash-command",
         });
       },
     });
@@ -356,10 +393,11 @@ export default function contribute(client: PluginClientContext) {
     })
     .catch(() => {});
 
-  // 8. Extend Native Tab Context Menus In-Place + Chat File Link Menu + Option+Click + ⌘⇧R + F2 / ⌘⇧E / ⌘⇧L
+  // 8. Extend Native Tab Context Menus In-Place + Chat File Link Menu + Option+Click + ⌘⇧R + Double-Click Inline Rename + F2 / ⌘⇧E / ⌘⇧L
   const cleanupWebHelpers = installDesktopRevealHelpers({
     isEnabled: () => true,
     getLocale: () => client.i18n.locale,
+    getFallbackWorkspaceId: () => lastKnownWorkspaceId,
     onOpenTarget: async (path: string, target: OpenerTarget) => {
       await client.rpc(openFileTargetRpc, {
         path,
@@ -369,10 +407,10 @@ export default function contribute(client: PluginClientContext) {
     onCopyPath: async (path: string) => {
       await copyText(path);
     },
-    onFetchThreadMetadata: async () => {
+    onFetchThreadMetadata: async (explicitWorkspaceId?: string) => {
       const res = await client.rpc(manageWorkspaceLabelsRpc, {
         action: "inspect",
-        workspaceId: lastKnownWorkspaceId,
+        workspaceId: explicitWorkspaceId ?? lastKnownWorkspaceId,
       });
       if (!res.ok) return null;
       lastKnownWorkspaceId = res.workspaceId || lastKnownWorkspaceId;
@@ -383,23 +421,44 @@ export default function contribute(client: PluginClientContext) {
         catalog: res.catalog,
       };
     },
-    onRenameThread: async (newTitle: string | null) => {
-      if (lastKnownWorkspaceId) {
+    onRenameThread: async (
+      newTitle: string | null,
+      options?: {
+        workspaceId?: string;
+        agentId?: string;
+        source?:
+          | "inline-sidebar"
+          | "inline-header"
+          | "inline-tab"
+          | "f2-inline"
+          | "slash-command"
+          | "ui"
+          | "agent-tool";
+      },
+    ) => {
+      const targetWsId = options?.workspaceId ?? lastKnownWorkspaceId;
+      if (targetWsId && !options?.agentId) {
         try {
-          await client.paseo.workspaces.ref(lastKnownWorkspaceId).setTitle(newTitle);
+          await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
         } catch {
           // Fallback to RPC
         }
       }
       await client.rpc(renameWorkspaceOrAgentRpc, {
-        workspaceId: lastKnownWorkspaceId,
+        workspaceId: targetWsId,
+        agentId: options?.agentId,
         title: newTitle,
+        source: options?.source,
       });
     },
-    onToggleLabel: async (labelName: string, color?: WorkspaceLabelColor) => {
+    onToggleLabel: async (
+      labelName: string,
+      color?: WorkspaceLabelColor,
+      explicitWorkspaceId?: string,
+    ) => {
       const res = await client.rpc(manageWorkspaceLabelsRpc, {
         action: "toggle",
-        workspaceId: lastKnownWorkspaceId,
+        workspaceId: explicitWorkspaceId ?? lastKnownWorkspaceId,
         labelName,
         color,
       });

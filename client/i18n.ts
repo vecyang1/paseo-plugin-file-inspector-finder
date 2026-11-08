@@ -16,6 +16,8 @@ export const enMessages = {
     quickRenameWorkspace: "Finder: Quick Rename Workspace / Thread",
     quickManageLabels: "Finder: Quick Toggle or Create Workspace Label",
     importFolderWorkspace: "Finder: Open or Import Folder as Workspace",
+    quickJumpWorkspace: "Finder: Quick Switch Project Workspace (Cmd+J)",
+    jumpToProjectPrefix: "Jump to Workspace:",
     slashDescription: "Reveal a file or image in Finder (leave empty for latest image)",
     slashHint: "[file path or filename, or empty for latest image]",
     renameSlashDescription: "Rename the current workspace or thread title immediately",
@@ -25,6 +27,9 @@ export const enMessages = {
     openFolderSlashDescription:
       "Open or create a Paseo workspace from a folder path if not yet existed",
     openFolderSlashHint: "<folder path> (reuses existing workspace or creates one)",
+    jumpSlashDescription:
+      "Fast jump directly to a project workspace without sub-thread clutter (or leave empty for switcher)",
+    jumpSlashHint: "[project name or keyword, or empty to open Cmd+J switcher]",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -54,6 +59,17 @@ export const enMessages = {
     dropOverlayHint: "Switches if already exists · Hold Option to force new",
     dropOverlayForceNewTitle: "Drop folder to create a fresh workspace",
     dropOverlayForceNewHint: "Option held · Will create a new workspace thread",
+    quickJumpTitle: "Jump to Project Workspace",
+    quickJumpPlaceholder: "Search project workspace by name, acronym, or path...",
+    quickJumpFooterHint:
+      "Enter: Jump to workspace · Shift+Enter: Locate in sidebar only · Option+Enter: New thread",
+    quickJumpEmpty: "No matching project workspaces",
+    quickJumpThreadsBadge: "threads",
+    quickJumpSingleThreadBadge: "1 thread",
+    quickJumpEmptyBadge: "0 threads",
+    quickJumpBtnOpen: "Jump",
+    quickJumpBtnSidebar: "Sidebar",
+    quickJumpBtnNew: "+ New",
   },
   imagePanel: {
     revealMissingDir: "Reveal parent folder in Finder",
@@ -108,9 +124,12 @@ export const enMessages = {
     desktopHelperLabel: "Extend desktop context menus & shortcuts",
     desktopHelperHint:
       "Add 'Reveal in Finder' to file tab menus and chat file links, plus Option+Click and Cmd+Shift+R",
+    inlineDoubleClickRenameLabel: "Double-click to rename inline without popup",
+    inlineDoubleClickRenameHint:
+      "Double-click any left sidebar workspace row, top workspace header title, or agent tab (or press F2 / Cmd+Shift+E) to edit its title directly in place",
     quickRenameLabelShortcutsLabel: "Enable quick thread rename & label shortcuts",
     quickRenameLabelShortcutsHint:
-      "Press F2 or Cmd+Shift+E to rename workspace, Cmd+Shift+L for labels, or double-click workspace header title",
+      "Press F2 or Cmd+Shift+E for in-place inline rename, or Cmd+Shift+L for colored workspace labels",
     sidebarDropLabel: "Drag & drop folder onto sidebar as workspace",
     sidebarDropHint:
       "Drop any folder from Finder onto the left Workspaces sidebar to switch if existing or create if new (Option+Drop forces new)",
@@ -119,6 +138,18 @@ export const enMessages = {
       "How Paseo handles folders dropped onto the left sidebar when Option is not held",
     optDropOpenOrCreate: "Open existing if found, otherwise create",
     optDropAlwaysCreate: "Always create a new workspace",
+    quickJumpEnabledLabel: "Enable Quick Workspace Switcher (Cmd+J / Cmd+Shift+O)",
+    quickJumpEnabledHint:
+      "Open a deduplicated project workspace switcher without sub-thread clutter using Cmd+J or Cmd+Shift+O",
+    commandCenterProjectsLabel: "Pin direct Project Jump actions at top of Cmd+K",
+    commandCenterProjectsHint:
+      "Register one direct 'Jump to Workspace' action per project folder above thread results in Cmd+K",
+    quickJumpModeLabel: "Default Enter action in Quick Workspace Switcher",
+    quickJumpModeHint:
+      "What pressing Enter on a project folder does (Shift+Enter always locates in sidebar; Option+Enter creates a new thread)",
+    optJumpOpenLatest: "Switch to project workspace and scroll sidebar",
+    optJumpLocateSidebar: "Locate and expand project folder in left sidebar only",
+    optJumpCreateNew: "Create a fresh workspace thread in that project",
     showComposerPillLabel: "Show Finder button in chat composer",
     showComposerPillHint: "Display a shortcut pill below the chat input box",
     resyncLabel: "Re-sync image file associations",
@@ -144,7 +175,37 @@ export const enMessages = {
     folderDiagStatusCreated: "Workspace ready / newly created",
     folderDiagWorkspaceId: "Workspace ID:",
     folderDiagDirectory: "Directory:",
+    sectionInlineRenameDiag: "Inline Rename & Workspace Title Reconciler",
+    inlineRenameDiagPrompt:
+      "Inspect the active workspace title, verify active zero-popup inline surfaces, or test renaming directly:",
+    inlineRenameDiagPlaceholder: "Enter new workspace title to apply...",
+    inlineRenameInspectBtn: "Inspect active",
+    inlineRenameApplyBtn: "Apply title",
+    inlineRenameResetBtn: "Reset custom title",
+    inlineRenameActiveWs: "Active workspace:",
+    inlineRenameCurrentTitle: "Current title:",
+    inlineRenameSurfaces:
+      "Active surfaces: Left sidebar row double-click · Top header title double-click · Agent tab double-click · F2 / Cmd+Shift+E",
+    inlineRenameDisabledHint: "Inline double-click rename is currently disabled in settings above",
+    sectionQuickJumpDiag: "Project Workspace Quick Jump Reconciler (Cmd+J / Cmd+K)",
+    quickJumpDiagPrompt:
+      "Search project workspaces without sub-thread noise, preview ranking scores, or test jumping and sidebar auto-scroll:",
+    quickJumpDiagPlaceholder: "e.g. guan, meta, webhook, or acronym like gth...",
+    quickJumpPreviewBtn: "Preview rank",
+    quickJumpTestBtn: "Jump now",
+    quickJumpLocateBtn: "Sidebar only",
+    quickJumpOpenModalBtn: "Open Cmd+J Switcher",
+    quickJumpSummaryPrefix: "Indexed projects:",
+    quickJumpActiveThreadsPrefix: "Active threads:",
+    quickJumpEmptyProjectsPrefix: "Zero-thread projects:",
     sectionContract: "Active Surface Summary",
+    contractQuickJumpLabel:
+      "Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O, Top of Cmd+K & /jump)",
+    contractQuickJumpHint:
+      "Press Cmd+J or Cmd+Shift+O (or search in Cmd+K / run /jump <name>) to jump directly to any project workspace and scroll the left sidebar without sub-thread clutter",
+    contractInlineRenameLabel: "Zero-Popup Inline Rename (Sidebar Row, Header Title, Agent Tab & F2)",
+    contractInlineRenameHint:
+      "Double-click any workspace row in the left sidebar, the top workspace header title, or an agent tab (or press F2 / Cmd+Shift+E) to edit the title directly in place with Enter to save and Escape to cancel",
     contractSidebarDropLabel: "Sidebar Folder Drag & Drop (Auto-Dedupe)",
     contractSidebarDropHint:
       "Drag one or more folders from Finder onto the left sidebar: switches to the workspace if it already exists, or creates it automatically (hold Option to force a new workspace)",
@@ -157,7 +218,7 @@ export const enMessages = {
     contractShortcutsLabel:
       "Quick Shortcuts (F2 / Cmd+Shift+E, Cmd+Shift+L, Option+Click & Cmd+Shift+R)",
     contractShortcutsHint:
-      "F2 or Cmd+Shift+E (or double-click header title) renames workspace; Cmd+Shift+L manages labels; Option+Click or Cmd+Shift+R reveals files in Finder",
+      "F2 or Cmd+Shift+E starts in-place inline rename; Cmd+Shift+L manages colored labels; Option+Click or Cmd+Shift+R reveals files in Finder",
     contractCommandsLabel: "Header Popover, Command Center (Cmd+K) & /reveal /rename /label",
     contractCommandsHint:
       "Click the top-right folder icon, search in Cmd+K, or run /reveal, /rename <title>, or /label <name> [color] in chat",
@@ -186,6 +247,8 @@ export const zhMessages: PluginMessageCatalog = {
     quickRenameWorkspace: "Finder：快速重命名当前工作区或线程",
     quickManageLabels: "Finder：快速切换或新建工作区标签",
     importFolderWorkspace: "Finder：打开或导入文件夹为工作区",
+    quickJumpWorkspace: "Finder：快速切换项目工作区 (Cmd+J)",
+    jumpToProjectPrefix: "跳转工作区：",
     slashDescription: "在 Finder 中显示文件或图片（留空则定位最新图片）",
     slashHint: "[文件路径或文件名，留空定位最新图片]",
     renameSlashDescription: "立即重命名当前工作区或会话标题",
@@ -194,6 +257,8 @@ export const zhMessages: PluginMessageCatalog = {
     labelSlashHint: "<标签名> [颜色] | rename <旧名> <新名> [颜色] | delete <标签名>",
     openFolderSlashDescription: "根据文件夹路径打开已有工作区或自动新建工作区",
     openFolderSlashHint: "<文件夹路径>（已存在则直接切换，不存在则自动创建）",
+    jumpSlashDescription: "直接搜索并跳转到目标项目工作区（过滤子会话干扰，留空打开切换面板）",
+    jumpSlashHint: "[项目名称或缩写关键词，留空打开 Cmd+J 切换面板]",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
@@ -223,6 +288,17 @@ export const zhMessages: PluginMessageCatalog = {
     dropOverlayHint: "若已存在则直接切换 · 按住 Option 强制新建独立工作区",
     dropOverlayForceNewTitle: "松开鼠标：在此文件夹强制新建工作区",
     dropOverlayForceNewHint: "已按住 Option · 将创建新的独立工作区",
+    quickJumpTitle: "快速跳转项目工作区",
+    quickJumpPlaceholder: "输入项目名称、首字母缩写或目录关键词...",
+    quickJumpFooterHint:
+      "回车：跳转工作区 · Shift+回车：仅在左侧边栏定位展开 · Option+回车：新建独立会话",
+    quickJumpEmpty: "未找到匹配的项目工作区",
+    quickJumpThreadsBadge: "个子会话",
+    quickJumpSingleThreadBadge: "1 个子会话",
+    quickJumpEmptyBadge: "0 个会话",
+    quickJumpBtnOpen: "跳转",
+    quickJumpBtnSidebar: "定位边栏",
+    quickJumpBtnNew: "+ 新建",
   },
   imagePanel: {
     revealMissingDir: "在 Finder 中打开上级文件夹",
@@ -276,9 +352,12 @@ export const zhMessages: PluginMessageCatalog = {
     desktopHelperLabel: "扩展桌面右键菜单与快捷键",
     desktopHelperHint:
       "在文件标签页原生菜单与聊天文件链接上增加「在 Finder 中显示」，并启用 Option+点击 与 Cmd+Shift+R",
+    inlineDoubleClickRenameLabel: "双击直接原位重命名（无弹窗）",
+    inlineDoubleClickRenameHint:
+      "双击左侧边栏任意工作区行、顶部工作区标题或智能体标签页（或按 F2 / Cmd+Shift+E），直接原位编辑名称",
     quickRenameLabelShortcutsLabel: "启用会话重命名与标签快捷键",
     quickRenameLabelShortcutsHint:
-      "按 F2 或 Cmd+Shift+E（或双击顶部标题）重命名工作区，按 Cmd+Shift+L 快速管理标签",
+      "按 F2 或 Cmd+Shift+E 直接原位重命名工作区，按 Cmd+Shift+L 快速管理彩色标签",
     sidebarDropLabel: "支持拖拽文件夹到左侧边栏创建或切换工作区",
     sidebarDropHint:
       "从 Finder 拖拽文件夹到左侧工作区栏：已存在则直接切换，不存在则自动新建（按住 Option 强制新建）",
@@ -286,6 +365,18 @@ export const zhMessages: PluginMessageCatalog = {
     sidebarDropModeHint: "未按住 Option 键时，拖拽文件夹到左侧边栏的默认处理方式",
     optDropOpenOrCreate: "已存在则直接切换，不存在则新建",
     optDropAlwaysCreate: "每次均新建独立工作区",
+    quickJumpEnabledLabel: "启用项目工作区快速切换面板 (Cmd+J / Cmd+Shift+O)",
+    quickJumpEnabledHint:
+      "按 Cmd+J 或 Cmd+Shift+O 打开按项目去重的工作区快速跳转面板，彻底过滤子会话刷屏",
+    commandCenterProjectsLabel: "在 Cmd+K 顶部置顶项目工作区直达项",
+    commandCenterProjectsHint:
+      "在 Cmd+K 搜索结果顶部为每个项目文件夹生成一条「跳转工作区」直达动作，排在所有子会话上方",
+    quickJumpModeLabel: "快速跳转面板默认回车动作",
+    quickJumpModeHint:
+      "选中项目后直接按回车时的默认行为（按 Shift+回车 始终仅定位左侧边栏，按 Option+回车 始终新建会话）",
+    optJumpOpenLatest: "切换到该项目最近工作区并滚动左侧边栏",
+    optJumpLocateSidebar: "仅在左侧边栏展开并滚动定位到该项目目录",
+    optJumpCreateNew: "在该项目目录下新建一个干净的工作区会话",
     showComposerPillLabel: "在聊天输入框下方显示 Finder 按钮",
     showComposerPillHint: "在聊天输入栏底部展示快捷入口胶囊",
     resyncLabel: "重新同步图片文件关联",
@@ -310,7 +401,35 @@ export const zhMessages: PluginMessageCatalog = {
     folderDiagStatusCreated: "已新建或即将新建工作区",
     folderDiagWorkspaceId: "工作区 ID：",
     folderDiagDirectory: "解析目录：",
+    sectionInlineRenameDiag: "原位重命名与工作区标题对账器",
+    inlineRenameDiagPrompt: "读取当前激活工作区标题、核验无弹窗原位重命名入口状态，或直接测试改名与重置：",
+    inlineRenameDiagPlaceholder: "输入新工作区标题并立即生效...",
+    inlineRenameInspectBtn: "读取当前工作区",
+    inlineRenameApplyBtn: "应用标题",
+    inlineRenameResetBtn: "重置默认标题",
+    inlineRenameActiveWs: "当前工作区：",
+    inlineRenameCurrentTitle: "当前标题：",
+    inlineRenameSurfaces:
+      "已生效入口：左侧边栏行双击 · 顶部标题双击 · 智能体标签页双击 · F2 / Cmd+Shift+E",
+    inlineRenameDisabledHint: "上方设置中当前已关闭双击原位重命名",
+    sectionQuickJumpDiag: "项目工作区快速跳转与排序对账器 (Cmd+J / Cmd+K)",
+    quickJumpDiagPrompt:
+      "输入任意项目名称、日期后关键词或首字母缩写，实时核验去重排序得分或一键测试跳转与边栏定位：",
+    quickJumpDiagPlaceholder: "例如：guan、meta、webhook 或缩写 gth...",
+    quickJumpPreviewBtn: "预检排序",
+    quickJumpTestBtn: "立即跳转",
+    quickJumpLocateBtn: "仅定位边栏",
+    quickJumpOpenModalBtn: "打开 Cmd+J 面板",
+    quickJumpSummaryPrefix: "已索引项目数：",
+    quickJumpActiveThreadsPrefix: "活跃子会话数：",
+    quickJumpEmptyProjectsPrefix: "零会话空项目：",
     sectionContract: "已启用能力概览",
+    contractQuickJumpLabel: "项目工作区快速直达切换 (Cmd+J / Cmd+Shift+O、Cmd+K 置顶与 /jump)",
+    contractQuickJumpHint:
+      "按 Cmd+J 或 Cmd+Shift+O（或在 Cmd+K 搜索 / 输入 /jump <项目名>），按项目去重直达目标工作区并自动滚动展开左侧边栏",
+    contractInlineRenameLabel: "无弹窗原位双击重命名（左侧边栏行、顶部标题、智能体标签页与 F2）",
+    contractInlineRenameHint:
+      "双击左侧边栏任意工作区行、顶部工作区标题或智能体标签页（或按 F2 / Cmd+Shift+E）直接原位编辑，按回车保存，按 Esc 取消",
     contractSidebarDropLabel: "左侧边栏拖拽文件夹导入工作区（自动防重）",
     contractSidebarDropHint:
       "从 Finder 拖拽一个或多个文件夹到左侧边栏：若工作区已存在则自动切换，未存在则自动新建（按住 Option 强制新建）",
@@ -323,7 +442,7 @@ export const zhMessages: PluginMessageCatalog = {
     contractShortcutsLabel:
       "桌面快捷操作 (F2 / Cmd+Shift+E、Cmd+Shift+L、Option+点击 & Cmd+Shift+R)",
     contractShortcutsHint:
-      "按 F2 或 Cmd+Shift+E（或双击顶部标题）重命名工作区；按 Cmd+Shift+L 管理标签；按住 Option 点击文件链接或按 Cmd+Shift+R 在 Finder 中显示",
+      "按 F2 或 Cmd+Shift+E 直接原位重命名工作区；按 Cmd+Shift+L 管理彩色标签；按住 Option 点击文件链接或按 Cmd+Shift+R 在 Finder 中显示",
     contractCommandsLabel: "右上角面板、命令中心 (Cmd+K) 与 /reveal /rename /label",
     contractCommandsHint:
       "点击工作区右上角文件夹图标、在 Cmd+K 中搜索，或在聊天框输入 /reveal、/rename <新名称> 或 /label <标签> [颜色]",

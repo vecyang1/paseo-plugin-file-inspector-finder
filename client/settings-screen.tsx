@@ -24,13 +24,17 @@ import {
   type OpenerTarget,
   diagnosePathRpc,
   importFolderWorkspaceRpc,
+  manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   pluginSettings,
+  renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { pluginTranslations } from "./i18n";
 import {
   focusWorkspaceInApp,
+  resolveCurrentActiveWorkspaceId,
   syncImagePanelAssociations,
+  syncInlineRenamePreferences,
   syncSidebarDropPreferences,
 } from "./web";
 
@@ -41,11 +45,14 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const diagnosePath = useRpc(diagnosePathRpc);
   const openTarget = useRpc(openFileTargetRpc);
   const importFolder = useRpc(importFolderWorkspaceRpc);
+  const manageLabels = useRpc(manageWorkspaceLabelsRpc);
+  const renameThread = useRpc(renameWorkspaceOrAgentRpc);
 
   const [testInput, setTestInput] = useState(
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
   );
   const [folderTestInput, setFolderTestInput] = useState("~/Documents");
+  const [renameDiagInput, setRenameDiagInput] = useState("");
 
   useEffect(() => {
     if (settings.status === "ready") {
@@ -53,8 +60,62 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         settings.values.enableSidebarFolderDrop,
         settings.values.sidebarDropDefaultBehavior,
       );
+      syncInlineRenamePreferences({
+        enableInlineDoubleClickRename: settings.values.enableInlineDoubleClickRename,
+        enableQuickRenameAndLabelShortcuts:
+          settings.values.enableQuickRenameAndLabelShortcuts,
+        enableDesktopContextMenuHelper: settings.values.enableDesktopContextMenuHelper,
+      });
     }
   }, [settings]);
+
+  const resolveActiveWsId = (): string | undefined => {
+    const g = globalThis as { document?: unknown; window?: unknown };
+    if (g.document && g.window) {
+      return resolveCurrentActiveWorkspaceId(
+        g.document as Parameters<typeof resolveCurrentActiveWorkspaceId>[0],
+        g.window as Parameters<typeof resolveCurrentActiveWorkspaceId>[1],
+      );
+    }
+    return undefined;
+  };
+
+  const renameInspectMutation = useMutation({
+    mutationFn: () =>
+      manageLabels({
+        action: "inspect",
+        workspaceId: resolveActiveWsId(),
+      }),
+    onSuccess: (res) => {
+      if (res.ok) {
+        if (!renameDiagInput.trim() && res.workspaceTitle) {
+          setRenameDiagInput(res.workspaceTitle);
+        }
+      } else {
+        toast.error(res.message);
+      }
+    },
+  });
+
+  const renameApplyMutation = useMutation({
+    mutationFn: (vars: { title: string | null }) =>
+      renameThread({
+        workspaceId: renameInspectMutation.data?.workspaceId || resolveActiveWsId(),
+        title: vars.title,
+        source: "ui",
+      }),
+    onSuccess: (res) => {
+      if (res.ok) {
+        toast.show(res.message, { variant: "success" });
+        if (res.title) {
+          setRenameDiagInput(res.title);
+        }
+        renameInspectMutation.mutate();
+      } else {
+        toast.error(res.message);
+      }
+    },
+  });
 
   const folderDiagMutation = useMutation({
     mutationFn: (vars: { path: string; dryRun: boolean }) =>
@@ -252,7 +313,28 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             hint={t("settings.desktopHelperHint")}
             value={values.enableDesktopContextMenuHelper}
             onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableDesktopContextMenuHelper: next,
+              });
               void save({ ...values, enableDesktopContextMenuHelper: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.inlineDoubleClickRenameLabel")}
+            hint={t("settings.inlineDoubleClickRenameHint")}
+            value={values.enableInlineDoubleClickRename}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: next,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+              });
+              void save({ ...values, enableInlineDoubleClickRename: next }, revision);
             }}
           />
 
@@ -261,6 +343,11 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             hint={t("settings.quickRenameLabelShortcutsHint")}
             value={values.enableQuickRenameAndLabelShortcuts}
             onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                enableQuickRenameAndLabelShortcuts: next,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+              });
               void save({ ...values, enableQuickRenameAndLabelShortcuts: next }, revision);
             }}
           />
@@ -310,6 +397,87 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             }}
           />
         </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionInlineRenameDiag")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>{t("settings.inlineRenameDiagPrompt")}</Text>
+          <View style={styles.row}>
+            <TextInput
+              value={renameDiagInput}
+              onChangeText={setRenameDiagInput}
+              placeholder={t("settings.inlineRenameDiagPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.inlineRenameInspectBtn")}
+              onPress={() => {
+                renameInspectMutation.mutate();
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.inlineRenameInspectBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.inlineRenameApplyBtn")}
+              onPress={() => {
+                const trimmed = renameDiagInput.trim();
+                if (!trimmed) return;
+                renameApplyMutation.mutate({ title: trimmed });
+              }}
+              style={styles.btn}
+            >
+              <Icon name="Edit3" size={14} color={theme.colors.accentForeground} />
+              <Text style={styles.btnText}>{t("settings.inlineRenameApplyBtn")}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.inlineRenameResetBtn")}
+              onPress={() => {
+                renameApplyMutation.mutate({ title: null });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.inlineRenameResetBtn")}
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={{ gap: 5, marginTop: 4 }}>
+            <Text style={styles.detail}>
+              •{" "}
+              {values.enableInlineDoubleClickRename
+                ? t("settings.inlineRenameSurfaces")
+                : t("settings.inlineRenameDisabledHint")}
+            </Text>
+            {renameInspectMutation.data ? (
+              <>
+                <Text style={styles.detail}>
+                  • {t("settings.inlineRenameActiveWs")}{" "}
+                  {renameInspectMutation.data.workspaceId || "-"} ·{" "}
+                  {t("settings.inlineRenameCurrentTitle")}{" "}
+                  {renameInspectMutation.data.workspaceTitle || "-"}
+                </Text>
+                {(renameApplyMutation.data?.recentActions ??
+                  renameInspectMutation.data.recentActions
+                )
+                  ?.slice(0, 3)
+                  .map((act, idx: number) => (
+                    <Text key={`${act.timestampIso}-${idx}`} style={styles.detail}>
+                      • [{act.target}] {act.resolvedPath} — {act.message}
+                    </Text>
+                  ))}
+              </>
+            ) : null}
+          </View>
+        </View>
       </SettingsSection>
 
       <SettingsSection title={t("settings.sectionFolderImportDiag")}>
@@ -440,6 +608,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
 
       <SettingsSection title={t("settings.sectionContract")}>
         <SettingsCard>
+          <SettingsRow
+            label={t("settings.contractInlineRenameLabel")}
+            hint={t("settings.contractInlineRenameHint")}
+          />
           <SettingsRow
             label={t("settings.contractSidebarDropLabel")}
             hint={t("settings.contractSidebarDropHint")}

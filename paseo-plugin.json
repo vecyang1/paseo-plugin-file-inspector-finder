@@ -1,7 +1,7 @@
 {
   "id": "file-inspector-finder",
   "name": "File Inspector & Finder Reveal",
-  "description": "Drag & drop folders onto the sidebar to open or create workspaces (auto-dedupe), quick-rename/label threads, reveal files/images in Finder, preview in macOS Preview/Editors, and inspect workspace media.",
+  "description": "Zero-popup double-click & F2 inline workspace/tab rename, sidebar folder drag-and-drop workspace import (auto-dedupe), colored thread labels, Finder reveal, macOS Preview/Editor launch, and workspace media inspection.",
   "media": [],
   "requirements": {
     "paseo": ">=0.15.3"

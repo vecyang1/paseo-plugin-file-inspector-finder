@@ -28,7 +28,9 @@ import {
   handleManageWorkspaceLabels,
   handleOpenFileTarget,
   handleRenameThread,
+  normalizeDaemonListenAddress,
   resolveBestPath,
+  resolveDaemonClientModuleHref,
 } from "../server/handlers";
 import {
   type MinimalDocument,
@@ -40,14 +42,23 @@ import {
   extractFilePathFromCopyMenuItem,
   extractFilePathFromElement,
   findActiveFileTabPath,
+  findF2InlineRenameTarget,
   focusWorkspaceInApp,
   injectIntoNativeTabMenus,
+  installDesktopRevealHelpers,
   isExternalFileDragEvent,
   isInsideFileExplorer,
+  isInsideInteractiveRowAction,
   isInsideSidebarDropZone,
   isInsideWorkspaceHeaderTitle,
   isInsideWorkspaceTab,
+  mountInlineTitleInput,
+  parseSidebarWorkspaceRowTestId,
+  readInlineRenamePreferences,
+  resolveCurrentActiveWorkspaceId,
+  resolveInlineRenameTarget,
   syncImagePanelAssociations,
+  syncInlineRenamePreferences,
 } from "../client/web";
 
 // Minimal valid 1x1 PNG buffer
@@ -841,5 +852,513 @@ test("12. Sidebar drop zone boundaries, Electron webUtils path extraction, and w
   assert.equal(focusWorkspaceInApp("wks_design", null, mockDoc, mockWin), true);
   assert.equal(clickedRowId, "wks_design");
 });
+
+function createInteractiveDomNode(
+  tagName: string,
+  initialAttrs: Record<string, string> = {},
+  initialText = "",
+): MinimalElement & {
+  attrs: Map<string, string>;
+  listeners: Map<string, Array<(ev: unknown) => void>>;
+  focused: boolean;
+  selected: boolean;
+  triggerBlur: () => void;
+  dispatch: (type: string, ev?: Record<string, unknown>) => void;
+} {
+  const attrs = new Map<string, string>(Object.entries(initialAttrs));
+  const listeners = new Map<string, Array<(ev: unknown) => void>>();
+  const children: MinimalElement[] = [];
+
+  const node: MinimalElement & {
+    attrs: Map<string, string>;
+    listeners: Map<string, Array<(ev: unknown) => void>>;
+    focused: boolean;
+    selected: boolean;
+    triggerBlur: () => void;
+    dispatch: (type: string, ev?: Record<string, unknown>) => void;
+  } = {
+    tagName: tagName.toUpperCase(),
+    textContent: initialText,
+    value: "",
+    style: {},
+    children,
+    parentElement: null,
+    attrs,
+    listeners,
+    focused: false,
+    selected: false,
+    getAttribute: (n) => attrs.get(n) ?? null,
+    setAttribute: (n, v) => {
+      attrs.set(n, v);
+    },
+    removeAttribute: (n) => {
+      attrs.delete(n);
+    },
+    appendChild: (child) => {
+      child.parentElement = node;
+      children.push(child);
+    },
+    insertBefore: (newChild, refChild) => {
+      newChild.parentElement = node;
+      const idx = refChild ? children.indexOf(refChild) : -1;
+      if (idx >= 0) {
+        children.splice(idx, 0, newChild);
+      } else {
+        children.push(newChild);
+      }
+    },
+    remove: () => {
+      if (node.parentElement?.children) {
+        const list = node.parentElement.children as MinimalElement[];
+        const idx = list.indexOf(node);
+        if (idx >= 0) list.splice(idx, 1);
+      }
+      node.parentElement = null;
+    },
+    contains: (other) => {
+      let cur: MinimalElement | null | undefined = other;
+      while (cur) {
+        if (cur === node) return true;
+        cur = cur.parentElement;
+      }
+      return false;
+    },
+    querySelector: (selector: string) => {
+      const matchAttr = selector.match(/^\[data-testid="([^"]+)"\]$/);
+      const matchPrefix = selector.match(/^\[data-testid\^="([^"]+)"\]$/);
+      const walk = (el: MinimalElement): MinimalElement | null => {
+        const tid = el.getAttribute?.("data-testid") ?? "";
+        if (matchAttr && tid === matchAttr[1]) return el;
+        if (matchPrefix && tid.startsWith(matchPrefix[1])) return el;
+        for (const ch of (el.children as MinimalElement[]) ?? []) {
+          const found = walk(ch);
+          if (found) return found;
+        }
+        return null;
+      };
+      for (const ch of children) {
+        const found = walk(ch);
+        if (found) return found;
+      }
+      return null;
+    },
+    addEventListener: (type, handler) => {
+      const arr = listeners.get(type) ?? [];
+      arr.push(handler);
+      listeners.set(type, arr);
+    },
+    focus: () => {
+      node.focused = true;
+    },
+    select: () => {
+      node.selected = true;
+    },
+    triggerBlur: () => {
+      node.focused = false;
+      node.dispatch("blur", { target: node });
+    },
+    dispatch: (type, extra = {}) => {
+      const ev = {
+        type,
+        target: node,
+        preventDefault: () => {},
+        stopPropagation: () => {},
+        ...extra,
+      };
+      for (const fn of listeners.get(type) ?? []) {
+        fn(ev);
+      }
+    },
+  };
+  return node;
+}
+
+test("13. Inline rename target resolution: sidebar rows, workspace header title, agent tabs, URL active workspace ID, and action button exclusions", () => {
+  assert.deepEqual(
+    parseSidebarWorkspaceRowTestId("sidebar-workspace-row-srv_demo123:wks_meta_01"),
+    {
+      workspaceKey: "srv_demo123:wks_meta_01",
+      serverId: "srv_demo123",
+      workspaceId: "wks_meta_01",
+    },
+  );
+  assert.equal(parseSidebarWorkspaceRowTestId("other-testid"), null);
+
+  const root = createInteractiveDomNode("div");
+  const sidebarRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-srv_1:wks_alpha",
+  });
+  const titleWrap = createInteractiveDomNode("div");
+  const sidebarTitle = createInteractiveDomNode(
+    "span",
+    { "data-testid": "sidebar-workspace-title-srv_1:wks_alpha" },
+    "Set status.example.com default check",
+  );
+  const kebabBtn = createInteractiveDomNode("button", {
+    "data-testid": "sidebar-workspace-kebab-srv_1:wks_alpha",
+  });
+  const archiveBtn = createInteractiveDomNode("button", {
+    "data-testid": "sidebar-workspace-archive-srv_1:wks_alpha",
+  });
+  titleWrap.appendChild?.(sidebarTitle);
+  sidebarRow.appendChild?.(titleWrap);
+  sidebarRow.appendChild?.(kebabBtn);
+  sidebarRow.appendChild?.(archiveBtn);
+
+  const headerTitle = createInteractiveDomNode(
+    "span",
+    { "data-testid": "workspace-header-title" },
+    "Active Header Thread",
+  );
+
+  const agentTab = createInteractiveDomNode("div", {
+    "data-testid": "workspace-tab-agent_agt_99",
+  });
+  const agentTabLabel = createInteractiveDomNode("span", {}, "Verifier Agent");
+  const agentTabClose = createInteractiveDomNode("div", {
+    "data-testid": "workspace-tab-close-agent_agt_99",
+  });
+  agentTab.appendChild?.(agentTabLabel);
+  agentTab.appendChild?.(agentTabClose);
+
+  root.appendChild?.(sidebarRow);
+  root.appendChild?.(headerTitle);
+  root.appendChild?.(agentTab);
+
+  const mockDoc: MinimalDocument = {
+    head: createInteractiveDomNode("head"),
+    body: root,
+    createElement: (tag) => createInteractiveDomNode(tag),
+    querySelector: (sel) => root.querySelector?.(sel) ?? null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("sidebar-workspace-row-")) return [sidebarRow];
+      return [];
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const mockWin: MinimalWindow = {
+    location: { pathname: "/h/srv_1/workspace/wks_active_route" },
+    getComputedStyle: () => ({
+      fontSize: "13px",
+      fontWeight: "500",
+      fontFamily: "Inter",
+      lineHeight: "18px",
+      color: "#f9fafb",
+    }),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // URL pathname takes priority over stale fallbackWorkspaceId!
+  assert.equal(
+    resolveCurrentActiveWorkspaceId(mockDoc, mockWin, "wks_stale_last_iterated"),
+    "wks_active_route",
+  );
+
+  // Action buttons inside rows/tabs are strictly excluded
+  assert.equal(isInsideInteractiveRowAction(kebabBtn), true);
+  assert.equal(isInsideInteractiveRowAction(archiveBtn), true);
+  assert.equal(isInsideInteractiveRowAction(agentTabClose), true);
+  assert.equal(
+    resolveInlineRenameTarget(kebabBtn, mockDoc, mockWin, "wks_stale"),
+    null,
+  );
+  assert.equal(
+    resolveInlineRenameTarget(agentTabClose, mockDoc, mockWin, "wks_stale"),
+    null,
+  );
+
+  // 1) Sidebar row target resolves exact row workspaceId (even when another workspace is active!)
+  const resolvedSidebar = resolveInlineRenameTarget(sidebarRow, mockDoc, mockWin);
+  assert.ok(resolvedSidebar);
+  assert.equal(resolvedSidebar.surface, "sidebar-row");
+  assert.equal(resolvedSidebar.workspaceId, "wks_alpha");
+  assert.equal(resolvedSidebar.source, "inline-sidebar");
+  assert.equal(
+    resolvedSidebar.initialTitle,
+    "Set status.example.com default check",
+  );
+
+  // 2) Header title resolves active workspaceId from URL route
+  const resolvedHeader = resolveInlineRenameTarget(headerTitle, mockDoc, mockWin);
+  assert.ok(resolvedHeader);
+  assert.equal(resolvedHeader.surface, "header-title");
+  assert.equal(resolvedHeader.workspaceId, "wks_active_route");
+  assert.equal(resolvedHeader.source, "inline-header");
+
+  // 3) Agent tab resolves agentId + active workspaceId
+  const resolvedTab = resolveInlineRenameTarget(agentTabLabel, mockDoc, mockWin);
+  assert.ok(resolvedTab);
+  assert.equal(resolvedTab.surface, "agent-tab");
+  assert.equal(resolvedTab.agentId, "agt_99");
+  assert.equal(resolvedTab.workspaceId, "wks_active_route");
+  assert.equal(resolvedTab.source, "inline-tab");
+  assert.equal(resolvedTab.initialTitle, "Verifier Agent");
+
+  // 4) F2 target resolves header-title with source="f2-inline"
+  const f2Target = findF2InlineRenameTarget(mockDoc, mockWin);
+  assert.ok(f2Target);
+  assert.equal(f2Target.workspaceId, "wks_active_route");
+  assert.equal(f2Target.source, "f2-inline");
+
+  // 5) Paseo v0.15.3 sidebar row (where <Text> has no sidebar-workspace-title-* testID,
+  // preceded by leading project monogram "2" and followed by trailing age "8h") resolves the exact title leaf!
+  const v0153Row = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-srv_1:wks_v0153",
+  });
+  const rowMain = createInteractiveDomNode("div");
+  const leadingProjectIcon = createInteractiveDomNode(
+    "div",
+    { "data-testid": "sidebar-row-project-icon-srv_1:wks_v0153" },
+    "2",
+  );
+  const contentCol = createInteractiveDomNode("div");
+  const titleRow0153 = createInteractiveDomNode("div");
+  const titleText0153 = createInteractiveDomNode("div", {}, "Greet and check in");
+  const rowRight0153 = createInteractiveDomNode("div");
+  const ageText0153 = createInteractiveDomNode("div", {}, "8h");
+  rowRight0153.appendChild?.(ageText0153);
+  titleRow0153.appendChild?.(titleText0153);
+  titleRow0153.appendChild?.(rowRight0153);
+  contentCol.appendChild?.(titleRow0153);
+  rowMain.appendChild?.(leadingProjectIcon);
+  rowMain.appendChild?.(contentCol);
+  v0153Row.appendChild?.(rowMain);
+
+  const resolvedV0153 = resolveInlineRenameTarget(v0153Row, mockDoc, mockWin);
+  assert.ok(resolvedV0153);
+  assert.equal(resolvedV0153.workspaceId, "wks_v0153");
+  assert.equal(resolvedV0153.titleEl, titleText0153);
+  assert.equal(resolvedV0153.initialTitle, "Greet and check in");
+});
+
+test("14. Zero-popup inline rename input lifecycle: Enter commit, Escape cancel, CJK IME safety, composer focus-theft shield, and dblclick/F2 capture", async () => {
+  const head = createInteractiveDomNode("head");
+  const body = createInteractiveDomNode("body");
+  const row = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-srv_1:wks_inline_1",
+  });
+  const titleWrap = createInteractiveDomNode("div");
+  const titleEl = createInteractiveDomNode(
+    "span",
+    { "data-testid": "sidebar-workspace-title-srv_1:wks_inline_1" },
+    "Original Workspace Name",
+  );
+  titleWrap.appendChild?.(titleEl);
+  row.appendChild?.(titleWrap);
+  body.appendChild?.(row);
+
+  const docListeners = new Map<string, Array<(ev: unknown) => void>>();
+  const winListeners = new Map<string, Array<(ev: unknown) => void>>();
+  const storage = new Map<string, string>();
+
+  const mockDoc: MinimalDocument = {
+    head,
+    body,
+    createElement: (tag) => createInteractiveDomNode(tag),
+    querySelector: (sel) => body.querySelector?.(sel) ?? null,
+    querySelectorAll: () => [row],
+    addEventListener: (type, fn) => {
+      const list = docListeners.get(type) ?? [];
+      list.push(fn);
+      docListeners.set(type, list);
+    },
+    removeEventListener: (type, fn) => {
+      const list = docListeners.get(type) ?? [];
+      const idx = list.indexOf(fn);
+      if (idx >= 0) list.splice(idx, 1);
+    },
+  };
+
+  const mockWin: MinimalWindow = {
+    location: { pathname: "/h/srv_1/workspace/wks_inline_1" },
+    localStorage: {
+      get length() {
+        return storage.size;
+      },
+      key: (idx) => Array.from(storage.keys())[idx] ?? null,
+      getItem: (k) => storage.get(k) ?? null,
+      setItem: (k, v) => {
+        storage.set(k, v);
+      },
+    },
+    requestAnimationFrame: (cb) => {
+      cb();
+      return 1;
+    },
+    getComputedStyle: () => ({
+      fontSize: "13px",
+      fontWeight: "500",
+      fontFamily: "Inter",
+      lineHeight: "18px",
+      color: "#ffffff",
+    }),
+    addEventListener: (type, fn) => {
+      const list = winListeners.get(type) ?? [];
+      list.push(fn);
+      winListeners.set(type, list);
+    },
+    removeEventListener: (type, fn) => {
+      const list = winListeners.get(type) ?? [];
+      const idx = list.indexOf(fn);
+      if (idx >= 0) list.splice(idx, 1);
+    },
+  };
+
+  syncInlineRenamePreferences(
+    {
+      enableInlineDoubleClickRename: true,
+      enableQuickRenameAndLabelShortcuts: true,
+      enableDesktopContextMenuHelper: true,
+    },
+    mockWin.localStorage,
+  );
+  assert.equal(
+    readInlineRenamePreferences(mockWin.localStorage).enableInlineDoubleClickRename,
+    true,
+  );
+
+  const commits: Array<{
+    title: string | null;
+    workspaceId?: string;
+    agentId?: string;
+    source?: string;
+  }> = [];
+
+  const cleanup = installDesktopRevealHelpers(
+    {
+      isEnabled: () => true,
+      onOpenTarget: async () => {},
+      onCopyPath: async () => {},
+      onRenameThread: async (title, opts) => {
+        commits.push({ title, ...opts });
+      },
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  // A) Double-click sidebar row -> mounts inline <input> in-place with ZERO popup bar!
+  for (const fn of docListeners.get("dblclick") ?? []) {
+    fn({
+      target: titleEl,
+      button: 0,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+  }
+
+  assert.equal(titleEl.getAttribute?.("data-paseo-inline-rename-hidden"), "true");
+  const input1 = body.querySelector?.(
+    '[data-testid="paseo-finder-inline-rename-input"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(input1, "Inline input must be mounted directly inside the row");
+  assert.equal(input1.value, "Original Workspace Name");
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'),
+    null,
+    "Zero floating popup bar should appear on double-click",
+  );
+
+  // B) Programmatic composer focus-theft blur (<260ms without outside pointerdown) is shielded!
+  input1.triggerBlur();
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]'),
+    input1,
+    "Input must remain mounted when composer steals focus immediately after workspace switch",
+  );
+
+  // C) Pressing Enter during CJK IME composition (isComposing=true / keyCode=229) must NOT commit
+  input1.value = "Draft Composing";
+  for (const fn of winListeners.get("keydown") ?? []) {
+    fn({
+      key: "Enter",
+      isComposing: true,
+      keyCode: 229,
+      target: input1,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+  }
+  assert.equal(commits.length, 0);
+
+  // D) Pressing Enter after composition commits exact workspaceId & updates DOM optimistically
+  input1.value = "cc changelog page";
+  for (const fn of winListeners.get("keydown") ?? []) {
+    fn({
+      key: "Enter",
+      isComposing: false,
+      target: input1,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+  }
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(commits.length, 1);
+  assert.deepEqual(commits[0], {
+    title: "cc changelog page",
+    workspaceId: "wks_inline_1",
+    agentId: undefined,
+    source: "inline-sidebar",
+  });
+  assert.equal(titleEl.textContent, "cc changelog page");
+  assert.equal(titleEl.getAttribute?.("data-paseo-inline-rename-hidden"), null);
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]'),
+    null,
+  );
+
+  // E) Escape cancels cleanly with 0 extra commits and preserves current title
+  const target2 = resolveInlineRenameTarget(titleEl, mockDoc, mockWin);
+  assert.ok(target2);
+  const session2 = mountInlineTitleInput(mockDoc, mockWin, target2, async (t, m) => {
+    commits.push({ title: t, ...m });
+  });
+  assert.ok(session2);
+  const input2 = session2.inputEl as ReturnType<typeof createInteractiveDomNode>;
+  input2.value = "Aborted Draft";
+  input2.dispatch("keydown", { key: "Escape" });
+  assert.equal(commits.length, 1);
+  assert.equal(titleEl.textContent, "cc changelog page");
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]'),
+    null,
+  );
+
+  // F) Outside pointerdown + blur commits modified text
+  const target3 = resolveInlineRenameTarget(titleEl, mockDoc, mockWin);
+  assert.ok(target3);
+  const session3 = mountInlineTitleInput(mockDoc, mockWin, target3, async (t, m) => {
+    commits.push({ title: t, ...m });
+  });
+  assert.ok(session3);
+  const input3 = session3.inputEl as ReturnType<typeof createInteractiveDomNode>;
+  input3.value = "Saved On Outside Click";
+  session3.markOutsidePointerDown();
+  input3.triggerBlur();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(commits.length, 2);
+  assert.equal(commits[1].title, "Saved On Outside Click");
+  assert.equal(titleEl.textContent, "Saved On Outside Click");
+
+  cleanup();
+});
+
+test("15. Daemon bridge URL & bundled CJS worker module resolution (regression for import.meta.url === undefined)", async () => {
+  assert.equal(normalizeDaemonListenAddress("127.0.0.1:6767"), "127.0.0.1:6767");
+  assert.equal(normalizeDaemonListenAddress(":6767"), "127.0.0.1:6767");
+  assert.equal(normalizeDaemonListenAddress("0.0.0.0:6767"), "127.0.0.1:6767");
+  assert.equal(normalizeDaemonListenAddress("http://127.0.0.1:6767/ws"), "127.0.0.1:6767");
+  assert.equal(normalizeDaemonListenAddress(""), "127.0.0.1:6767");
+
+  const resolvedFromUndefined = await resolveDaemonClientModuleHref(undefined);
+  assert.ok(resolvedFromUndefined.startsWith("file:///"));
+  assert.ok(resolvedFromUndefined.endsWith("/@getpaseo/client/dist/node/index.js"));
+});
+
+
 
 

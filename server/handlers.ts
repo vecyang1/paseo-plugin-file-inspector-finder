@@ -3,11 +3,14 @@ import { execCommand, type PluginHandlerContext } from "@getpaseo/plugin/server"
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   type ActionLogEntry,
   type FileMetadata,
   type ImportedWorkspaceItem,
   type OpenerTarget,
+  type ProjectJumpCandidate,
+  type QuickJumpAction,
   type SidebarDropBehavior,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
@@ -19,7 +22,9 @@ import {
   type listWorkspaceMediaRpc,
   type manageWorkspaceLabelsRpc,
   type openFileTargetRpc,
+  type quickJumpWorkspaceRpc,
   type renameWorkspaceOrAgentRpc,
+  scoreProjectJumpQuery,
 } from "../shared/contracts";
 
 const IMAGE_EXT_SET = new Set<string>(SUPPORTED_IMAGE_EXTENSIONS);
@@ -684,6 +689,69 @@ function normalizeLabelColor(color?: string | null): WorkspaceLabelColor {
   return "violet";
 }
 
+export function normalizeDaemonListenAddress(raw?: string | null): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return "127.0.0.1:6767";
+  const withoutProto = trimmed
+    .replace(/^ws(s)?:\/\//i, "")
+    .replace(/^http(s)?:\/\//i, "")
+    .replace(/\/.*$/, "");
+  if (!withoutProto) return "127.0.0.1:6767";
+  if (withoutProto.startsWith(":")) {
+    return `127.0.0.1${withoutProto}`;
+  }
+  if (withoutProto.startsWith("0.0.0.0:")) {
+    return `127.0.0.1:${withoutProto.slice("0.0.0.0:".length)}`;
+  }
+  if (withoutProto.startsWith("[::]:")) {
+    return `127.0.0.1:${withoutProto.slice("[::]:".length)}`;
+  }
+  return withoutProto;
+}
+
+export async function resolveDaemonClientModuleHref(
+  metaUrl?: string,
+  paseoHomeDir: string = path.join(os.homedir(), ".paseo"),
+): Promise<string> {
+  const relModule = path.join(
+    "node_modules",
+    "@getpaseo",
+    "client",
+    "dist",
+    "node",
+    "index.js",
+  );
+  const candidates: string[] = [];
+
+  if (typeof metaUrl === "string" && metaUrl.startsWith("file:")) {
+    try {
+      const baseDir = path.dirname(fileURLToPath(metaUrl));
+      candidates.push(path.resolve(baseDir, "..", relModule));
+      candidates.push(path.resolve(baseDir, relModule));
+    } catch {
+      // Ignore malformed file URL in bundled worker environments
+    }
+  }
+
+  candidates.push(
+    path.join(paseoHomeDir, "plugins", "file-inspector-finder", relModule),
+  );
+  candidates.push(path.resolve(process.cwd(), relModule));
+
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return pathToFileURL(candidate).href;
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  return pathToFileURL(
+    path.join(paseoHomeDir, "plugins", "file-inspector-finder", relModule),
+  ).href;
+}
+
 async function withLocalDaemonBridge<T>(
   fn: (bridge: DaemonLabelBridge) => Promise<T>,
   overrideBridge?: DaemonLabelBridge,
@@ -699,15 +767,15 @@ async function withLocalDaemonBridge<T>(
     const cfgRaw = await fs.readFile(path.join(paseoDir, "config.json"), "utf-8");
     const cfg = JSON.parse(cfgRaw) as { daemon?: { listen?: string } };
     if (cfg.daemon?.listen) {
-      listen = cfg.daemon.listen;
+      listen = normalizeDaemonListenAddress(cfg.daemon.listen);
     }
   } catch {
     // Default loopback listen
   }
-  const modPath = new URL(
-    "../node_modules/@getpaseo/client/dist/node/index.js",
-    import.meta.url,
-  ).href;
+  const modPath = await resolveDaemonClientModuleHref(
+    typeof import.meta !== "undefined" ? import.meta.url : undefined,
+    paseoDir,
+  );
   const { createHostClient } = (await import(modPath)) as {
     createHostClient: (
       url: string,
@@ -779,11 +847,12 @@ export async function handleRenameThread(
       );
     }
     const durationMs = Date.now() - startMs;
+    const sourceTag = input.source ? ` [${input.source}]` : "";
     const msg = normalizedTitle
-      ? `Renamed workspace (${workspaceId}) to "${normalizedTitle}"`
-      : `Cleared custom title for workspace (${workspaceId})`;
+      ? `Renamed ${input.agentId && !workspaceId ? `agent (${input.agentId})` : `workspace (${workspaceId})`} to "${normalizedTitle}"${sourceTag}`
+      : `Cleared custom title for workspace (${workspaceId})${sourceTag}`;
     recordActionLog({
-      target: "finder-folder",
+      target: "workspace-meta",
       resolvedPath: workspaceId || input.agentId || "",
       ok: true,
       durationMs,
@@ -795,6 +864,7 @@ export async function handleRenameThread(
       title: normalizedTitle,
       message: msg,
       durationMs,
+      recentActions: getRecentActionLogs().slice(0, 8),
     };
   } catch (err) {
     const durationMs = Date.now() - startMs;
@@ -822,9 +892,10 @@ export async function handleManageWorkspaceLabels(
   try {
     return await withLocalDaemonBridge(async (bridge) => {
       const readState = async () => {
-        const [labelList, wsList] = await Promise.all([
+        const [labelList, wsList, sdkList] = await Promise.all([
           bridge.listWorkspaceLabels(),
-          bridge.fetchWorkspaces({ limit: 200 }),
+          bridge.fetchWorkspaces({ limit: 1000 }),
+          context.paseo.workspaces.list().catch(() => ({ entries: [] })),
         ]);
         const catalog: WorkspaceLabelEntry[] = (labelList.labels ?? []).map((item) => ({
           name: item.name,
@@ -833,7 +904,13 @@ export async function handleManageWorkspaceLabels(
         const matchedWs =
           wsList.entries.find((w) => w.id === workspaceId) ?? wsList.entries[0];
         const resolvedWsId = matchedWs?.id ?? workspaceId;
-        const workspaceTitle = matchedWs?.title ?? matchedWs?.name ?? resolvedWsId;
+        const matchedSdkWs = sdkList.entries.find((w) => w.id === resolvedWsId);
+        const workspaceTitle =
+          matchedWs?.title ??
+          (matchedSdkWs as { title?: string | null } | undefined)?.title ??
+          matchedWs?.name ??
+          matchedSdkWs?.name ??
+          resolvedWsId;
         const assignedLabels = Array.isArray(matchedWs?.labels)
           ? [...matchedWs.labels]
           : [];
@@ -852,6 +929,7 @@ export async function handleManageWorkspaceLabels(
           catalog: initial.catalog,
           message: `Loaded ${initial.assignedLabels.length} assigned labels (${initial.catalog.length} in catalog)`,
           durationMs: Date.now() - startMs,
+          recentActions: getRecentActionLogs().slice(0, 8),
         };
       }
 
@@ -874,7 +952,7 @@ export async function handleManageWorkspaceLabels(
           ? `Assigned label "${labelName}" (${color}) to workspace ${targetWsId}`
           : `Removed label "${labelName}" from workspace ${targetWsId}`;
         recordActionLog({
-          target: "finder-folder",
+          target: "workspace-meta",
           resolvedPath: `${targetWsId}#label:${labelName}`,
           ok: true,
           durationMs,
@@ -1251,5 +1329,432 @@ export async function handleImportFolderWorkspace(
     recentActions: getRecentActionLogs(),
   };
 }
+
+function shortenHomePath(absPath: string): string {
+  const home = os.homedir();
+  const normalized = path.normalize(absPath);
+  if (normalized === home) return "~";
+  if (normalized.startsWith(`${home}${path.sep}`)) {
+    return `~/${normalized.slice(home.length + 1)}`;
+  }
+  return normalized;
+}
+
+function pickWorkspaceTimestampMs(ws: {
+  lastUserMessageAt?: string | null;
+  activityAt?: string | null;
+  statusEnteredAt?: string | null;
+  createdAt?: string | null;
+}): number {
+  for (const raw of [ws.lastUserMessageAt, ws.activityAt, ws.statusEnteredAt, ws.createdAt]) {
+    if (raw) {
+      const parsed = Date.parse(raw);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+  }
+  return 0;
+}
+
+export interface QuickJumpWorkspaceOptions {
+  readSettings?: () => Promise<
+    | {
+        status: "ready";
+        values: {
+          enableWorkspaceQuickJump?: boolean;
+          quickJumpDefaultAction?: QuickJumpAction;
+        };
+      }
+    | { status: string }
+  >;
+}
+
+export async function handleQuickJumpWorkspace(
+  input: RpcInput<typeof quickJumpWorkspaceRpc>,
+  context: PluginHandlerContext,
+  options?: QuickJumpWorkspaceOptions,
+) {
+  const startMs = Date.now();
+  const action = input.action ?? "list";
+  const query = (input.query ?? "").trim();
+  const dryRun = Boolean(input.dryRun);
+  const limit = input.limit ?? 50;
+
+  let defaultJumpMode: QuickJumpAction = "open-latest";
+  if (options?.readSettings) {
+    try {
+      const st = await options.readSettings();
+      if (st.status === "ready" && "values" in st && st.values.quickJumpDefaultAction) {
+        defaultJumpMode = st.values.quickJumpDefaultAction;
+      }
+    } catch {
+      // Fallback to default
+    }
+  }
+  const jumpMode: QuickJumpAction = input.jumpMode ?? defaultJumpMode;
+
+  type RawProjectItem = {
+    projectId: string;
+    projectKey?: string | null;
+    projectDisplayName?: string;
+    projectCustomName?: string | null;
+    projectRootPath?: string;
+    projectKind?: "directory" | "git" | "non_git";
+  };
+
+  type RawWorkspaceItem = {
+    id: string;
+    projectId?: string | null;
+    projectDisplayName?: string;
+    projectCustomName?: string | null;
+    projectRootPath?: string;
+    workspaceDirectory?: string;
+    projectKind?: "directory" | "git" | "non_git";
+    workspaceKind?: string;
+    name?: string;
+    title?: string | null;
+    pinnedAt?: string | null;
+    internal?: boolean;
+    background?: boolean;
+    archivingAt?: string | null;
+    status?: string;
+    statusEnteredAt?: string | null;
+    activityAt?: string | null;
+    createdAt?: string | null;
+    lastUserMessageAt?: string | null;
+  };
+
+  let rawProjects: RawProjectItem[] = [];
+  let rawWorkspaces: RawWorkspaceItem[] = [];
+
+  try {
+    if (context.paseo.projects?.list) {
+      const projRes = await context.paseo.projects.list();
+      if (Array.isArray(projRes?.projects)) {
+        rawProjects = projRes.projects as RawProjectItem[];
+      }
+    }
+  } catch {
+    // Fallback to workspace-derived projects
+  }
+
+  try {
+    const wsRes = await context.paseo.workspaces.list();
+    if (Array.isArray(wsRes?.entries)) {
+      rawWorkspaces = wsRes.entries as RawWorkspaceItem[];
+    }
+  } catch {
+    // Ignore
+  }
+
+  const activeWorkspaces = rawWorkspaces.filter(
+    (w) => !w.archivingAt && !w.internal && !w.background,
+  );
+
+  const projectMap = new Map<
+    string,
+    {
+      projectId: string;
+      projectKey: string | null;
+      projectName: string;
+      projectRootPath: string;
+      projectKind: "directory" | "git" | "non_git";
+      workspaces: RawWorkspaceItem[];
+    }
+  >();
+
+  const projectByPath = new Map<string, string>();
+
+  for (const p of rawProjects) {
+    if (!p?.projectId) continue;
+    const rootPath = path.normalize(expandHome(p.projectRootPath || os.homedir()));
+    const name =
+      (p.projectCustomName ?? "").trim() ||
+      (p.projectDisplayName ?? "").trim() ||
+      path.basename(rootPath) ||
+      p.projectId;
+    projectMap.set(p.projectId, {
+      projectId: p.projectId,
+      projectKey: p.projectKey ?? null,
+      projectName: name,
+      projectRootPath: rootPath,
+      projectKind: p.projectKind ?? "directory",
+      workspaces: [],
+    });
+    projectByPath.set(rootPath, p.projectId);
+  }
+
+  for (const ws of activeWorkspaces) {
+    const wsRoot = path.normalize(
+      expandHome(ws.projectRootPath || ws.workspaceDirectory || os.homedir()),
+    );
+    const resolvedProjectId =
+      (ws.projectId && projectMap.has(ws.projectId) ? ws.projectId : null) ??
+      projectByPath.get(wsRoot) ??
+      ws.projectId ??
+      `prj_dir_${path.basename(wsRoot)}`;
+
+    let group = projectMap.get(resolvedProjectId);
+    if (!group) {
+      const fallbackName =
+        (ws.projectCustomName ?? "").trim() ||
+        (ws.projectDisplayName ?? "").trim() ||
+        path.basename(wsRoot) ||
+        resolvedProjectId;
+      group = {
+        projectId: resolvedProjectId,
+        projectKey: null,
+        projectName: fallbackName,
+        projectRootPath: wsRoot,
+        projectKind: ws.projectKind ?? "directory",
+        workspaces: [],
+      };
+      projectMap.set(resolvedProjectId, group);
+      projectByPath.set(wsRoot, resolvedProjectId);
+    }
+    group.workspaces.push(ws);
+  }
+
+  const allCandidates: ProjectJumpCandidate[] = [];
+  let emptyProjects = 0;
+
+  for (const group of projectMap.values()) {
+    const sortedWs = [...group.workspaces].sort((a, b) => {
+      // 1. Pinned workspaces first
+      const aPinned = Boolean(a.pinnedAt);
+      const bPinned = Boolean(b.pinnedAt);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      // 2. Non-worktree (root directory) before isolated worktrees when timestamps are close
+      const aIsRoot = a.workspaceKind !== "worktree";
+      const bIsRoot = b.workspaceKind !== "worktree";
+      const aTime = pickWorkspaceTimestampMs(a);
+      const bTime = pickWorkspaceTimestampMs(b);
+      if (Math.abs(aTime - bTime) > 60_000 && aTime !== bTime) {
+        return bTime - aTime;
+      }
+      if (aIsRoot !== bIsRoot) return aIsRoot ? -1 : 1;
+      return bTime - aTime;
+    });
+
+    const primaryWs = sortedWs[0] ?? null;
+    const latestMs = sortedWs.reduce(
+      (max, w) => Math.max(max, pickWorkspaceTimestampMs(w)),
+      0,
+    );
+    const lastActivityIso = latestMs > 0 ? new Date(latestMs).toISOString() : null;
+    const lastActivityRelative = latestMs > 0 ? formatRelativeTime(latestMs) : "idle";
+    const hasRunningAgent = sortedWs.some(
+      (w) =>
+        w.status === "running" ||
+        w.status === "needs_input" ||
+        w.status === "attention",
+    );
+    if (sortedWs.length === 0) {
+      emptyProjects += 1;
+    }
+
+    const shortPath = shortenHomePath(group.projectRootPath);
+    const primaryTitle =
+      (primaryWs?.title ?? "").trim() || (primaryWs?.name ?? "").trim() || null;
+
+    const baseScore = scoreProjectJumpQuery(
+      {
+        projectName: group.projectName,
+        projectRootPath: group.projectRootPath,
+        shortPath,
+        primaryWorkspaceTitle: primaryTitle,
+      },
+      query,
+    );
+
+    allCandidates.push({
+      projectId: group.projectId,
+      projectKey: group.projectKey,
+      projectName: group.projectName,
+      projectRootPath: group.projectRootPath,
+      shortPath,
+      projectKind: group.projectKind,
+      activeWorkspaceCount: sortedWs.length,
+      primaryWorkspaceId: primaryWs?.id ?? null,
+      primaryWorkspaceTitle: primaryTitle,
+      hasRunningAgent,
+      lastActivityIso,
+      lastActivityRelative,
+      score: baseScore,
+    });
+  }
+
+  const matchedCandidates = allCandidates
+    .filter((c) => c.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const aMs = a.lastActivityIso ? Date.parse(a.lastActivityIso) : 0;
+      const bMs = b.lastActivityIso ? Date.parse(b.lastActivityIso) : 0;
+      if (bMs !== aMs) return bMs - aMs;
+      if (b.activeWorkspaceCount !== a.activeWorkspaceCount) {
+        return b.activeWorkspaceCount - a.activeWorkspaceCount;
+      }
+      return a.projectName.localeCompare(b.projectName);
+    })
+    .slice(0, limit);
+
+  if (action === "list") {
+    return {
+      ok: true,
+      action: "list" as const,
+      jumpMode,
+      dryRun,
+      query,
+      totalProjects: allCandidates.length,
+      totalActiveWorkspaces: activeWorkspaces.length,
+      emptyProjects,
+      candidates: matchedCandidates,
+      selectedCandidate: matchedCandidates[0] ?? null,
+      targetWorkspaceId: matchedCandidates[0]?.primaryWorkspaceId ?? null,
+      targetProjectId: matchedCandidates[0]?.projectId ?? null,
+      targetProjectKey: matchedCandidates[0]?.projectKey ?? null,
+      targetProjectName: matchedCandidates[0]?.projectName ?? null,
+      targetDirectory: matchedCandidates[0]?.projectRootPath ?? null,
+      createdWorkspace: false,
+      message: `Indexed ${allCandidates.length} project workspaces (${matchedCandidates.length} matched${query ? ` for "${query}"` : ""})`,
+      durationMs: Date.now() - startMs,
+      recentActions: getRecentActionLogs().slice(0, 8),
+    };
+  }
+
+  // action === "jump"
+  const explicitProjectId = (input.projectId ?? "").trim();
+  const targetCandidate = explicitProjectId
+    ? allCandidates.find(
+        (c) =>
+          c.projectId === explicitProjectId ||
+          c.projectKey === explicitProjectId ||
+          c.projectName.toLowerCase() === explicitProjectId.toLowerCase(),
+      ) ?? matchedCandidates[0] ?? null
+    : matchedCandidates[0] ?? null;
+
+  if (!targetCandidate) {
+    const durationMs = Date.now() - startMs;
+    const msg = query
+      ? `No project workspace matched "${query}"`
+      : "No project workspace found to jump to";
+    return {
+      ok: false,
+      action: "jump" as const,
+      jumpMode,
+      dryRun,
+      query,
+      totalProjects: allCandidates.length,
+      totalActiveWorkspaces: activeWorkspaces.length,
+      emptyProjects,
+      candidates: matchedCandidates,
+      selectedCandidate: null,
+      targetWorkspaceId: null,
+      targetProjectId: null,
+      targetProjectKey: null,
+      targetProjectName: null,
+      targetDirectory: null,
+      createdWorkspace: false,
+      message: msg,
+      durationMs,
+      recentActions: getRecentActionLogs().slice(0, 8),
+    };
+  }
+
+  let targetWorkspaceId: string | null = targetCandidate.primaryWorkspaceId;
+  let createdWorkspace = false;
+  let message = "";
+
+  try {
+    if (jumpMode === "locate-sidebar") {
+      targetWorkspaceId = null;
+      message = dryRun
+        ? `Dry-run: will expand and scroll sidebar to "${targetCandidate.projectName}" (${targetCandidate.activeWorkspaceCount} threads)`
+        : `Located "${targetCandidate.projectName}" in sidebar (${targetCandidate.activeWorkspaceCount} threads)`;
+    } else if (jumpMode === "create-new") {
+      if (dryRun) {
+        message = `Dry-run: will create a fresh workspace inside "${targetCandidate.projectName}" (${targetCandidate.shortPath})`;
+      } else {
+        const importRes = await handleImportFolderWorkspace(
+          {
+            paths: [targetCandidate.projectRootPath],
+            mode: "always-create",
+            source: "ui",
+          },
+          context,
+        );
+        if (importRes.ok && importRes.primaryWorkspaceId) {
+          targetWorkspaceId = importRes.primaryWorkspaceId;
+          createdWorkspace = true;
+          message = `Created fresh workspace in "${targetCandidate.projectName}" (${targetWorkspaceId})`;
+        } else {
+          message = importRes.message;
+        }
+      }
+    } else {
+      // jumpMode === "open-latest"
+      if (targetWorkspaceId) {
+        message = dryRun
+          ? `Dry-run: will jump to "${targetCandidate.projectName}" (${targetWorkspaceId}, ${targetCandidate.activeWorkspaceCount} threads)`
+          : `Jumped to "${targetCandidate.projectName}" (${targetWorkspaceId})`;
+      } else if (dryRun) {
+        message = `Dry-run: "${targetCandidate.projectName}" has 0 active threads — will open clean workspace in ${targetCandidate.shortPath}`;
+      } else {
+        const importRes = await handleImportFolderWorkspace(
+          {
+            paths: [targetCandidate.projectRootPath],
+            mode: "open-or-create",
+            source: "ui",
+          },
+          context,
+        );
+        if (importRes.ok && importRes.primaryWorkspaceId) {
+          targetWorkspaceId = importRes.primaryWorkspaceId;
+          createdWorkspace = importRes.createdCount > 0;
+          message = `Opened workspace "${targetCandidate.projectName}" (${targetWorkspaceId})`;
+        } else {
+          message = importRes.message;
+        }
+      }
+    }
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
+  }
+
+  const durationMs = Date.now() - startMs;
+  const ok = jumpMode === "locate-sidebar" ? true : Boolean(targetWorkspaceId) || dryRun;
+
+  recordActionLog({
+    target: "workspace-jump",
+    resolvedPath: `${targetCandidate.projectName}${targetWorkspaceId ? `#${targetWorkspaceId}` : "#sidebar"}`,
+    ok,
+    durationMs,
+    message,
+  });
+
+  return {
+    ok,
+    action: "jump" as const,
+    jumpMode,
+    dryRun,
+    query,
+    totalProjects: allCandidates.length,
+    totalActiveWorkspaces: activeWorkspaces.length,
+    emptyProjects,
+    candidates: matchedCandidates,
+    selectedCandidate: targetCandidate,
+    targetWorkspaceId,
+    targetProjectId: targetCandidate.projectId,
+    targetProjectKey: targetCandidate.projectKey,
+    targetProjectName: targetCandidate.projectName,
+    targetDirectory: targetCandidate.projectRootPath,
+    createdWorkspace,
+    message,
+    durationMs,
+    recentActions: getRecentActionLogs().slice(0, 8),
+  };
+}
+
 
 

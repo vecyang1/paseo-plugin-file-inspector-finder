@@ -1,5 +1,6 @@
 import { Platform } from "react-native";
 import {
+  type InlineRenameSource,
   type OpenerTarget,
   type SidebarDropBehavior,
   SUPPORTED_IMAGE_EXTENSIONS,
@@ -33,14 +34,18 @@ export interface MinimalElement {
   textContent?: string | null;
   innerHTML?: string;
   className?: string;
+  type?: string;
   value?: string;
   placeholder?: string;
+  readOnly?: boolean;
+  disabled?: boolean;
   parentElement?: MinimalElement | null;
   nextSibling?: MinimalElement | null;
   children?: ArrayLike<MinimalElement>;
   style?: Record<string, string>;
   getAttribute?(name: string): string | null;
   setAttribute?(name: string, value: string): void;
+  removeAttribute?(name: string): void;
   closest?(selector: string): MinimalElement | null;
   querySelector?(selector: string): MinimalElement | null;
   querySelectorAll?(selector: string): ArrayLike<MinimalElement>;
@@ -51,6 +56,7 @@ export interface MinimalElement {
   click?(): void;
   focus?(): void;
   select?(): void;
+  setSelectionRange?(start: number, end: number): void;
   getBoundingClientRect?(): {
     left: number;
     top: number;
@@ -87,6 +93,7 @@ export interface MinimalMouseEvent {
   clientX: number;
   clientY: number;
   altKey?: boolean;
+  ctrlKey?: boolean;
   metaKey?: boolean;
   shiftKey?: boolean;
   button?: number;
@@ -97,17 +104,22 @@ export interface MinimalMouseEvent {
 
 export interface MinimalKeyboardEvent {
   key: string;
+  keyCode?: number;
+  isComposing?: boolean;
   metaKey?: boolean;
   ctrlKey?: boolean;
   shiftKey?: boolean;
   altKey?: boolean;
   target?: MinimalElement | null;
   preventDefault(): void;
+  stopPropagation?(): void;
 }
 
 export interface MinimalDocument {
+  head?: MinimalElement | null;
   body?: MinimalElement | null;
   documentElement?: MinimalElement | null;
+  activeElement?: MinimalElement | null;
   createElement(tag: string): MinimalElement;
   querySelector(selector: string): MinimalElement | null;
   querySelectorAll(selector: string): ArrayLike<MinimalElement>;
@@ -131,6 +143,17 @@ export interface MinimalWindow {
   };
   innerWidth?: number;
   innerHeight?: number;
+  getComputedStyle?(el: MinimalElement): {
+    color?: string;
+    fontSize?: string;
+    fontWeight?: string;
+    fontFamily?: string;
+    lineHeight?: string;
+    letterSpacing?: string;
+  } | null;
+  getSelection?(): {
+    removeAllRanges?(): void;
+  } | null;
   MutationObserver?: new (callback: () => void) => {
     observe(target: unknown, options: Record<string, boolean>): void;
     disconnect(): void;
@@ -166,6 +189,61 @@ const LUCIDE_SVGS: Record<
 };
 
 const SIDEBAR_DROP_STORAGE_KEY = "paseo:finder-plugin:sidebar-drop-config";
+const INLINE_RENAME_STORAGE_KEY = "paseo:finder-plugin:inline-rename-config";
+
+export interface InlineRenamePreferences {
+  enableInlineDoubleClickRename: boolean;
+  enableQuickRenameAndLabelShortcuts: boolean;
+  enableDesktopContextMenuHelper: boolean;
+}
+
+export function syncInlineRenamePreferences(
+  prefs: Partial<InlineRenamePreferences>,
+  storageOverride?: MinimalStorage | null,
+): void {
+  const storage =
+    storageOverride ?? (Platform.OS === "web" ? getWebWindow()?.localStorage : null);
+  if (!storage) return;
+  try {
+    const existing = readInlineRenamePreferences(storage);
+    const merged: InlineRenamePreferences = {
+      enableInlineDoubleClickRename:
+        prefs.enableInlineDoubleClickRename ?? existing.enableInlineDoubleClickRename,
+      enableQuickRenameAndLabelShortcuts:
+        prefs.enableQuickRenameAndLabelShortcuts ??
+        existing.enableQuickRenameAndLabelShortcuts,
+      enableDesktopContextMenuHelper:
+        prefs.enableDesktopContextMenuHelper ?? existing.enableDesktopContextMenuHelper,
+    };
+    storage.setItem(INLINE_RENAME_STORAGE_KEY, JSON.stringify(merged));
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
+export function readInlineRenamePreferences(
+  storage?: MinimalStorage | null,
+): InlineRenamePreferences {
+  const defaults: InlineRenamePreferences = {
+    enableInlineDoubleClickRename: true,
+    enableQuickRenameAndLabelShortcuts: true,
+    enableDesktopContextMenuHelper: true,
+  };
+  if (!storage) return defaults;
+  try {
+    const raw = storage.getItem(INLINE_RENAME_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<Record<keyof InlineRenamePreferences, unknown>>;
+    return {
+      enableInlineDoubleClickRename: parsed.enableInlineDoubleClickRename !== false,
+      enableQuickRenameAndLabelShortcuts:
+        parsed.enableQuickRenameAndLabelShortcuts !== false,
+      enableDesktopContextMenuHelper: parsed.enableDesktopContextMenuHelper !== false,
+    };
+  } catch {
+    return defaults;
+  }
+}
 
 export function syncSidebarDropPreferences(
   enabled: boolean,
@@ -324,6 +402,527 @@ export function isInsideWorkspaceHeaderTitle(el: MinimalElement | null): boolean
   return false;
 }
 
+export function parseSidebarWorkspaceRowTestId(testId: string): {
+  workspaceKey: string;
+  serverId: string;
+  workspaceId: string;
+} | null {
+  const prefix = "sidebar-workspace-row-";
+  if (!testId.startsWith(prefix)) return null;
+  const workspaceKey = testId.slice(prefix.length).trim();
+  if (!workspaceKey) return null;
+  const colonIdx = workspaceKey.lastIndexOf(":");
+  if (colonIdx > 0) {
+    const serverId = workspaceKey.slice(0, colonIdx);
+    const workspaceId = workspaceKey.slice(colonIdx + 1);
+    if (!workspaceId) return null;
+    return { workspaceKey, serverId, workspaceId };
+  }
+  return { workspaceKey, serverId: "local", workspaceId: workspaceKey };
+}
+
+export function resolveCurrentActiveWorkspaceId(
+  doc: MinimalDocument,
+  win?: MinimalWindow | null,
+  fallbackWorkspaceId?: string,
+): string | undefined {
+  const pathname = win?.location?.pathname ?? "";
+  const routeMatch = pathname.match(/\/workspace\/([^/?#]+)/);
+  if (routeMatch?.[1]) {
+    try {
+      return decodeURIComponent(routeMatch[1]);
+    } catch {
+      return routeMatch[1];
+    }
+  }
+  const selectedRow = doc.querySelector(
+    '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
+  );
+  const selectedTid = selectedRow?.getAttribute?.("data-testid") ?? "";
+  const parsed = parseSidebarWorkspaceRowTestId(selectedTid);
+  if (parsed?.workspaceId) {
+    return parsed.workspaceId;
+  }
+  return fallbackWorkspaceId;
+}
+
+export function isInsideInteractiveRowAction(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 8; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+    if (
+      testId.startsWith("sidebar-workspace-kebab-") ||
+      testId.startsWith("sidebar-workspace-archive-") ||
+      testId.startsWith("sidebar-workspace-menu-") ||
+      testId.startsWith("workspace-tab-close-") ||
+      testId.startsWith("workspace-file-close-") ||
+      testId.startsWith("workspace-header-menu") ||
+      testId === "paseo-finder-inline-rename-input"
+    ) {
+      return true;
+    }
+    const role = curr.getAttribute?.("role") ?? "";
+    if (role === "menuitem" || role === "link") {
+      return true;
+    }
+    if (
+      curr.getAttribute?.("aria-haspopup") === "menu" &&
+      !testId.startsWith("sidebar-workspace-row-") &&
+      !testId.startsWith("workspace-tab-")
+    ) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export interface InlineRenameTarget {
+  targetKey: string;
+  surface: "sidebar-row" | "header-title" | "agent-tab";
+  source: InlineRenameSource;
+  workspaceId?: string;
+  agentId?: string;
+  serverId?: string;
+  titleEl: MinimalElement;
+  rowEl?: MinimalElement;
+  initialTitle: string;
+}
+
+function findFirstTextLeafElement(root: MinimalElement): MinimalElement | null {
+  const children = root.children;
+  if (!children || children.length === 0) {
+    return (root.textContent ?? "").trim().length > 0 ? root : null;
+  }
+  for (let i = 0; i < children.length; i += 1) {
+    const child = children[i];
+    if (!child) continue;
+    const tag = (child.tagName ?? "").toUpperCase();
+    if (tag === "SVG" || tag === "PATH" || tag === "IMG" || tag === "INPUT") {
+      continue;
+    }
+    const tid = child.getAttribute?.("data-testid") ?? "";
+    if (
+      tid.startsWith("workspace-tab-modified-") ||
+      tid.startsWith("workspace-tab-close-") ||
+      tid.startsWith("workspace-status-indicator-") ||
+      tid.startsWith("sidebar-row-project-icon-") ||
+      tid.startsWith("sidebar-workspace-kebab-") ||
+      tid.startsWith("sidebar-workspace-archive-") ||
+      tid === "sidebar-workspace-trailing-scrim"
+    ) {
+      continue;
+    }
+    if (child.getAttribute?.("pointer-events") === "none") {
+      continue;
+    }
+    const subChildren = child.children;
+    if ((!subChildren || subChildren.length === 0) && (child.textContent ?? "").trim().length > 0) {
+      return child;
+    }
+    const nested = findFirstTextLeafElement(child);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+export function findSidebarRowTitleElement(
+  rowEl: MinimalElement,
+  workspaceKey: string,
+): MinimalElement | null {
+  const explicit =
+    rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${workspaceKey}"]`) ??
+    rowEl.querySelector?.('[data-testid^="sidebar-workspace-title-"]');
+  if (explicit) {
+    return explicit;
+  }
+  return findFirstTextLeafElement(rowEl);
+}
+
+export function resolveInlineRenameTarget(
+  el: MinimalElement | null,
+  doc: MinimalDocument,
+  win?: MinimalWindow | null,
+  fallbackWorkspaceId?: string,
+): InlineRenameTarget | null {
+  if (!el || isEditableInput(el) || isInsideInteractiveRowAction(el)) {
+    return null;
+  }
+
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 12; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+
+    // 1. Left Sidebar Workspace Row (`sidebar-workspace-row-${serverId}:${workspaceId}`)
+    if (testId.startsWith("sidebar-workspace-row-")) {
+      const parsed = parseSidebarWorkspaceRowTestId(testId);
+      if (!parsed) return null;
+      const titleEl = findSidebarRowTitleElement(curr, parsed.workspaceKey);
+      if (!titleEl || !titleEl.parentElement) return null;
+      return {
+        targetKey: `sidebar-row:${parsed.workspaceKey}`,
+        surface: "sidebar-row",
+        source: "inline-sidebar",
+        workspaceId: parsed.workspaceId,
+        serverId: parsed.serverId,
+        titleEl,
+        rowEl: curr,
+        initialTitle: (titleEl.textContent ?? "").trim(),
+      };
+    }
+
+    // 2. Top Workspace Header Title (`workspace-header-title`)
+    if (testId === "workspace-header-title") {
+      if (!curr.parentElement) return null;
+      const workspaceId = resolveCurrentActiveWorkspaceId(doc, win, fallbackWorkspaceId);
+      if (!workspaceId) return null;
+      return {
+        targetKey: `header-title:${workspaceId}`,
+        surface: "header-title",
+        source: "inline-header",
+        workspaceId,
+        titleEl: curr,
+        initialTitle: (curr.textContent ?? "").trim(),
+      };
+    }
+
+    // 3. Workspace Agent Tab (`workspace-tab-agent_${agentId}`)
+    if (
+      testId.startsWith("workspace-tab-agent_") &&
+      !testId.startsWith("workspace-tab-context-") &&
+      !testId.startsWith("workspace-tab-menu-") &&
+      !testId.startsWith("workspace-tab-tooltip-") &&
+      !testId.startsWith("workspace-tab-modified-") &&
+      !testId.startsWith("workspace-tab-close-")
+    ) {
+      const agentId = testId.slice("workspace-tab-agent_".length).trim();
+      if (!agentId) return null;
+      const titleEl = findFirstTextLeafElement(curr);
+      if (!titleEl || !titleEl.parentElement) return null;
+      return {
+        targetKey: `agent-tab:${agentId}`,
+        surface: "agent-tab",
+        source: "inline-tab",
+        workspaceId: resolveCurrentActiveWorkspaceId(doc, win, fallbackWorkspaceId),
+        agentId,
+        titleEl,
+        rowEl: curr,
+        initialTitle: (titleEl.textContent ?? "").trim(),
+      };
+    }
+
+    curr = curr.parentElement ?? null;
+  }
+
+  return null;
+}
+
+export function resolveLiveInlineRenameTargetByKey(
+  targetKey: string,
+  doc: MinimalDocument,
+  win?: MinimalWindow | null,
+  fallbackWorkspaceId?: string,
+): InlineRenameTarget | null {
+  if (targetKey.startsWith("sidebar-row:")) {
+    const workspaceKey = targetKey.slice("sidebar-row:".length);
+    const rowEl = doc.querySelector(`[data-testid="sidebar-workspace-row-${workspaceKey}"]`);
+    return resolveInlineRenameTarget(rowEl, doc, win, fallbackWorkspaceId);
+  }
+  if (targetKey.startsWith("header-title:")) {
+    const headerEl = doc.querySelector('[data-testid="workspace-header-title"]');
+    return resolveInlineRenameTarget(headerEl, doc, win, fallbackWorkspaceId);
+  }
+  if (targetKey.startsWith("agent-tab:")) {
+    const agentId = targetKey.slice("agent-tab:".length);
+    const tabEl = doc.querySelector(`[data-testid="workspace-tab-agent_${agentId}"]`);
+    return resolveInlineRenameTarget(tabEl, doc, win, fallbackWorkspaceId);
+  }
+  return null;
+}
+
+export function findF2InlineRenameTarget(
+  doc: MinimalDocument,
+  win?: MinimalWindow | null,
+  fallbackWorkspaceId?: string,
+): InlineRenameTarget | null {
+  const selectedRow = doc.querySelector(
+    '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
+  );
+  if (selectedRow) {
+    const rect = selectedRow.getBoundingClientRect?.();
+    if (!rect || (rect.width > 20 && rect.height > 10)) {
+      const resolved = resolveInlineRenameTarget(selectedRow, doc, win, fallbackWorkspaceId);
+      if (resolved) {
+        return { ...resolved, source: "f2-inline" };
+      }
+    }
+  }
+
+  const headerTitle = doc.querySelector('[data-testid="workspace-header-title"]');
+  if (headerTitle) {
+    const rect = headerTitle.getBoundingClientRect?.();
+    if (!rect || (rect.width > 20 && rect.height > 10)) {
+      const resolved = resolveInlineRenameTarget(headerTitle, doc, win, fallbackWorkspaceId);
+      if (resolved) {
+        return { ...resolved, source: "f2-inline" };
+      }
+    }
+  }
+
+  return null;
+}
+
+export interface ActiveInlineRenameSession {
+  inputEl: MinimalElement;
+  target: InlineRenameTarget;
+  commit(): Promise<void>;
+  cancel(): void;
+  markOutsidePointerDown(): void;
+}
+
+function ensureInlineRenameStyleTag(doc: MinimalDocument): void {
+  const existing = doc.querySelector('style[data-paseo-finder-inline-rename-style="true"]');
+  if (existing) return;
+  const host = doc.head ?? doc.documentElement ?? doc.body;
+  if (!host?.appendChild) return;
+  const styleEl = doc.createElement("style");
+  styleEl.setAttribute?.("data-paseo-finder-inline-rename-style", "true");
+  styleEl.textContent = `
+[data-paseo-inline-rename-hidden="true"] {
+  display: none !important;
+}
+input[data-testid="paseo-finder-inline-rename-input"] {
+  box-sizing: border-box;
+  margin: 0 0 0 -3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid rgba(59, 130, 246, 0.72);
+  background-color: rgba(59, 130, 246, 0.10);
+  outline: none;
+  min-width: 56px;
+  width: 100%;
+  flex: 1 1 auto;
+}
+input[data-testid="paseo-finder-inline-rename-input"]::selection {
+  background-color: rgba(37, 99, 235, 0.40);
+}
+[data-paseo-inline-rename-row="true"] [data-testid="sidebar-workspace-trailing-scrim"],
+[data-paseo-inline-rename-row="true"] [data-testid^="sidebar-workspace-kebab-"],
+[data-paseo-inline-rename-row="true"] [data-testid^="sidebar-workspace-archive-"] {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+`;
+  host.appendChild(styleEl);
+}
+
+export function mountInlineTitleInput(
+  doc: MinimalDocument,
+  win: MinimalWindow | null,
+  target: InlineRenameTarget,
+  onCommit: (
+    nextTitle: string | null,
+    meta: { workspaceId?: string; agentId?: string; source: InlineRenameSource },
+  ) => Promise<void>,
+  onDisposed?: () => void,
+): ActiveInlineRenameSession | null {
+  const parent = target.titleEl.parentElement;
+  if (!parent || (!parent.insertBefore && !parent.appendChild)) {
+    return null;
+  }
+
+  ensureInlineRenameStyleTag(doc);
+
+  const computed = win?.getComputedStyle?.(target.titleEl) ?? null;
+  const inputEl = doc.createElement("input");
+  inputEl.type = "text";
+  inputEl.value = target.initialTitle;
+  inputEl.placeholder = target.initialTitle || "Workspace title";
+  inputEl.setAttribute?.("data-testid", "paseo-finder-inline-rename-input");
+  inputEl.setAttribute?.("data-rename-surface", target.surface);
+  if (target.workspaceId) {
+    inputEl.setAttribute?.("data-workspace-id", target.workspaceId);
+  }
+  if (target.agentId) {
+    inputEl.setAttribute?.("data-agent-id", target.agentId);
+  }
+  inputEl.setAttribute?.("aria-label", "Rename inline");
+
+  if (inputEl.style) {
+    inputEl.style.color = computed?.color || "inherit";
+    inputEl.style.fontSize = computed?.fontSize || (target.surface === "header-title" ? "15px" : "14px");
+    inputEl.style.fontWeight = computed?.fontWeight || "500";
+    inputEl.style.fontFamily =
+      computed?.fontFamily ||
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+    inputEl.style.lineHeight = computed?.lineHeight || "20px";
+    if (computed?.letterSpacing) {
+      inputEl.style.letterSpacing = computed.letterSpacing;
+    }
+    inputEl.style.height = computed?.lineHeight && computed.lineHeight.endsWith("px")
+      ? computed.lineHeight
+      : target.surface === "header-title"
+        ? "24px"
+        : "20px";
+  }
+
+  target.titleEl.setAttribute?.("data-paseo-inline-rename-hidden", "true");
+  if (target.rowEl) {
+    target.rowEl.setAttribute?.("data-paseo-inline-rename-row", "true");
+  }
+
+  if (parent.insertBefore) {
+    parent.insertBefore(inputEl, target.titleEl.nextSibling ?? null);
+  } else {
+    parent.appendChild?.(inputEl);
+  }
+
+  const mountedAt = Date.now();
+  let settled = false;
+  let outsidePointerDown = false;
+
+  const cleanupDom = () => {
+    if (target.titleEl.removeAttribute) {
+      target.titleEl.removeAttribute("data-paseo-inline-rename-hidden");
+    } else {
+      target.titleEl.setAttribute?.("data-paseo-inline-rename-hidden", "false");
+    }
+    if (target.rowEl) {
+      if (target.rowEl.removeAttribute) {
+        target.rowEl.removeAttribute("data-paseo-inline-rename-row");
+      } else {
+        target.rowEl.setAttribute?.("data-paseo-inline-rename-row", "false");
+      }
+    }
+    inputEl.remove?.();
+    onDisposed?.();
+  };
+
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    cleanupDom();
+  };
+
+  const commitFromTrigger = async (trigger: "enter" | "blur") => {
+    if (settled) return;
+    const rawVal = (inputEl.value ?? "").trim();
+
+    // Unchanged value or accidental empty blur -> cancel cleanly with 0 network RPCs
+    if (rawVal === target.initialTitle || (trigger === "blur" && rawVal.length === 0)) {
+      settled = true;
+      cleanupDom();
+      return;
+    }
+
+    // On explicit Enter with empty string (or 'clear'/'reset') for a workspace, reset custom title (null).
+    // For an agent tab, empty Enter cancels since agents always keep a display name.
+    const normalizedNext: string | null =
+      rawVal.length === 0 ||
+      rawVal.toLowerCase() === "clear" ||
+      rawVal.toLowerCase() === "reset"
+        ? null
+        : rawVal;
+
+    if (normalizedNext === null && target.agentId && target.surface === "agent-tab") {
+      settled = true;
+      cleanupDom();
+      return;
+    }
+
+    settled = true;
+    inputEl.readOnly = true;
+    if (inputEl.style) {
+      inputEl.style.opacity = "0.85";
+    }
+    if (normalizedNext) {
+      target.titleEl.textContent = normalizedNext;
+    }
+
+    try {
+      await Promise.race([
+        onCommit(normalizedNext, {
+          workspaceId: target.workspaceId,
+          agentId: target.surface === "agent-tab" ? target.agentId : undefined,
+          source: target.source,
+        }),
+        new Promise<void>((resolve) => setTimeout(resolve, 400)),
+      ]);
+    } finally {
+      if (win?.requestAnimationFrame) {
+        win.requestAnimationFrame(() => cleanupDom());
+      } else {
+        cleanupDom();
+      }
+    }
+  };
+
+  const stopBubble = (ev: unknown) => {
+    const e = ev as { stopPropagation?: () => void };
+    e.stopPropagation?.();
+  };
+
+  for (const evtName of [
+    "click",
+    "dblclick",
+    "mousedown",
+    "mouseup",
+    "pointerdown",
+    "pointerup",
+  ]) {
+    inputEl.addEventListener?.(evtName, stopBubble);
+  }
+
+  inputEl.addEventListener?.("keydown", (ev) => {
+    const ke = ev as MinimalKeyboardEvent;
+    ke.stopPropagation?.();
+    if (ke.isComposing || ke.keyCode === 229) {
+      return;
+    }
+    if (ke.key === "Enter") {
+      ke.preventDefault();
+      void commitFromTrigger("enter");
+    } else if (ke.key === "Escape") {
+      ke.preventDefault();
+      cancel();
+    }
+  });
+
+  inputEl.addEventListener?.("blur", () => {
+    if (settled) return;
+    // Shield against Paseo's WorkspaceScreen composer auto-focus stealing focus ~30-220ms
+    // after Click 1 of a double-click navigates to an unselected sidebar workspace row!
+    if (!outsidePointerDown && Date.now() - mountedAt < 260) {
+      inputEl.focus?.();
+      inputEl.select?.();
+      return;
+    }
+    void commitFromTrigger("blur");
+  });
+
+  win?.getSelection?.()?.removeAllRanges?.();
+  inputEl.focus?.();
+  inputEl.select?.();
+  inputEl.setSelectionRange?.(0, target.initialTitle.length);
+  win?.requestAnimationFrame?.(() => {
+    if (!settled) {
+      inputEl.focus?.();
+      inputEl.select?.();
+      inputEl.setSelectionRange?.(0, (inputEl.value ?? "").length);
+    }
+  });
+
+  return {
+    inputEl,
+    target,
+    commit: () => commitFromTrigger("enter"),
+    cancel,
+    markOutsidePointerDown: () => {
+      outsidePointerDown = true;
+    },
+  };
+}
+
 export function extractFilePathFromElement(
   el: MinimalElement | null,
   doc: MinimalDocument,
@@ -433,16 +1032,24 @@ export interface FolderDropResultSummary {
   message: string;
 }
 
+export interface RenameThreadOptions {
+  workspaceId?: string;
+  agentId?: string;
+  source?: InlineRenameSource;
+}
+
 export interface DesktopRevealHelperCallbacks {
   isEnabled(): boolean;
   getLocale?(): string;
+  getFallbackWorkspaceId?(): string | undefined;
   onOpenTarget(path: string, target: OpenerTarget): Promise<void>;
   onCopyPath(path: string): Promise<void>;
-  onFetchThreadMetadata?(): Promise<ThreadMetadataSnapshot | null>;
-  onRenameThread?(newTitle: string | null): Promise<void>;
+  onFetchThreadMetadata?(workspaceId?: string): Promise<ThreadMetadataSnapshot | null>;
+  onRenameThread?(newTitle: string | null, options?: RenameThreadOptions): Promise<void>;
   onToggleLabel?(
     labelName: string,
     color?: WorkspaceLabelColor,
+    workspaceId?: string,
   ): Promise<ThreadMetadataSnapshot | null>;
   onDropFolders?(
     paths: string[],
@@ -859,13 +1466,24 @@ export function injectIntoNativeTabMenus(
   return injectedCount;
 }
 
-export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallbacks): () => void {
-  if (Platform.OS !== "web") return () => {};
-  const win = getWebWindow();
-  const doc = win?.document;
+export function installDesktopRevealHelpers(
+  callbacks: DesktopRevealHelperCallbacks,
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): () => void {
+  if (!docOverride && !winOverride && Platform.OS !== "web") return () => {};
+  const win = winOverride ?? getWebWindow();
+  const doc = docOverride ?? win?.document ?? null;
   if (!win || !doc) return () => {};
 
   let activeMenuEl: MinimalElement | null = null;
+  let activeInlineSession: ActiveInlineRenameSession | null = null;
+  let lastClickTracker: {
+    targetKey: string;
+    atMs: number;
+    x: number;
+    y: number;
+  } | null = null;
   let lastRightClickedTabPath: string | null = null;
 
   const resolveLocale = (): string => {
@@ -1019,7 +1637,12 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     if (!doc.body || !callbacks.onFetchThreadMetadata) return;
 
     const catalog = getCatalogForLocale(resolveLocale());
-    const snap = await callbacks.onFetchThreadMetadata().catch(() => null);
+    const activeWsId = resolveCurrentActiveWorkspaceId(
+      doc,
+      win,
+      callbacks.getFallbackWorkspaceId?.(),
+    );
+    const snap = await callbacks.onFetchThreadMetadata(activeWsId).catch(() => null);
     if (!snap || !doc.body) return;
 
     const container = doc.createElement("div");
@@ -1094,7 +1717,10 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     const triggerSaveTitle = () => {
       const nextVal = (titleInput.value ?? "").trim();
       removeMenu();
-      void callbacks.onRenameThread?.(nextVal || null);
+      void callbacks.onRenameThread?.(nextVal || null, {
+        workspaceId: snap.workspaceId,
+        source: "ui",
+      });
     };
 
     saveBtn.addEventListener?.("click", (ev) => {
@@ -1170,7 +1796,9 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
           const me = ev as MinimalMouseEvent;
           me.preventDefault?.();
           me.stopPropagation?.();
-          void callbacks.onToggleLabel?.(entry.name, entry.color).then((updated) => {
+          void callbacks
+            .onToggleLabel?.(entry.name, entry.color, snap.workspaceId)
+            .then((updated) => {
             if (updated) {
               currentAssigned = new Set(updated.assignedLabels);
               currentCatalog = [...updated.catalog];
@@ -1259,7 +1887,9 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
       const nameVal = (labelInput.value ?? "").trim();
       if (!nameVal) return;
       labelInput.value = "";
-      void callbacks.onToggleLabel?.(nameVal, selectedColor).then((updated) => {
+      void callbacks
+        .onToggleLabel?.(nameVal, selectedColor, snap.workspaceId)
+        .then((updated) => {
         if (updated) {
           currentAssigned = new Set(updated.assignedLabels);
           currentCatalog = [...updated.catalog];
@@ -1304,6 +1934,22 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     }, 10);
   };
 
+  const startInlineRename = (target: InlineRenameTarget) => {
+    activeInlineSession?.cancel();
+    removeMenu();
+    activeInlineSession = mountInlineTitleInput(
+      doc,
+      win,
+      target,
+      async (nextTitle, meta) => {
+        await callbacks.onRenameThread?.(nextTitle, meta);
+      },
+      () => {
+        activeInlineSession = null;
+      },
+    );
+  };
+
   const scheduleNativeTabMenuExtension = () => {
     injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win);
     win.requestAnimationFrame?.(() => {
@@ -1325,9 +1971,23 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     observer.observe(doc.body, { childList: true, subtree: true });
   }
 
+  const onPointerDownCapture = (ev: unknown) => {
+    if (!activeInlineSession) return;
+    const me = ev as MinimalMouseEvent;
+    if (
+      me.target !== activeInlineSession.inputEl &&
+      !activeInlineSession.inputEl.contains?.(me.target)
+    ) {
+      activeInlineSession.markOutsidePointerDown();
+    }
+  };
+
   const onClickCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
     const me = ev as MinimalMouseEvent;
+    const prefs = readInlineRenamePreferences(win.localStorage);
+    if (!prefs.enableDesktopContextMenuHelper) return;
+
     if (activeMenuEl && (!me.target || !activeMenuEl.contains?.(me.target))) {
       removeMenu();
     }
@@ -1338,12 +1998,65 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
         me.preventDefault();
         me.stopPropagation();
         void callbacks.onOpenTarget(detected, "finder-reveal");
+        return;
+      }
+    }
+
+    // Rapid 2nd-click fallback across row remounts: if Click 1 selected a workspace row
+    // and remounted its DOM node before native `dblclick` fired, a second click within 360ms
+    // on the same target key triggers inline rename seamlessly.
+    if (
+      prefs.enableInlineDoubleClickRename &&
+      !activeInlineSession &&
+      me.button === 0 &&
+      !me.altKey &&
+      !me.ctrlKey &&
+      !me.metaKey
+    ) {
+      const inlineTarget = resolveInlineRenameTarget(
+        me.target,
+        doc,
+        win,
+        callbacks.getFallbackWorkspaceId?.(),
+      );
+      if (inlineTarget) {
+        const now = Date.now();
+        const prev = lastClickTracker;
+        if (
+          prev &&
+          prev.targetKey === inlineTarget.targetKey &&
+          now - prev.atMs <= 360 &&
+          Math.hypot((me.clientX || 0) - prev.x, (me.clientY || 0) - prev.y) <= 12
+        ) {
+          lastClickTracker = null;
+          me.preventDefault();
+          me.stopPropagation();
+          const liveTarget =
+            resolveLiveInlineRenameTargetByKey(
+              inlineTarget.targetKey,
+              doc,
+              win,
+              callbacks.getFallbackWorkspaceId?.(),
+            ) ?? inlineTarget;
+          startInlineRename(liveTarget);
+          return;
+        }
+        lastClickTracker = {
+          targetKey: inlineTarget.targetKey,
+          atMs: now,
+          x: me.clientX || 0,
+          y: me.clientY || 0,
+        };
+      } else {
+        lastClickTracker = null;
       }
     }
   };
 
   const onContextMenuCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
+    const prefs = readInlineRenamePreferences(win.localStorage);
+    if (!prefs.enableDesktopContextMenuHelper) return;
     const me = ev as MinimalMouseEvent;
 
     // 1. Inside Paseo's File Explorer or existing context menu: let Paseo's native menu handle it
@@ -1376,8 +2089,28 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
 
   const onDblClickCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
+    const prefs = readInlineRenamePreferences(win.localStorage);
+    if (!prefs.enableDesktopContextMenuHelper) return;
     const me = ev as MinimalMouseEvent;
-    if (isInsideWorkspaceHeaderTitle(me.target)) {
+
+    if (prefs.enableInlineDoubleClickRename) {
+      const target = resolveInlineRenameTarget(
+        me.target,
+        doc,
+        win,
+        callbacks.getFallbackWorkspaceId?.(),
+      );
+      if (target) {
+        me.preventDefault();
+        me.stopPropagation();
+        lastClickTracker = null;
+        startInlineRename(target);
+        return;
+      }
+    } else if (
+      prefs.enableQuickRenameAndLabelShortcuts &&
+      isInsideWorkspaceHeaderTitle(me.target)
+    ) {
       me.preventDefault();
       me.stopPropagation();
       void showQuickThreadMetadataBar("rename");
@@ -1387,6 +2120,29 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
   const onKeyDownCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
     const ke = ev as MinimalKeyboardEvent;
+
+    if (activeInlineSession && ke.target === activeInlineSession.inputEl) {
+      if (ke.key === "Escape") {
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        activeInlineSession.cancel();
+        return;
+      }
+      if (ke.key === "Enter") {
+        if (ke.isComposing || ke.keyCode === 229) {
+          return;
+        }
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        void activeInlineSession.commit();
+        return;
+      }
+      return;
+    }
+
+    const prefs = readInlineRenamePreferences(win.localStorage);
+    if (!prefs.enableDesktopContextMenuHelper) return;
+
     if (ke.key === "Escape") {
       removeMenu();
       return;
@@ -1400,17 +2156,34 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
       }
       return;
     }
-    // F2 or Cmd+Shift+E opens Quick Workspace Rename & Labels Bar (focused on title)
+    // F2 or Cmd+Shift+E triggers zero-popup inline rename (or falls back to Quick Bar if inline is disabled)
     if (
-      (ke.key === "F2" && !isEditableInput(ke.target ?? null)) ||
-      ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "e")
+      prefs.enableQuickRenameAndLabelShortcuts &&
+      ((ke.key === "F2" && !isEditableInput(ke.target ?? null)) ||
+        ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "e"))
     ) {
       ke.preventDefault();
+      if (prefs.enableInlineDoubleClickRename) {
+        const target = findF2InlineRenameTarget(
+          doc,
+          win,
+          callbacks.getFallbackWorkspaceId?.(),
+        );
+        if (target) {
+          startInlineRename(target);
+          return;
+        }
+      }
       void showQuickThreadMetadataBar("rename");
       return;
     }
     // Cmd+Shift+L opens Quick Workspace Rename & Labels Bar (focused on labels)
-    if ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "l") {
+    if (
+      prefs.enableQuickRenameAndLabelShortcuts &&
+      (ke.metaKey || ke.ctrlKey) &&
+      ke.shiftKey &&
+      ke.key.toLowerCase() === "l"
+    ) {
       ke.preventDefault();
       void showQuickThreadMetadataBar("labels");
     }
@@ -1672,6 +2445,8 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
       });
   };
 
+  doc.addEventListener("pointerdown", onPointerDownCapture, true);
+  doc.addEventListener("mousedown", onPointerDownCapture, true);
   doc.addEventListener("click", onClickCapture, true);
   doc.addEventListener("dblclick", onDblClickCapture, true);
   doc.addEventListener("contextmenu", onContextMenuCapture, true);
@@ -1684,11 +2459,14 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
   win.addEventListener("blur", hideSidebarDropOverlay, false);
 
   return () => {
+    activeInlineSession?.cancel();
     removeMenu();
     hideSidebarDropOverlay();
     if (activeDropToastTimer) clearTimeout(activeDropToastTimer);
     activeDropToastEl?.remove?.();
     observer?.disconnect();
+    doc.removeEventListener("pointerdown", onPointerDownCapture, true);
+    doc.removeEventListener("mousedown", onPointerDownCapture, true);
     doc.removeEventListener("click", onClickCapture, true);
     doc.removeEventListener("dblclick", onDblClickCapture, true);
     doc.removeEventListener("contextmenu", onContextMenuCapture, true);

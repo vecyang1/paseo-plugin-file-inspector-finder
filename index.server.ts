@@ -2,6 +2,7 @@ import { defineAgentTool, type PluginServerContext } from "@getpaseo/plugin/serv
 import { z } from "zod";
 import {
   OpenerTargetSchema,
+  QuickJumpActionSchema,
   SidebarDropBehaviorSchema,
   WorkspaceLabelColorSchema,
   diagnosePathRpc,
@@ -11,6 +12,7 @@ import {
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   pluginSettings,
+  quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
 } from "./shared/contracts";
 import {
@@ -20,6 +22,7 @@ import {
   handleListWorkspaceMedia,
   handleManageWorkspaceLabels,
   handleOpenFileTarget,
+  handleQuickJumpWorkspace,
   handleRenameThread,
 } from "./server/handlers";
 
@@ -34,6 +37,11 @@ export default function contribute(server: PluginServerContext) {
   server.handle(manageWorkspaceLabelsRpc, handleManageWorkspaceLabels);
   server.handle(importFolderWorkspaceRpc, (input, context) =>
     handleImportFolderWorkspace(input, context, {
+      readSettings: () => settingsHandle.read(),
+    }),
+  );
+  server.handle(quickJumpWorkspaceRpc, (input, context) =>
+    handleQuickJumpWorkspace(input, context, {
       readSettings: () => settingsHandle.read(),
     }),
   );
@@ -166,10 +174,57 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const quickJumpTool = defineAgentTool({
+    name: "quick_jump_workspace",
+    title: "Search or Quick-Jump to Paseo Project Workspace",
+    description:
+      "Search and rank Paseo project workspaces without sub-thread clutter, or resolve/open the primary workspace for a target project folder.",
+    input: z.object({
+      action: z
+        .enum(["list", "jump"])
+        .optional()
+        .describe("list (rank matching project workspaces) or jump (resolve/open target project)"),
+      query: z
+        .string()
+        .optional()
+        .describe("Search query by project name, stripped date name, acronym, or path segment"),
+      projectId: z.string().optional().describe("Optional explicit projectId to jump to"),
+      jumpMode: QuickJumpActionSchema.optional().describe(
+        "open-latest (default), locate-sidebar, or create-new",
+      ),
+      dryRun: z.boolean().optional().describe("Set true to preview resolution without creating"),
+    }),
+    async execute(input, { paseo }) {
+      const result = await handleQuickJumpWorkspace(
+        {
+          action: input.action ?? (input.query || input.projectId ? "jump" : "list"),
+          query: input.query,
+          projectId: input.projectId,
+          jumpMode: input.jumpMode,
+          dryRun: input.dryRun,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+        { readSettings: () => settingsHandle.read() },
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
-      tools: [...(request.tools ?? []), revealTool, threadMetaTool, importFolderTool],
+      tools: [
+        ...(request.tools ?? []),
+        revealTool,
+        threadMetaTool,
+        importFolderTool,
+        quickJumpTool,
+      ],
     };
   });
 
