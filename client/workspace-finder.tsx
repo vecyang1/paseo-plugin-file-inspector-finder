@@ -8,13 +8,14 @@ import {
 } from "@getpaseo/plugin/client";
 import { Icon, Loading, ScrollView, TextInput, copyText, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   type FileMetadata,
   type OpenerTarget,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
+  importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
@@ -22,7 +23,11 @@ import {
   renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { pluginTranslations } from "./i18n";
-import { LABEL_COLOR_HEX } from "./web";
+import {
+  LABEL_COLOR_HEX,
+  focusWorkspaceInApp,
+  syncSidebarDropPreferences,
+} from "./web";
 
 interface SharedFinderBrowserProps {
   workspaceId: string;
@@ -43,7 +48,17 @@ function FinderBrowserView({
   const openTarget = useRpc(openFileTargetRpc);
   const renameThread = useRpc(renameWorkspaceOrAgentRpc);
   const manageLabels = useRpc(manageWorkspaceLabelsRpc);
+  const importFolder = useRpc(importFolderWorkspaceRpc);
   const settingsState = useSettings(pluginSettings);
+
+  useEffect(() => {
+    if (settingsState.status === "ready") {
+      syncSidebarDropPreferences(
+        settingsState.values.enableSidebarFolderDrop,
+        settingsState.values.sidebarDropDefaultBehavior,
+      );
+    }
+  }, [settingsState]);
 
   const workspace = useWorkspace(workspaceId, (w) => ({
     name: w.name,
@@ -56,9 +71,34 @@ function FinderBrowserView({
   const [onlyImages, setOnlyImages] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [manualPath, setManualPath] = useState("");
+  const [folderImportPath, setFolderImportPath] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
   const [newLabelName, setNewLabelName] = useState("");
   const [newLabelColor, setNewLabelColor] = useState<WorkspaceLabelColor>("amber");
+
+  const importFolderMutation = useMutation({
+    mutationFn: (rawFolder: string) =>
+      importFolder({
+        paths: [rawFolder],
+        source: "ui",
+      }),
+    onSuccess: (res) => {
+      void mediaQuery.refetch();
+      if (res.ok) {
+        setFolderImportPath("");
+        toast.show(res.message, { variant: "success" });
+        if (res.primaryWorkspaceId) {
+          onClosePopover?.();
+          focusWorkspaceInApp(res.primaryWorkspaceId, res.primaryProjectId);
+        }
+      } else {
+        toast.error(res.message);
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : String(err));
+    },
+  });
 
   const labelsQuery = useQuery({
     queryKey: ["finder.manageWorkspaceLabels", workspaceId],
@@ -463,6 +503,32 @@ function FinderBrowserView({
             style={styles.secondaryBtn}
           >
             <Text style={styles.btnText}>{t("actions.addLabel")}</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      <View style={styles.fileCard}>
+        <Text style={styles.auditTitle}>{t("browser.folderImportTitle")}</Text>
+        <View style={styles.row}>
+          <TextInput
+            value={folderImportPath}
+            onChangeText={setFolderImportPath}
+            placeholder={t("browser.folderImportPlaceholder")}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={styles.inputBox}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("actions.importFolderBtn")}
+            onPress={() => {
+              const trimmed = folderImportPath.trim();
+              if (!trimmed) return;
+              importFolderMutation.mutate(trimmed);
+            }}
+            style={styles.accentBtn}
+          >
+            <Icon name="FolderPlus" size={13} color={theme.colors.accentForeground} />
+            <Text style={styles.accentBtnText}>{t("actions.importFolderBtn")}</Text>
           </Pressable>
         </View>
       </View>

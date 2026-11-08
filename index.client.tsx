@@ -8,6 +8,7 @@ import {
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
+  importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
@@ -17,6 +18,7 @@ import { pluginTranslations } from "./client/i18n";
 import { ImageInspectorFilePanel } from "./client/image-panel";
 import { FinderPluginSettingsScreen } from "./client/settings-screen";
 import {
+  focusWorkspaceInApp,
   installDesktopRevealHelpers,
   syncImagePanelAssociations,
 } from "./client/web";
@@ -139,6 +141,17 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  client.addCommandCenterItem({
+    id: "import-folder-workspace",
+    title: pluginTranslations.message("commands.importFolderWorkspace"),
+    icon: "FolderPlus",
+    keywords: ["folder", "drop", "import", "workspace", "project", "open"],
+    context: "workspace",
+    onSelect({ openPanel }) {
+      openPanel("finder-panel", { location: "explorer" });
+    },
+  });
+
   // 6. Register Composer Slash Commands (/reveal, /finder, /rename, /title, /label, /tag)
   for (const cmdName of ["reveal", "finder"] as const) {
     client.addSlashCommand({
@@ -251,6 +264,26 @@ export default function contribute(client: PluginClientContext) {
           labelName,
           color,
         });
+      },
+    });
+  }
+
+  for (const cmdName of ["open-folder", "import-workspace"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.openFolderSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.openFolderSlashHint"),
+      context: "workspace",
+      async onSubmit({ args, rpc }) {
+        const trimmed = args.trim();
+        if (!trimmed) return;
+        const res = await rpc(importFolderWorkspaceRpc, {
+          paths: [trimmed],
+          source: "slash-command",
+        });
+        if (res.ok && res.primaryWorkspaceId) {
+          focusWorkspaceInApp(res.primaryWorkspaceId, res.primaryProjectId);
+        }
       },
     });
   }
@@ -376,6 +409,28 @@ export default function contribute(client: PluginClientContext) {
         workspaceTitle: res.workspaceTitle,
         assignedLabels: res.assignedLabels,
         catalog: res.catalog,
+      };
+    },
+    onDropFolders: async (paths: string[], options: { forceNew: boolean }) => {
+      const res = await client.rpc(importFolderWorkspaceRpc, {
+        paths,
+        ...(options.forceNew ? { mode: "always-create" as const } : {}),
+        source: "sidebar-drop",
+      });
+      if (res.disabled) {
+        return null;
+      }
+      if (res.ok && res.primaryWorkspaceId) {
+        lastKnownWorkspaceId = res.primaryWorkspaceId;
+      }
+      return {
+        ok: res.ok,
+        primaryWorkspaceId: res.primaryWorkspaceId,
+        primaryProjectId: res.primaryProjectId,
+        primaryWorkspaceName: res.primaryWorkspaceName,
+        createdCount: res.createdCount,
+        reusedCount: res.reusedCount,
+        message: res.message,
       };
     },
   });

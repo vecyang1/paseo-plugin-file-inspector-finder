@@ -18,16 +18,21 @@ import {
   useToast,
 } from "@getpaseo/plugin/client/ui";
 import { useMutation } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   type OpenerTarget,
   diagnosePathRpc,
+  importFolderWorkspaceRpc,
   openFileTargetRpc,
   pluginSettings,
 } from "../shared/contracts";
 import { pluginTranslations } from "./i18n";
-import { syncImagePanelAssociations } from "./web";
+import {
+  focusWorkspaceInApp,
+  syncImagePanelAssociations,
+  syncSidebarDropPreferences,
+} from "./web";
 
 export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps) {
   const { t } = useTranslation(pluginTranslations);
@@ -35,10 +40,40 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const toast = useToast();
   const diagnosePath = useRpc(diagnosePathRpc);
   const openTarget = useRpc(openFileTargetRpc);
+  const importFolder = useRpc(importFolderWorkspaceRpc);
 
   const [testInput, setTestInput] = useState(
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
   );
+  const [folderTestInput, setFolderTestInput] = useState("~/Documents");
+
+  useEffect(() => {
+    if (settings.status === "ready") {
+      syncSidebarDropPreferences(
+        settings.values.enableSidebarFolderDrop,
+        settings.values.sidebarDropDefaultBehavior,
+      );
+    }
+  }, [settings]);
+
+  const folderDiagMutation = useMutation({
+    mutationFn: (vars: { path: string; dryRun: boolean }) =>
+      importFolder({
+        paths: [vars.path],
+        dryRun: vars.dryRun,
+        source: "ui",
+      }),
+    onSuccess: (res, vars) => {
+      if (res.ok) {
+        toast.show(res.message, { variant: "success" });
+        if (!vars.dryRun && res.primaryWorkspaceId) {
+          focusWorkspaceInApp(res.primaryWorkspaceId, res.primaryProjectId);
+        }
+      } else {
+        toast.error(res.message);
+      }
+    },
+  });
 
   const diagMutation = useMutation({
     mutationFn: (rawInput: string) => diagnosePath({ rawInput }),
@@ -231,6 +266,30 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           />
 
           <SettingsSwitch
+            label={t("settings.sidebarDropLabel")}
+            hint={t("settings.sidebarDropHint")}
+            value={values.enableSidebarFolderDrop}
+            onValueChange={(next) => {
+              syncSidebarDropPreferences(next, values.sidebarDropDefaultBehavior);
+              void save({ ...values, enableSidebarFolderDrop: next }, revision);
+            }}
+          />
+
+          <SettingsSelect
+            label={t("settings.sidebarDropModeLabel")}
+            hint={t("settings.sidebarDropModeHint")}
+            value={values.sidebarDropDefaultBehavior}
+            options={[
+              { label: t("settings.optDropOpenOrCreate"), value: "open-or-create" },
+              { label: t("settings.optDropAlwaysCreate"), value: "always-create" },
+            ]}
+            onValueChange={(next) => {
+              syncSidebarDropPreferences(values.enableSidebarFolderDrop, next);
+              void save({ ...values, sidebarDropDefaultBehavior: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
             label={t("settings.showComposerPillLabel")}
             hint={t("settings.showComposerPillHint")}
             value={values.showComposerPill}
@@ -251,6 +310,65 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             }}
           />
         </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionFolderImportDiag")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>{t("settings.folderDiagPrompt")}</Text>
+          <View style={styles.row}>
+            <TextInput
+              value={folderTestInput}
+              onChangeText={setFolderTestInput}
+              placeholder={t("settings.folderDiagPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("actions.dryRunCheckBtn")}
+              onPress={() => {
+                const p = folderTestInput.trim() || ".";
+                folderDiagMutation.mutate({ path: p, dryRun: true });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>{t("actions.dryRunCheckBtn")}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("actions.importFolderBtn")}
+              onPress={() => {
+                const p = folderTestInput.trim() || ".";
+                folderDiagMutation.mutate({ path: p, dryRun: false });
+              }}
+              style={styles.btn}
+            >
+              <Icon name="FolderPlus" size={14} color={theme.colors.accentForeground} />
+              <Text style={styles.btnText}>{t("actions.importFolderBtn")}</Text>
+            </Pressable>
+          </View>
+
+          {folderDiagMutation.data ? (
+            <View style={{ gap: 5, marginTop: 6 }}>
+              <Text style={styles.label}>
+                {folderDiagMutation.data.reusedCount > 0
+                  ? t("settings.folderDiagStatusReused")
+                  : t("settings.folderDiagStatusCreated")}
+              </Text>
+              <Text style={styles.detail}>
+                • {t("settings.folderDiagWorkspaceId")}{" "}
+                {folderDiagMutation.data.primaryWorkspaceId || "-"} (
+                {folderDiagMutation.data.primaryWorkspaceName || "-"})
+              </Text>
+              <Text style={styles.detail}>
+                • {t("settings.folderDiagDirectory")}{" "}
+                {folderDiagMutation.data.primaryDirectory || "-"} ·{" "}
+                {folderDiagMutation.data.durationMs}ms
+              </Text>
+            </View>
+          ) : null}
+        </View>
       </SettingsSection>
 
       <SettingsSection title={t("settings.sectionDiagnostic")}>
@@ -322,6 +440,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
 
       <SettingsSection title={t("settings.sectionContract")}>
         <SettingsCard>
+          <SettingsRow
+            label={t("settings.contractSidebarDropLabel")}
+            hint={t("settings.contractSidebarDropHint")}
+          />
           <SettingsRow
             label={t("settings.contractTabMenuLabel")}
             hint={t("settings.contractTabMenuHint")}

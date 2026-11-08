@@ -2,8 +2,10 @@ import { defineAgentTool, type PluginServerContext } from "@getpaseo/plugin/serv
 import { z } from "zod";
 import {
   OpenerTargetSchema,
+  SidebarDropBehaviorSchema,
   WorkspaceLabelColorSchema,
   diagnosePathRpc,
+  importFolderWorkspaceRpc,
   inspectFileRpc,
   listWorkspaceMediaRpc,
   manageWorkspaceLabelsRpc,
@@ -13,6 +15,7 @@ import {
 } from "./shared/contracts";
 import {
   handleDiagnosePath,
+  handleImportFolderWorkspace,
   handleInspectFile,
   handleListWorkspaceMedia,
   handleManageWorkspaceLabels,
@@ -21,7 +24,7 @@ import {
 } from "./server/handlers";
 
 export default function contribute(server: PluginServerContext) {
-  server.registerSettings(pluginSettings);
+  const settingsHandle = server.registerSettings(pluginSettings);
 
   server.handle(inspectFileRpc, handleInspectFile);
   server.handle(openFileTargetRpc, handleOpenFileTarget);
@@ -29,6 +32,11 @@ export default function contribute(server: PluginServerContext) {
   server.handle(diagnosePathRpc, handleDiagnosePath);
   server.handle(renameWorkspaceOrAgentRpc, handleRenameThread);
   server.handle(manageWorkspaceLabelsRpc, handleManageWorkspaceLabels);
+  server.handle(importFolderWorkspaceRpc, (input, context) =>
+    handleImportFolderWorkspace(input, context, {
+      readSettings: () => settingsHandle.read(),
+    }),
+  );
 
   const revealTool = defineAgentTool({
     name: "reveal_in_finder",
@@ -116,10 +124,52 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const importFolderTool = defineAgentTool({
+    name: "import_folder_workspace",
+    title: "Import or Open Folder as Paseo Workspace",
+    description:
+      "Register and open one or more local folders as Paseo workspaces if they do not yet exist (or reuse existing active workspaces without duplication).",
+    input: z.object({
+      paths: z
+        .array(z.string())
+        .min(1)
+        .describe("Absolute or ~ folder paths to register/open as Paseo workspaces"),
+      mode: SidebarDropBehaviorSchema.optional().describe(
+        "open-or-create (default, deduplicates existing workspaces) or always-create",
+      ),
+      title: z
+        .string()
+        .optional()
+        .describe("Optional custom title when creating a new workspace"),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("Set true to preview whether a workspace already exists without creating one"),
+    }),
+    async execute(input, { paseo }) {
+      const result = await handleImportFolderWorkspace(
+        {
+          paths: input.paths,
+          mode: input.mode,
+          title: input.title,
+          dryRun: input.dryRun,
+          source: "agent-tool",
+        },
+        { paseo },
+        { readSettings: () => settingsHandle.read() },
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
-      tools: [...(request.tools ?? []), revealTool, threadMetaTool],
+      tools: [...(request.tools ?? []), revealTool, threadMetaTool, importFolderTool],
     };
   });
 

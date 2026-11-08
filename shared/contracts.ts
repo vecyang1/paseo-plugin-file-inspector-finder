@@ -29,6 +29,18 @@ export const OpenerTargetSchema = z.enum([
 
 export type OpenerTarget = z.infer<typeof OpenerTargetSchema>;
 
+export const SidebarDropBehaviorSchema = z.enum(["open-or-create", "always-create"]);
+
+export type SidebarDropBehavior = z.infer<typeof SidebarDropBehaviorSchema>;
+
+export const ActionLogTargetSchema = z.union([
+  OpenerTargetSchema,
+  z.literal("workspace-import"),
+  z.literal("workspace-meta"),
+]);
+
+export type ActionLogTarget = z.infer<typeof ActionLogTargetSchema>;
+
 export const WORKSPACE_LABEL_COLORS = [
   "violet",
   "sky",
@@ -64,6 +76,8 @@ export const pluginSettings = defineSettings({
     autoAssociateImagePanels: z.boolean().default(true),
     enableDesktopContextMenuHelper: z.boolean().default(true),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
+    enableSidebarFolderDrop: z.boolean().default(true),
+    sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),
     showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),
   }),
@@ -91,7 +105,7 @@ export type FileMetadata = z.infer<typeof FileMetadataSchema>;
 export const ActionLogEntrySchema = z.object({
   id: z.string(),
   timestampIso: z.string(),
-  target: OpenerTargetSchema,
+  target: ActionLogTargetSchema,
   resolvedPath: z.string(),
   ok: z.boolean(),
   durationMs: z.number(),
@@ -207,4 +221,46 @@ export const manageWorkspaceLabelsRpc = defineRpc({
     durationMs: z.number(),
   }),
 });
+
+export const ImportedWorkspaceItemSchema = z.object({
+  inputPath: z.string(),
+  resolvedDirectory: z.string(),
+  workspaceId: z.string(),
+  workspaceName: z.string(),
+  projectId: z.string().nullable(),
+  alreadyExisted: z.boolean(),
+  created: z.boolean(),
+  fromFileParent: z.boolean(),
+  error: z.string().nullable(),
+});
+
+export type ImportedWorkspaceItem = z.infer<typeof ImportedWorkspaceItemSchema>;
+
+export const importFolderWorkspaceRpc = defineRpc({
+  name: "finder.import_folder_workspace",
+  input: z.object({
+    paths: z.array(z.string()).min(1),
+    mode: SidebarDropBehaviorSchema.optional(),
+    dryRun: z.boolean().optional(),
+    title: z.string().optional(),
+    source: z.enum(["sidebar-drop", "ui", "slash-command", "agent-tool"]).optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    disabled: z.boolean().optional(),
+    mode: SidebarDropBehaviorSchema,
+    dryRun: z.boolean(),
+    primaryWorkspaceId: z.string(),
+    primaryProjectId: z.string().nullable(),
+    primaryDirectory: z.string(),
+    primaryWorkspaceName: z.string(),
+    createdCount: z.number(),
+    reusedCount: z.number(),
+    items: z.array(ImportedWorkspaceItemSchema),
+    message: z.string(),
+    durationMs: z.number(),
+    recentActions: z.array(ActionLogEntrySchema),
+  }),
+});
+
 

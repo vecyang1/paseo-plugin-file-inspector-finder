@@ -9,6 +9,7 @@ import {
   SUPPORTED_IMAGE_EXTENSIONS,
   type WorkspaceLabelColor,
   diagnosePathRpc,
+  importFolderWorkspaceRpc,
   inspectFileRpc,
   listWorkspaceMediaRpc,
   manageWorkspaceLabelsRpc,
@@ -21,6 +22,7 @@ import {
   type DaemonLabelBridge,
   buildCandidatePaths,
   handleDiagnosePath,
+  handleImportFolderWorkspace,
   handleInspectFile,
   handleListWorkspaceMedia,
   handleManageWorkspaceLabels,
@@ -30,13 +32,19 @@ import {
 } from "../server/handlers";
 import {
   type MinimalDocument,
+  type MinimalDragEvent,
   type MinimalElement,
+  type MinimalWindow,
   decodeTabCloseTestId,
+  extractDroppedFilePaths,
   extractFilePathFromCopyMenuItem,
   extractFilePathFromElement,
   findActiveFileTabPath,
+  focusWorkspaceInApp,
   injectIntoNativeTabMenus,
+  isExternalFileDragEvent,
   isInsideFileExplorer,
+  isInsideSidebarDropZone,
   isInsideWorkspaceHeaderTitle,
   isInsideWorkspaceTab,
   syncImagePanelAssociations,
@@ -96,6 +104,7 @@ test("1. Contracts & RPC method names strictly obey @getpaseo/plugin lowercase r
     diagnosePathRpc,
     renameWorkspaceOrAgentRpc,
     manageWorkspaceLabelsRpc,
+    importFolderWorkspaceRpc,
   ]) {
     assert.match(rpc.name, rpcRegex, `RPC name ${rpc.name} must be lowercase`);
   }
@@ -603,4 +612,234 @@ test("10. Thread rename & workspace label management RPCs + header double-click 
   assert.equal(updateRes.ok, true);
   assert.deepEqual(updateRes.assignedLabels, ["⭐️", "feature"]);
 });
+
+test("11. Sidebar folder drag & drop workspace import: creates if not yet existed, reuses if already existed, resolves file parent, and supports Option+Drop force-new & dry-run", async () => {
+  const tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-folder-drop-"));
+  const folderA = path.join(tmpParent, "2026-11-08 Design Systems");
+  const folderB = path.join(tmpParent, "2026-11-08 Meta harness");
+  await fs.mkdir(folderA, { recursive: true });
+  await fs.mkdir(folderB, { recursive: true });
+  const fileInA = path.join(folderA, "README.md");
+  await fs.writeFile(fileInA, "# Design Systems\n");
+
+  try {
+    const activeWorkspaces: Array<{
+      id: string;
+      name: string;
+      title?: string | null;
+      projectId: string;
+      workspaceDirectory: string;
+    }> = [];
+    let counter = 1;
+
+    const mockCtx = {
+      paseo: {
+        workspaces: {
+          list: async () => ({
+            entries: [...activeWorkspaces],
+          }),
+          open: async (cwd: string) => {
+            const norm = path.resolve(cwd);
+            const found = activeWorkspaces.find(
+              (w) => path.resolve(w.workspaceDirectory) === norm,
+            );
+            if (found) {
+              return {
+                id: found.id,
+                name: found.name,
+                projectId: found.projectId,
+                directory: found.workspaceDirectory,
+                setTitle: async (t: string | null) => {
+                  found.title = t;
+                  return { title: t };
+                },
+              };
+            }
+            const id = `wks_new_${counter++}`;
+            const entry = {
+              id,
+              name: path.basename(norm),
+              title: null as string | null,
+              projectId: `prj_${counter}`,
+              workspaceDirectory: norm,
+            };
+            activeWorkspaces.push(entry);
+            return {
+              id: entry.id,
+              name: entry.name,
+              projectId: entry.projectId,
+              directory: entry.workspaceDirectory,
+              setTitle: async (t: string | null) => {
+                entry.title = t;
+                return { title: t };
+              },
+            };
+          },
+          create: async (opts: { source: { path: string }; title?: string }) => {
+            const norm = path.resolve(opts.source.path);
+            const id = `wks_forced_${counter++}`;
+            const entry = {
+              id,
+              name: opts.title ?? path.basename(norm),
+              title: opts.title ?? null,
+              projectId: `prj_${counter}`,
+              workspaceDirectory: norm,
+            };
+            activeWorkspaces.push(entry);
+            return {
+              id: entry.id,
+              name: entry.name,
+              projectId: entry.projectId,
+              directory: entry.workspaceDirectory,
+              setTitle: async (t: string | null) => {
+                entry.title = t;
+                return { title: t };
+              },
+            };
+          },
+        },
+      },
+    } as never;
+
+    // 1) Dry-run before folderA exists -> predicts creation without mutating state
+    const preCheck = await handleImportFolderWorkspace(
+      { paths: [folderA], dryRun: true, source: "ui" },
+      mockCtx,
+    );
+    assert.equal(preCheck.ok, true);
+    assert.equal(preCheck.dryRun, true);
+    assert.equal(preCheck.createdCount, 1);
+    assert.equal(preCheck.reusedCount, 0);
+    assert.equal(activeWorkspaces.length, 0);
+
+    // 2) First drop of folderA -> creates workspace ("if not yet existed")
+    const firstDrop = await handleImportFolderWorkspace(
+      { paths: [folderA], source: "sidebar-drop" },
+      mockCtx,
+    );
+    assert.equal(firstDrop.ok, true);
+    assert.equal(firstDrop.createdCount, 1);
+    assert.equal(firstDrop.reusedCount, 0);
+    assert.equal(firstDrop.items[0].created, true);
+    assert.equal(firstDrop.items[0].alreadyExisted, false);
+    assert.equal(firstDrop.primaryWorkspaceName, "2026-11-08 Design Systems");
+    assert.equal(activeWorkspaces.length, 1);
+
+    // 3) Second drop of folderA -> reuses existing workspace without duplicating!
+    const secondDrop = await handleImportFolderWorkspace(
+      { paths: [folderA], source: "sidebar-drop" },
+      mockCtx,
+    );
+    assert.equal(secondDrop.ok, true);
+    assert.equal(secondDrop.createdCount, 0);
+    assert.equal(secondDrop.reusedCount, 1);
+    assert.equal(secondDrop.items[0].created, false);
+    assert.equal(secondDrop.items[0].alreadyExisted, true);
+    assert.equal(secondDrop.primaryWorkspaceId, firstDrop.primaryWorkspaceId);
+    assert.equal(activeWorkspaces.length, 1);
+
+    // 4) Dropping a file inside folderA -> resolves parent directory & reuses folderA's workspace
+    const fileDrop = await handleImportFolderWorkspace(
+      { paths: [fileInA], source: "sidebar-drop" },
+      mockCtx,
+    );
+    assert.equal(fileDrop.ok, true);
+    assert.equal(fileDrop.items[0].fromFileParent, true);
+    assert.equal(fileDrop.reusedCount, 1);
+    assert.equal(fileDrop.primaryWorkspaceId, firstDrop.primaryWorkspaceId);
+
+    // 5) Option+Drop (mode: "always-create") -> forces a second fresh workspace thread
+    const forceNewDrop = await handleImportFolderWorkspace(
+      { paths: [folderA], mode: "always-create", source: "sidebar-drop" },
+      mockCtx,
+    );
+    assert.equal(forceNewDrop.ok, true);
+    assert.equal(forceNewDrop.createdCount, 1);
+    assert.notEqual(forceNewDrop.primaryWorkspaceId, firstDrop.primaryWorkspaceId);
+    assert.equal(activeWorkspaces.length, 2);
+
+    // 6) Respects enableSidebarFolderDrop=false in settings
+    const disabledDrop = await handleImportFolderWorkspace(
+      { paths: [folderB], source: "sidebar-drop" },
+      mockCtx,
+      {
+        readSettings: async () => ({
+          status: "ready",
+          values: {
+            enableSidebarFolderDrop: false,
+            sidebarDropDefaultBehavior: "open-or-create",
+          },
+        }),
+      },
+    );
+    assert.equal(disabledDrop.ok, false);
+    assert.equal(disabledDrop.disabled, true);
+    assert.equal(activeWorkspaces.length, 2);
+  } finally {
+    await fs.rm(tmpParent, { recursive: true, force: true });
+  }
+});
+
+test("12. Sidebar drop zone boundaries, Electron webUtils path extraction, and workspace row focus", () => {
+  let clickedRowId = "";
+  const sidebarWsRow: MinimalElement = {
+    getAttribute: (n) => (n === "data-testid" ? "sidebar-workspace-row-local:wks_design" : null),
+    click: () => {
+      clickedRowId = "wks_design";
+    },
+  };
+  const composerNode: MinimalElement = {
+    getAttribute: (n) => (n === "data-testid" ? "chat-composer-dropzone" : null),
+  };
+  const mockDoc: MinimalDocument = {
+    createElement: () => ({}),
+    querySelector: () => null,
+    querySelectorAll: (sel) =>
+      sel.includes("sidebar-workspace-row-") ? [sidebarWsRow] : [],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  assert.equal(isInsideSidebarDropZone(sidebarWsRow, mockDoc), true);
+  assert.equal(isInsideSidebarDropZone(composerNode, mockDoc), false);
+
+  const finderDrag: MinimalDragEvent = {
+    target: sidebarWsRow,
+    dataTransfer: {
+      types: ["Files"],
+      files: [{ name: "2026-11-08 Design Systems" }],
+    },
+    preventDefault: () => {},
+    stopPropagation: () => {},
+  };
+  assert.equal(isExternalFileDragEvent(finderDrag), true);
+
+  const internalDrag: MinimalDragEvent = {
+    target: sidebarWsRow,
+    dataTransfer: {
+      types: ["application/x-paseo-workspace-file", "Files"],
+    },
+    preventDefault: () => {},
+    stopPropagation: () => {},
+  };
+  assert.equal(isExternalFileDragEvent(internalDrag), false);
+
+  const mockWin: MinimalWindow = {
+    paseoDesktop: {
+      webUtils: {
+        getPathForFile: () => "/Users/dev/Projects/2026-11-08 Design Systems",
+      },
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  assert.deepEqual(extractDroppedFilePaths(finderDrag, mockWin), [
+    "/Users/dev/Projects/2026-11-08 Design Systems",
+  ]);
+
+  assert.equal(focusWorkspaceInApp("wks_design", null, mockDoc, mockWin), true);
+  assert.equal(clickedRowId, "wks_design");
+});
+
 

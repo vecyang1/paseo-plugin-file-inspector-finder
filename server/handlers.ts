@@ -6,12 +6,15 @@ import * as path from "node:path";
 import {
   type ActionLogEntry,
   type FileMetadata,
+  type ImportedWorkspaceItem,
   type OpenerTarget,
+  type SidebarDropBehavior,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
   type WorkspaceLabelEntry,
   type diagnosePathRpc,
+  type importFolderWorkspaceRpc,
   type inspectFileRpc,
   type listWorkspaceMediaRpc,
   type manageWorkspaceLabelsRpc,
@@ -949,4 +952,304 @@ export async function handleManageWorkspaceLabels(
     };
   }
 }
+
+export interface ImportFolderWorkspaceOptions {
+  readSettings?: () => Promise<
+    | {
+        status: "ready";
+        values: {
+          enableSidebarFolderDrop?: boolean;
+          sidebarDropDefaultBehavior?: SidebarDropBehavior;
+        };
+      }
+    | { status: "invalid"; error: string }
+  >;
+}
+
+export async function handleImportFolderWorkspace(
+  input: RpcInput<typeof importFolderWorkspaceRpc>,
+  context: PluginHandlerContext,
+  options?: ImportFolderWorkspaceOptions,
+) {
+  const startMs = Date.now();
+  const dryRun = Boolean(input.dryRun);
+  let defaultMode: SidebarDropBehavior = "open-or-create";
+
+  if (options?.readSettings) {
+    try {
+      const settingsState = await options.readSettings();
+      if (settingsState.status === "ready") {
+        if (settingsState.values.sidebarDropDefaultBehavior) {
+          defaultMode = settingsState.values.sidebarDropDefaultBehavior;
+        }
+        if (
+          input.source === "sidebar-drop" &&
+          settingsState.values.enableSidebarFolderDrop === false
+        ) {
+          const durationMs = Date.now() - startMs;
+          const msg = "Sidebar folder drag & drop is disabled in plugin settings";
+          return {
+            ok: false,
+            disabled: true,
+            mode: input.mode ?? defaultMode,
+            dryRun,
+            primaryWorkspaceId: "",
+            primaryProjectId: null,
+            primaryDirectory: "",
+            primaryWorkspaceName: "",
+            createdCount: 0,
+            reusedCount: 0,
+            items: [] as ImportedWorkspaceItem[],
+            message: msg,
+            durationMs,
+            recentActions: getRecentActionLogs(),
+          };
+        }
+      }
+    } catch {
+      // Fallback to defaults if settings state is unavailable
+    }
+  }
+
+  const mode: SidebarDropBehavior = input.mode ?? defaultMode;
+  const customTitle = input.title?.trim() || undefined;
+  const fallbackRoot = await resolveWorkspaceDirectory(context);
+
+  const existingByDir = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      title?: string | null;
+      projectId?: string | null;
+    }
+  >();
+
+  try {
+    const existingList = await context.paseo.workspaces.list();
+    for (const entry of existingList.entries) {
+      if (!entry.workspaceDirectory) continue;
+      const normDir = path.resolve(expandHome(entry.workspaceDirectory));
+      if (!existingByDir.has(normDir)) {
+        existingByDir.set(normDir, {
+          id: entry.id,
+          name: entry.name,
+          title: (entry as { title?: string | null }).title ?? null,
+          projectId: (entry as { projectId?: string | null }).projectId ?? null,
+        });
+      }
+    }
+  } catch {
+    // Non-fatal if workspace listing fails
+  }
+
+  const items: ImportedWorkspaceItem[] = [];
+  const seenDirectories = new Set<string>();
+  let createdCount = 0;
+  let reusedCount = 0;
+
+  for (const rawInputPath of input.paths) {
+    const cleaned = stripLineSuffix(expandHome(rawInputPath));
+    if (!cleaned) continue;
+
+    const absCandidate = path.isAbsolute(cleaned)
+      ? path.resolve(cleaned)
+      : path.resolve(fallbackRoot, cleaned);
+
+    let targetDir = absCandidate;
+    let fromFileParent = false;
+
+    try {
+      const stat = await fs.stat(absCandidate);
+      if (!stat.isDirectory()) {
+        targetDir = path.dirname(absCandidate);
+        fromFileParent = true;
+      }
+    } catch (err) {
+      items.push({
+        inputPath: rawInputPath,
+        resolvedDirectory: absCandidate,
+        workspaceId: "",
+        workspaceName: path.basename(absCandidate) || absCandidate,
+        projectId: null,
+        alreadyExisted: false,
+        created: false,
+        fromFileParent: false,
+        error: err instanceof Error ? err.message : `Directory not found: ${absCandidate}`,
+      });
+      continue;
+    }
+
+    if (seenDirectories.has(targetDir)) {
+      continue;
+    }
+    seenDirectories.add(targetDir);
+
+    const existing = existingByDir.get(targetDir);
+    const folderBaseName = path.basename(targetDir) || targetDir;
+
+    if (dryRun) {
+      const willReuse = Boolean(existing) && mode === "open-or-create";
+      if (willReuse && existing) {
+        reusedCount += 1;
+        items.push({
+          inputPath: rawInputPath,
+          resolvedDirectory: targetDir,
+          workspaceId: existing.id,
+          workspaceName:
+            existing.title ||
+            (existing.name && existing.name !== "main" && existing.name !== "master"
+              ? existing.name
+              : folderBaseName),
+          projectId: existing.projectId ?? null,
+          alreadyExisted: true,
+          created: false,
+          fromFileParent,
+          error: null,
+        });
+      } else {
+        createdCount += 1;
+        items.push({
+          inputPath: rawInputPath,
+          resolvedDirectory: targetDir,
+          workspaceId: existing?.id ? `${existing.id} (will create new)` : "(will create)",
+          workspaceName: customTitle || folderBaseName,
+          projectId: existing?.projectId ?? null,
+          alreadyExisted: Boolean(existing),
+          created: true,
+          fromFileParent,
+          error: null,
+        });
+      }
+      continue;
+    }
+
+    try {
+      if (mode === "always-create") {
+        const createdHandle = await context.paseo.workspaces.create({
+          source: { kind: "directory", path: targetDir },
+          ...(customTitle ? { title: customTitle } : {}),
+        });
+        createdCount += 1;
+        const rawCreatedName = createdHandle.name ?? "";
+        const resolvedName =
+          customTitle ||
+          (rawCreatedName && rawCreatedName !== "main" && rawCreatedName !== "master"
+            ? rawCreatedName
+            : folderBaseName);
+        items.push({
+          inputPath: rawInputPath,
+          resolvedDirectory: targetDir,
+          workspaceId: createdHandle.id,
+          workspaceName: resolvedName,
+          projectId: createdHandle.projectId ?? existing?.projectId ?? null,
+          alreadyExisted: Boolean(existing),
+          created: true,
+          fromFileParent,
+          error: null,
+        });
+        existingByDir.set(targetDir, {
+          id: createdHandle.id,
+          name: resolvedName,
+          title: customTitle ?? null,
+          projectId: createdHandle.projectId ?? null,
+        });
+      } else {
+        const openedHandle = await context.paseo.workspaces.open(targetDir);
+        const wasAlreadyActive = Boolean(existing && existing.id === openedHandle.id);
+        if (!wasAlreadyActive && customTitle) {
+          await openedHandle.setTitle(customTitle).catch(() => {});
+        }
+        if (wasAlreadyActive) {
+          reusedCount += 1;
+        } else {
+          createdCount += 1;
+        }
+        const rawOpenedName = openedHandle.name || existing?.name || "";
+        const resolvedName =
+          (!wasAlreadyActive && customTitle) ||
+          existing?.title ||
+          (rawOpenedName && rawOpenedName !== "main" && rawOpenedName !== "master"
+            ? rawOpenedName
+            : folderBaseName);
+        items.push({
+          inputPath: rawInputPath,
+          resolvedDirectory: targetDir,
+          workspaceId: openedHandle.id,
+          workspaceName: resolvedName,
+          projectId: openedHandle.projectId ?? existing?.projectId ?? null,
+          alreadyExisted: wasAlreadyActive,
+          created: !wasAlreadyActive,
+          fromFileParent,
+          error: null,
+        });
+        existingByDir.set(targetDir, {
+          id: openedHandle.id,
+          name: resolvedName,
+          title: customTitle ?? existing?.title ?? null,
+          projectId: openedHandle.projectId ?? existing?.projectId ?? null,
+        });
+      }
+    } catch (err) {
+      items.push({
+        inputPath: rawInputPath,
+        resolvedDirectory: targetDir,
+        workspaceId: "",
+        workspaceName: folderBaseName,
+        projectId: null,
+        alreadyExisted: Boolean(existing),
+        created: false,
+        fromFileParent,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const succeededItems = items.filter((item) => !item.error && Boolean(item.workspaceId));
+  const primary = succeededItems[succeededItems.length - 1] ?? items[0];
+  const ok = succeededItems.length > 0;
+  const durationMs = Date.now() - startMs;
+
+  let message: string;
+  if (!ok) {
+    message = items[0]?.error ?? "No valid directories provided to import";
+  } else if (dryRun) {
+    if (primary.alreadyExisted && mode === "open-or-create") {
+      message = `Dry-run: workspace already exists for "${primary.workspaceName}" (${primary.workspaceId}) — will switch without duplicating`;
+    } else {
+      message = `Dry-run: will create new workspace for "${primary.workspaceName}" (${primary.resolvedDirectory})`;
+    }
+  } else if (succeededItems.length === 1) {
+    message = primary.created
+      ? `Created workspace "${primary.workspaceName}" (${primary.workspaceId})`
+      : `Switched to existing workspace "${primary.workspaceName}" (${primary.workspaceId})`;
+  } else {
+    message = `Imported ${succeededItems.length} workspaces (${createdCount} created, ${reusedCount} existing)`;
+  }
+
+  recordActionLog({
+    target: "workspace-import",
+    resolvedPath: primary?.resolvedDirectory ?? input.paths[0] ?? "",
+    ok,
+    durationMs,
+    message,
+  });
+
+  return {
+    ok,
+    mode,
+    dryRun,
+    primaryWorkspaceId: primary?.workspaceId ?? "",
+    primaryProjectId: primary?.projectId ?? null,
+    primaryDirectory: primary?.resolvedDirectory ?? "",
+    primaryWorkspaceName: primary?.workspaceName ?? "",
+    createdCount,
+    reusedCount,
+    items,
+    message,
+    durationMs,
+    recentActions: getRecentActionLogs(),
+  };
+}
+
 

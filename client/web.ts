@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import {
   type OpenerTarget,
+  type SidebarDropBehavior,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
@@ -47,11 +48,39 @@ export interface MinimalElement {
   insertBefore?(newNode: MinimalElement, referenceNode: MinimalElement | null): void;
   cloneNode?(deep?: boolean): MinimalElement;
   remove?(): void;
+  click?(): void;
   focus?(): void;
   select?(): void;
+  getBoundingClientRect?(): {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  };
   addEventListener?(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener?(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   contains?(other: MinimalElement | null): boolean;
+}
+
+export interface MinimalDataTransfer {
+  types?: ArrayLike<string>;
+  files?: ArrayLike<{ path?: string; name?: string }>;
+  dropEffect?: string;
+  effectAllowed?: string;
+  getData?(format: string): string;
+}
+
+export interface MinimalDragEvent {
+  clientX?: number;
+  clientY?: number;
+  altKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  target: MinimalElement | null;
+  relatedTarget?: MinimalElement | null;
+  dataTransfer?: MinimalDataTransfer | null;
+  preventDefault(): void;
+  stopPropagation(): void;
 }
 
 export interface MinimalMouseEvent {
@@ -87,10 +116,19 @@ export interface MinimalDocument {
   dispatchEvent?(event: unknown): boolean;
 }
 
-interface MinimalWindow {
+export interface MinimalWindow {
   localStorage?: MinimalStorage;
   document?: MinimalDocument;
   navigator?: { language?: string };
+  location?: { pathname?: string };
+  history?: {
+    pushState?(data: unknown, unused: string, url?: string | null): void;
+  };
+  paseoDesktop?: {
+    webUtils?: {
+      getPathForFile?(file: unknown): string;
+    };
+  };
   innerWidth?: number;
   innerHeight?: number;
   MutationObserver?: new (callback: () => void) => {
@@ -98,6 +136,7 @@ interface MinimalWindow {
     disconnect(): void;
   };
   KeyboardEvent?: new (type: string, init?: Record<string, unknown>) => unknown;
+  PopStateEvent?: new (type: string, init?: Record<string, unknown>) => unknown;
   requestAnimationFrame?(cb: () => void): number;
   addEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
@@ -110,16 +149,64 @@ function getWebWindow(): MinimalWindow | null {
   return g.window ?? null;
 }
 
-const LUCIDE_SVGS: Record<"FolderOpen" | "Folder" | "ExternalLink" | "Copy", string> = {
+const LUCIDE_SVGS: Record<
+  "FolderOpen" | "Folder" | "FolderPlus" | "ExternalLink" | "Copy",
+  string
+> = {
   FolderOpen:
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>',
   Folder:
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>',
+  FolderPlus:
+    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>',
   ExternalLink:
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
   Copy:
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
 };
+
+const SIDEBAR_DROP_STORAGE_KEY = "paseo:finder-plugin:sidebar-drop-config";
+
+export function syncSidebarDropPreferences(
+  enabled: boolean,
+  defaultBehavior: SidebarDropBehavior = "open-or-create",
+): void {
+  if (Platform.OS !== "web") return;
+  const storage = getWebWindow()?.localStorage;
+  if (!storage) return;
+  try {
+    storage.setItem(
+      SIDEBAR_DROP_STORAGE_KEY,
+      JSON.stringify({ enabled, defaultBehavior }),
+    );
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
+export function readSidebarDropPreferences(storage?: MinimalStorage | null): {
+  enabled: boolean;
+  defaultBehavior: SidebarDropBehavior;
+} {
+  if (!storage) {
+    return { enabled: true, defaultBehavior: "open-or-create" };
+  }
+  try {
+    const raw = storage.getItem(SIDEBAR_DROP_STORAGE_KEY);
+    if (!raw) return { enabled: true, defaultBehavior: "open-or-create" };
+    const parsed = JSON.parse(raw) as {
+      enabled?: unknown;
+      defaultBehavior?: unknown;
+    };
+    return {
+      enabled: parsed.enabled !== false,
+      defaultBehavior:
+        parsed.defaultBehavior === "always-create" ? "always-create" : "open-or-create",
+    };
+  } catch {
+    return { enabled: true, defaultBehavior: "open-or-create" };
+  }
+}
 
 export function syncImagePanelAssociations(
   pluginId: string,
@@ -336,6 +423,16 @@ export interface ThreadMetadataSnapshot {
   catalog: Array<{ name: string; color: WorkspaceLabelColor }>;
 }
 
+export interface FolderDropResultSummary {
+  ok: boolean;
+  primaryWorkspaceId: string;
+  primaryProjectId: string | null;
+  primaryWorkspaceName: string;
+  createdCount: number;
+  reusedCount: number;
+  message: string;
+}
+
 export interface DesktopRevealHelperCallbacks {
   isEnabled(): boolean;
   getLocale?(): string;
@@ -347,6 +444,271 @@ export interface DesktopRevealHelperCallbacks {
     labelName: string,
     color?: WorkspaceLabelColor,
   ): Promise<ThreadMetadataSnapshot | null>;
+  onDropFolders?(
+    paths: string[],
+    options: { forceNew: boolean },
+  ): Promise<FolderDropResultSummary | null>;
+}
+
+const PASEO_INTERNAL_FILE_DRAG_MIME = "application/x-paseo-workspace-file";
+
+export function findLeftSidebarContainer(
+  doc: MinimalDocument,
+  target?: MinimalElement | null,
+): MinimalElement | null {
+  let curr: MinimalElement | null = target ?? null;
+  for (let depth = 0; curr && depth < 12; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+    if (testId === "open-project-submit") {
+      return curr;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  const footer = doc.querySelector('[data-testid="sidebar-footer"]');
+  if (footer?.parentElement) {
+    return footer.parentElement;
+  }
+  return doc.querySelector('[data-testid="sidebar-project-list"]');
+}
+
+export function isInsideComposerOrTerminal(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 14; depth += 1) {
+    const testId = (curr.getAttribute?.("data-testid") ?? "").toLowerCase();
+    const cls = (curr.className ?? "").toLowerCase();
+    if (
+      testId.includes("composer") ||
+      testId.includes("terminal") ||
+      cls.includes("xterm")
+    ) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export function isInsideSidebarDropZone(
+  el: MinimalElement | null,
+  doc: MinimalDocument,
+): boolean {
+  if (!el) return false;
+  if (
+    isInsideWorkspaceTab(el) ||
+    isInsideFileExplorer(el) ||
+    isInsideComposerOrTerminal(el)
+  ) {
+    return false;
+  }
+
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 16; depth += 1) {
+    const testId = curr.getAttribute?.("data-testid") ?? "";
+    if (
+      testId.startsWith("sidebar-") ||
+      testId === "left-sidebar-resize-handle" ||
+      testId === "open-project-submit" ||
+      testId.startsWith("open-project-")
+    ) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+
+  const sidebarRoot = findLeftSidebarContainer(doc);
+  if (sidebarRoot?.contains?.(el)) {
+    return true;
+  }
+  return false;
+}
+
+export function isExternalFileDragEvent(ev: MinimalDragEvent): boolean {
+  const rawTypes = ev.dataTransfer?.types;
+  if (!rawTypes) return false;
+  let hasFiles = false;
+  let hasFileUri = false;
+  for (let i = 0; i < rawTypes.length; i += 1) {
+    const t = rawTypes[i];
+    if (t === PASEO_INTERNAL_FILE_DRAG_MIME) {
+      return false;
+    }
+    if (t === "Files") {
+      hasFiles = true;
+    }
+    if (t === "text/uri-list") {
+      hasFileUri = true;
+    }
+  }
+  return hasFiles || hasFileUri;
+}
+
+function parseFileUriLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  if (trimmed.startsWith("file://")) {
+    try {
+      return decodeURIComponent(new URL(trimmed).pathname);
+    } catch {
+      return trimmed.slice("file://".length);
+    }
+  }
+  if (trimmed.startsWith("/") || trimmed.startsWith("~/")) {
+    return trimmed;
+  }
+  return null;
+}
+
+export function extractDroppedFilePaths(
+  ev: MinimalDragEvent,
+  win?: MinimalWindow | null,
+): string[] {
+  const results: string[] = [];
+  const pushUnique = (p?: string | null) => {
+    const cleaned = (p ?? "").trim();
+    if (cleaned && !results.includes(cleaned)) {
+      results.push(cleaned);
+    }
+  };
+
+  const files = ev.dataTransfer?.files;
+  if (files) {
+    for (let i = 0; i < files.length; i += 1) {
+      const file = files[i];
+      if (!file) continue;
+      let resolved = "";
+      try {
+        resolved = win?.paseoDesktop?.webUtils?.getPathForFile?.(file) ?? "";
+      } catch {
+        resolved = "";
+      }
+      if (!resolved && typeof file.path === "string") {
+        resolved = file.path;
+      }
+      pushUnique(resolved);
+    }
+  }
+
+  if (results.length === 0 && ev.dataTransfer?.getData) {
+    for (const mime of ["text/uri-list", "text/plain"]) {
+      let raw = "";
+      try {
+        raw = ev.dataTransfer.getData(mime) ?? "";
+      } catch {
+        raw = "";
+      }
+      if (!raw) continue;
+      for (const line of raw.split(/\r?\n/)) {
+        pushUnique(parseFileUriLine(line));
+      }
+      if (results.length > 0) break;
+    }
+  }
+
+  return results;
+}
+
+function inferActiveServerId(doc: MinimalDocument, win?: MinimalWindow | null): string {
+  const pathname = win?.location?.pathname ?? "";
+  const routeMatch = pathname.match(/^\/h\/([^/]+)(?:\/|$)/);
+  if (routeMatch?.[1]) {
+    try {
+      return decodeURIComponent(routeMatch[1]);
+    } catch {
+      return routeMatch[1];
+    }
+  }
+  const sampleRow =
+    doc.querySelector('[data-testid^="sidebar-workspace-row-"]') ??
+    doc.querySelector('[data-testid^="sidebar-project-row-"]');
+  const testId = sampleRow?.getAttribute?.("data-testid") ?? "";
+  const rawKey = testId
+    .replace(/^sidebar-workspace-row-/, "")
+    .replace(/^sidebar-project-row-/, "");
+  const colonIdx = rawKey.indexOf(":");
+  if (colonIdx > 0) {
+    return rawKey.slice(0, colonIdx);
+  }
+  return "local";
+}
+
+export function focusWorkspaceInApp(
+  workspaceId: string,
+  projectId?: string | null,
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): boolean {
+  const cleanId = workspaceId.trim();
+  if (!cleanId) return false;
+  const win = winOverride ?? getWebWindow();
+  const doc = docOverride ?? win?.document ?? null;
+  if (!doc) return false;
+
+  const tryClickRowOnce = (allowExpandCollapsedProject: boolean): boolean => {
+    const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      const tid = row?.getAttribute?.("data-testid") ?? "";
+      if (tid.endsWith(`:${cleanId}`) || tid === `sidebar-workspace-row-${cleanId}`) {
+        row?.click?.();
+        return true;
+      }
+    }
+    if (allowExpandCollapsedProject && projectId) {
+      const lists = doc.querySelectorAll('[data-testid^="sidebar-workspace-list-"]');
+      let isExpanded = false;
+      for (let i = 0; i < lists.length; i += 1) {
+        const ltid = lists[i]?.getAttribute?.("data-testid") ?? "";
+        if (ltid.endsWith(`:${projectId}`)) {
+          isExpanded = true;
+          break;
+        }
+      }
+      if (!isExpanded) {
+        const projRows = doc.querySelectorAll('[data-testid^="sidebar-project-row-"]');
+        for (let i = 0; i < projRows.length; i += 1) {
+          const prow = projRows[i];
+          const ptid = prow?.getAttribute?.("data-testid") ?? "";
+          if (ptid.endsWith(`:${projectId}`)) {
+            prow?.click?.();
+            break;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  if (tryClickRowOnce(false)) {
+    return true;
+  }
+
+  let expandedTried = false;
+  const retryDelays = [70, 160, 300, 520, 820];
+  for (const delay of retryDelays) {
+    setTimeout(() => {
+      const currentPath = win?.location?.pathname ?? "";
+      if (currentPath.endsWith(`/workspace/${encodeURIComponent(cleanId)}`)) {
+        return;
+      }
+      const allowExpand = delay >= 160 && !expandedTried;
+      if (allowExpand) expandedTried = true;
+      const clicked = tryClickRowOnce(allowExpand);
+      if (!clicked && delay >= 520 && win?.history?.pushState) {
+        const serverId = inferActiveServerId(doc, win);
+        const route = `/h/${encodeURIComponent(serverId)}/workspace/${encodeURIComponent(cleanId)}`;
+        try {
+          win.history.pushState({}, "", route);
+          if (win.PopStateEvent) {
+            win.dispatchEvent?.(new win.PopStateEvent("popstate"));
+          }
+        } catch {
+          // Non-fatal fallback
+        }
+      }
+    }, delay);
+  }
+
+  return false;
 }
 
 function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): void {
@@ -1054,17 +1416,288 @@ export function installDesktopRevealHelpers(callbacks: DesktopRevealHelperCallba
     }
   };
 
+  let activeDropOverlayEl: MinimalElement | null = null;
+  let activeDropWatchdog: ReturnType<typeof setTimeout> | null = null;
+  let activeDropToastEl: MinimalElement | null = null;
+  let activeDropToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const hideSidebarDropOverlay = () => {
+    if (activeDropWatchdog) {
+      clearTimeout(activeDropWatchdog);
+      activeDropWatchdog = null;
+    }
+    if (activeDropOverlayEl) {
+      activeDropOverlayEl.remove?.();
+      activeDropOverlayEl = null;
+    }
+  };
+
+  const showDropReceiptToast = (text: string, isError = false) => {
+    if (!doc.body) return;
+    if (activeDropToastTimer) {
+      clearTimeout(activeDropToastTimer);
+      activeDropToastTimer = null;
+    }
+    if (activeDropToastEl) {
+      activeDropToastEl.remove?.();
+      activeDropToastEl = null;
+    }
+    const toastEl = doc.createElement("div");
+    toastEl.setAttribute?.("data-testid", "paseo-finder-folder-drop-toast");
+    toastEl.textContent = text;
+    if (toastEl.style) {
+      toastEl.style.position = "fixed";
+      toastEl.style.left = "16px";
+      toastEl.style.bottom = "16px";
+      toastEl.style.zIndex = "10000";
+      toastEl.style.maxWidth = "420px";
+      toastEl.style.padding = "8px 14px";
+      toastEl.style.borderRadius = "8px";
+      toastEl.style.backgroundColor = isError ? "#2c1518" : "#13221c";
+      toastEl.style.border = isError ? "1px solid #ef4444" : "1px solid #10b981";
+      toastEl.style.color = "#f3f4f6";
+      toastEl.style.fontSize = "12.5px";
+      toastEl.style.fontWeight = "500";
+      toastEl.style.boxShadow = "0 10px 28px rgba(0, 0, 0, 0.45)";
+      toastEl.style.pointerEvents = "none";
+      toastEl.style.fontFamily =
+        "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
+    }
+    doc.body.appendChild?.(toastEl);
+    activeDropToastEl = toastEl;
+    activeDropToastTimer = setTimeout(() => {
+      toastEl.remove?.();
+      if (activeDropToastEl === toastEl) {
+        activeDropToastEl = null;
+      }
+    }, 3200);
+  };
+
+  const showSidebarDropOverlay = (
+    target: MinimalElement | null,
+    forceNew: boolean,
+  ) => {
+    if (!doc.body) return;
+    const catalog = getCatalogForLocale(callbacks.getLocale?.() ?? win.navigator?.language);
+    const container = findLeftSidebarContainer(doc, target);
+    const rect = container?.getBoundingClientRect?.();
+
+    const left = rect && rect.width > 40 ? Math.max(4, Math.round(rect.left) + 6) : 8;
+    const top = rect && rect.height > 40 ? Math.max(4, Math.round(rect.top) + 6) : 38;
+    const width =
+      rect && rect.width > 40 ? Math.max(160, Math.round(rect.width) - 12) : 248;
+    const height =
+      rect && rect.height > 40
+        ? Math.max(80, Math.round(rect.height) - 12)
+        : Math.max(240, (win.innerHeight ?? 760) - 48);
+
+    const accentHex = forceNew ? "#f59e0b" : "#10b981";
+    const bgTint = forceNew
+      ? "rgba(245, 158, 11, 0.10)"
+      : "rgba(16, 185, 129, 0.10)";
+    const titleText = forceNew
+      ? catalog.actions.dropOverlayForceNewTitle
+      : catalog.actions.dropOverlayTitle;
+    const hintText = forceNew
+      ? catalog.actions.dropOverlayForceNewHint
+      : catalog.actions.dropOverlayHint;
+
+    if (!activeDropOverlayEl) {
+      const overlay = doc.createElement("div");
+      overlay.setAttribute?.("data-testid", "paseo-finder-sidebar-drop-overlay");
+      if (overlay.style) {
+        overlay.style.position = "fixed";
+        overlay.style.zIndex = "9998";
+        overlay.style.pointerEvents = "none";
+        overlay.style.borderRadius = "12px";
+        overlay.style.display = "flex";
+        overlay.style.flexDirection = "column";
+        overlay.style.alignItems = "center";
+        overlay.style.justifyContent = "center";
+        overlay.style.padding = "16px";
+        overlay.style.boxSizing = "border-box";
+        overlay.style.backdropFilter = "blur(3px)";
+        overlay.style.fontFamily =
+          "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
+      }
+
+      const card = doc.createElement("div");
+      if (card.style) {
+        card.style.backgroundColor = "rgba(17, 20, 19, 0.94)";
+        card.style.border = `1px solid ${accentHex}`;
+        card.style.borderRadius = "10px";
+        card.style.padding = "12px 14px";
+        card.style.display = "flex";
+        card.style.flexDirection = "column";
+        card.style.alignItems = "center";
+        card.style.gap = "6px";
+        card.style.textAlign = "center";
+        card.style.maxWidth = "230px";
+        card.style.boxShadow = "0 12px 30px rgba(0, 0, 0, 0.45)";
+      }
+
+      const iconWrap = doc.createElement("div");
+      iconWrap.innerHTML = LUCIDE_SVGS.FolderPlus;
+      if (iconWrap.style) {
+        iconWrap.style.color = accentHex;
+        iconWrap.style.display = "flex";
+        iconWrap.style.alignItems = "center";
+        iconWrap.style.justifyContent = "center";
+      }
+
+      const titleNode = doc.createElement("div");
+      titleNode.setAttribute?.("data-role", "drop-title");
+      if (titleNode.style) {
+        titleNode.style.color = "#f9fafb";
+        titleNode.style.fontSize = "12.5px";
+        titleNode.style.fontWeight = "600";
+        titleNode.style.lineHeight = "1.35";
+      }
+
+      const hintNode = doc.createElement("div");
+      hintNode.setAttribute?.("data-role", "drop-hint");
+      if (hintNode.style) {
+        hintNode.style.color = "#9ca3af";
+        hintNode.style.fontSize = "11px";
+        hintNode.style.lineHeight = "1.35";
+      }
+
+      card.appendChild?.(iconWrap);
+      card.appendChild?.(titleNode);
+      card.appendChild?.(hintNode);
+      overlay.appendChild?.(card);
+      doc.body.appendChild?.(overlay);
+      activeDropOverlayEl = overlay;
+    }
+
+    if (activeDropOverlayEl.style) {
+      activeDropOverlayEl.style.left = `${left}px`;
+      activeDropOverlayEl.style.top = `${top}px`;
+      activeDropOverlayEl.style.width = `${width}px`;
+      activeDropOverlayEl.style.height = `${height}px`;
+      activeDropOverlayEl.style.border = `2px dashed ${accentHex}`;
+      activeDropOverlayEl.style.backgroundColor = bgTint;
+    }
+
+    const titleEl = activeDropOverlayEl.querySelector?.('[data-role="drop-title"]');
+    if (titleEl) titleEl.textContent = titleText;
+    const hintEl = activeDropOverlayEl.querySelector?.('[data-role="drop-hint"]');
+    if (hintEl) hintEl.textContent = hintText;
+
+    if (activeDropWatchdog) {
+      clearTimeout(activeDropWatchdog);
+    }
+    activeDropWatchdog = setTimeout(() => {
+      hideSidebarDropOverlay();
+    }, 240);
+  };
+
+  const canHandleSidebarFolderDrop = (de: MinimalDragEvent): boolean => {
+    if (!callbacks.isEnabled() || !callbacks.onDropFolders) return false;
+    const prefs = readSidebarDropPreferences(win.localStorage);
+    if (!prefs.enabled) return false;
+    if (!isExternalFileDragEvent(de)) return false;
+    return isInsideSidebarDropZone(de.target, doc);
+  };
+
+  const onDragEnterOrOver = (ev: unknown) => {
+    const de = ev as MinimalDragEvent;
+    if (!canHandleSidebarFolderDrop(de)) {
+      hideSidebarDropOverlay();
+      return;
+    }
+    de.preventDefault();
+    de.stopPropagation();
+    if (de.dataTransfer) {
+      de.dataTransfer.dropEffect = "copy";
+    }
+    const prefs = readSidebarDropPreferences(win.localStorage);
+    const forceNew = Boolean(de.altKey) || prefs.defaultBehavior === "always-create";
+    showSidebarDropOverlay(de.target, forceNew);
+  };
+
+  const onDragLeave = (ev: unknown) => {
+    const de = ev as MinimalDragEvent;
+    if (!de.relatedTarget || !isInsideSidebarDropZone(de.relatedTarget, doc)) {
+      hideSidebarDropOverlay();
+    }
+  };
+
+  const onDropCapture = (ev: unknown) => {
+    const de = ev as MinimalDragEvent;
+    if (!canHandleSidebarFolderDrop(de)) {
+      hideSidebarDropOverlay();
+      return;
+    }
+    de.preventDefault();
+    de.stopPropagation();
+    hideSidebarDropOverlay();
+
+    const droppedPaths = extractDroppedFilePaths(de, win);
+    if (droppedPaths.length === 0 || !callbacks.onDropFolders) {
+      return;
+    }
+
+    const prefs = readSidebarDropPreferences(win.localStorage);
+    const forceNew = Boolean(de.altKey) || prefs.defaultBehavior === "always-create";
+    const catalog = getCatalogForLocale(callbacks.getLocale?.() ?? win.navigator?.language);
+
+    void callbacks
+      .onDropFolders(droppedPaths, { forceNew })
+      .then((res) => {
+        if (!res) return;
+        if (!res.ok) {
+          showDropReceiptToast(res.message, true);
+          return;
+        }
+        if (res.primaryWorkspaceId) {
+          focusWorkspaceInApp(res.primaryWorkspaceId, res.primaryProjectId, doc, win);
+        }
+        if (res.createdCount + res.reusedCount > 1) {
+          showDropReceiptToast(
+            `${catalog.actions.workspaceImportedBatchToast}: ${res.primaryWorkspaceName} (+${res.createdCount + res.reusedCount - 1})`,
+          );
+        } else if (res.createdCount > 0) {
+          showDropReceiptToast(
+            `${catalog.actions.workspaceCreatedToast}: ${res.primaryWorkspaceName}`,
+          );
+        } else {
+          showDropReceiptToast(
+            `${catalog.actions.workspaceReusedToast}: ${res.primaryWorkspaceName}`,
+          );
+        }
+      })
+      .catch((err) => {
+        showDropReceiptToast(err instanceof Error ? err.message : String(err), true);
+      });
+  };
+
   doc.addEventListener("click", onClickCapture, true);
   doc.addEventListener("dblclick", onDblClickCapture, true);
   doc.addEventListener("contextmenu", onContextMenuCapture, true);
+  doc.addEventListener("dragenter", onDragEnterOrOver, true);
+  doc.addEventListener("dragover", onDragEnterOrOver, true);
+  doc.addEventListener("dragleave", onDragLeave, true);
+  doc.addEventListener("dragend", hideSidebarDropOverlay, true);
+  doc.addEventListener("drop", onDropCapture, true);
   win.addEventListener("keydown", onKeyDownCapture, true);
+  win.addEventListener("blur", hideSidebarDropOverlay, false);
 
   return () => {
     removeMenu();
+    hideSidebarDropOverlay();
+    if (activeDropToastTimer) clearTimeout(activeDropToastTimer);
+    activeDropToastEl?.remove?.();
     observer?.disconnect();
     doc.removeEventListener("click", onClickCapture, true);
     doc.removeEventListener("dblclick", onDblClickCapture, true);
     doc.removeEventListener("contextmenu", onContextMenuCapture, true);
+    doc.removeEventListener("dragenter", onDragEnterOrOver, true);
+    doc.removeEventListener("dragover", onDragEnterOrOver, true);
+    doc.removeEventListener("dragleave", onDragLeave, true);
+    doc.removeEventListener("dragend", hideSidebarDropOverlay, true);
+    doc.removeEventListener("drop", onDropCapture, true);
     win.removeEventListener("keydown", onKeyDownCapture, true);
+    win.removeEventListener("blur", hideSidebarDropOverlay, false);
   };
 }
