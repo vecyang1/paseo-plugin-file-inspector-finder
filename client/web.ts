@@ -848,13 +848,7 @@ export interface ActiveInlineRenameSession {
 
 function ensureInlineRenameStyleTag(doc: MinimalDocument, win?: MinimalWindow | null): void {
   syncPaseoThemeCssVariables(doc, win);
-  const existing = doc.querySelector('style[data-paseo-finder-inline-rename-style="true"]');
-  if (existing) return;
-  const host = doc.head ?? doc.documentElement ?? doc.body;
-  if (!host?.appendChild) return;
-  const styleEl = doc.createElement("style");
-  styleEl.setAttribute?.("data-paseo-finder-inline-rename-style", "true");
-  styleEl.textContent = `
+  const cssContent = `
 [data-paseo-inline-rename-hidden="true"] {
   display: none !important;
 }
@@ -883,7 +877,38 @@ input[data-testid="paseo-finder-inline-rename-input"]::selection {
 input[data-testid="paseo-finder-quick-jump-input"]::placeholder {
   color: var(--paseo-finder-fg-muted, #71717a);
 }
+@keyframes paseoFinderSidebarArrivalPulse {
+  0% {
+    box-shadow: inset 2px 0 0 0 var(--paseo-finder-running, #268ae0);
+  }
+  100% {
+    box-shadow: inset 2px 0 0 0 transparent;
+  }
+}
+[data-paseo-workspace-jump-flash="true"],
+[data-paseo-project-jump-flash="true"] {
+  animation: paseoFinderSidebarArrivalPulse 1.1s ease-out forwards;
+  outline: none !important;
+}
+[data-testid^="sidebar-workspace-row-"]:focus,
+[data-testid^="sidebar-workspace-row-"]:focus-visible,
+[data-testid^="sidebar-project-row-"]:focus,
+[data-testid^="sidebar-project-row-"]:focus-visible {
+  outline: none !important;
+}
 `;
+  const existing = doc.querySelector('style[data-paseo-finder-inline-rename-style="true"]');
+  if (existing) {
+    if (!(existing.textContent ?? "").includes("paseoFinderSidebarArrivalPulse")) {
+      existing.textContent = cssContent;
+    }
+    return;
+  }
+  const host = doc.head ?? doc.documentElement ?? doc.body;
+  if (!host?.appendChild) return;
+  const styleEl = doc.createElement("style");
+  styleEl.setAttribute?.("data-paseo-finder-inline-rename-style", "true");
+  styleEl.textContent = cssContent;
   host.appendChild(styleEl);
 }
 
@@ -1473,6 +1498,48 @@ function inferActiveServerId(doc: MinimalDocument, win?: MinimalWindow | null): 
   return "local";
 }
 
+const activeSidebarFlashTimers = new Set<ReturnType<typeof setTimeout>>();
+
+export function clearSidebarJumpFlashes(doc?: MinimalDocument | null): number {
+  for (const timer of activeSidebarFlashTimers) {
+    clearTimeout(timer);
+  }
+  activeSidebarFlashTimers.clear();
+  if (!doc) return 0;
+
+  let clearedCount = 0;
+  const cleanupRows = (rows: MinimalElement[] | ArrayLike<MinimalElement>) => {
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row) continue;
+      const hadWsFlash = row.getAttribute?.("data-paseo-workspace-jump-flash") === "true";
+      const hadProjFlash = row.getAttribute?.("data-paseo-project-jump-flash") === "true";
+      const hadInlineStyle = Boolean(
+        row.style &&
+          (row.style.backgroundColor || row.style.outline || row.style.boxShadow),
+      );
+      if (hadWsFlash) {
+        row.removeAttribute?.("data-paseo-workspace-jump-flash");
+      }
+      if (hadProjFlash) {
+        row.removeAttribute?.("data-paseo-project-jump-flash");
+      }
+      if (row.style) {
+        if (row.style.backgroundColor) row.style.backgroundColor = "";
+        if (row.style.outline) row.style.outline = "";
+        if (row.style.boxShadow) row.style.boxShadow = "";
+      }
+      if (hadWsFlash || hadProjFlash || hadInlineStyle) {
+        clearedCount += 1;
+      }
+    }
+  };
+
+  cleanupRows(doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]'));
+  cleanupRows(doc.querySelectorAll('[data-testid^="sidebar-project-row-"]'));
+  return clearedCount;
+}
+
 export interface LocateProjectSidebarOptions {
   projectId?: string | null;
   projectKey?: string | null;
@@ -1561,24 +1628,14 @@ export function locateProjectInSidebar(
   }
 
   if (options.highlightFlash !== false) {
-    const tokens = syncPaseoThemeCssVariables(doc, win);
+    ensureInlineRenameStyleTag(doc, win);
+    clearSidebarJumpFlashes(doc);
     matchedRow.setAttribute?.("data-paseo-project-jump-flash", "true");
-    if (matchedRow.style) {
-      const prevBg = matchedRow.style.backgroundColor ?? "";
-      const prevOutline = matchedRow.style.outline ?? "";
-      const prevRadius = matchedRow.style.borderRadius ?? "";
-      matchedRow.style.backgroundColor = tokens.surfaceSidebarSelected;
-      matchedRow.style.outline = `1px solid ${tokens.border}`;
-      matchedRow.style.borderRadius = "6px";
-      setTimeout(() => {
-        if (matchedRow?.style) {
-          matchedRow.style.backgroundColor = prevBg;
-          matchedRow.style.outline = prevOutline;
-          matchedRow.style.borderRadius = prevRadius;
-        }
-        matchedRow?.removeAttribute?.("data-paseo-project-jump-flash");
-      }, 1600);
-    }
+    const timer = setTimeout(() => {
+      activeSidebarFlashTimers.delete(timer);
+      matchedRow?.removeAttribute?.("data-paseo-project-jump-flash");
+    }, 1100);
+    activeSidebarFlashTimers.add(timer);
   }
 
   return true;
@@ -1737,50 +1794,23 @@ function flashAndScrollWorkspaceRow(
 
   if (!highlightFlash) return;
 
-  const tokens = syncPaseoThemeCssVariables(doc, win);
+  ensureInlineRenameStyleTag(doc, win);
+  clearSidebarJumpFlashes(doc);
   row.setAttribute?.("data-paseo-workspace-jump-flash", "true");
-  if (row.style) {
-    const prevBg = row.style.backgroundColor ?? "";
-    const prevOutline = row.style.outline ?? "";
-    const prevRadius = row.style.borderRadius ?? "";
-    row.style.backgroundColor = tokens.surfaceSidebarSelected;
-    row.style.outline = `1.5px solid ${tokens.primary}`;
-    row.style.borderRadius = "6px";
-    setTimeout(() => {
-      if (row.style) {
-        row.style.backgroundColor = prevBg;
-        row.style.outline = prevOutline;
-        row.style.borderRadius = prevRadius;
-      }
-      row.removeAttribute?.("data-paseo-workspace-jump-flash");
-    }, 1800);
-  }
 
   const groupEl = row.closest?.('[role="group"]') ?? row.parentElement?.parentElement ?? null;
   const parentProjRow =
     groupEl?.querySelector?.('[data-testid^="sidebar-project-row-"]') ?? null;
-  if (
-    parentProjRow &&
-    parentProjRow.getAttribute?.("data-paseo-project-jump-flash") !== "true"
-  ) {
+  if (parentProjRow) {
     parentProjRow.setAttribute?.("data-paseo-project-jump-flash", "true");
-    if (parentProjRow.style) {
-      const prevBg = parentProjRow.style.backgroundColor ?? "";
-      const prevOutline = parentProjRow.style.outline ?? "";
-      const prevRadius = parentProjRow.style.borderRadius ?? "";
-      parentProjRow.style.backgroundColor = tokens.surfaceSidebarSelected;
-      parentProjRow.style.outline = `1px solid ${tokens.border}`;
-      parentProjRow.style.borderRadius = "6px";
-      setTimeout(() => {
-        if (parentProjRow.style) {
-          parentProjRow.style.backgroundColor = prevBg;
-          parentProjRow.style.outline = prevOutline;
-          parentProjRow.style.borderRadius = prevRadius;
-        }
-        parentProjRow.removeAttribute?.("data-paseo-project-jump-flash");
-      }, 1600);
-    }
   }
+
+  const timer = setTimeout(() => {
+    activeSidebarFlashTimers.delete(timer);
+    row.removeAttribute?.("data-paseo-workspace-jump-flash");
+    parentProjRow?.removeAttribute?.("data-paseo-project-jump-flash");
+  }, 1100);
+  activeSidebarFlashTimers.add(timer);
 }
 
 export function revealWorkspaceInSidebar(
@@ -3304,6 +3334,10 @@ export function installDesktopRevealHelpers(
     atMs: number;
   } | null = null;
 
+  // Ensure CSS variables and arrival-pulse styles are active, and clean up any lingering inline flash styles
+  ensureInlineRenameStyleTag(doc, win);
+  clearSidebarJumpFlashes(doc);
+
   const triggerAutoRevealForWorkspace = (
     workspaceId: string,
     candidateProjectNames?: string[],
@@ -3323,10 +3357,14 @@ export function installDesktopRevealHelpers(
       win,
     );
 
-    if (callbacks.onResolveWorkspaceProject) {
+    if (
+      callbacks.onResolveWorkspaceProject &&
+      !findSidebarWorkspaceRow(doc, cleanWsId)
+    ) {
       void Promise.resolve(callbacks.onResolveWorkspaceProject(cleanWsId))
         .then((meta) => {
           if (!meta) return;
+          if (findSidebarWorkspaceRow(doc, cleanWsId)) return;
           revealWorkspaceInSidebar(
             {
               workspaceId: cleanWsId,
@@ -3497,16 +3535,22 @@ export function installDesktopRevealHelpers(
       removeMenu();
     }
 
-    // Track direct clicks on left sidebar workspace rows so we don't re-scroll what's already under the cursor
+    // Track direct clicks on left sidebar workspace rows so we don't re-scroll what's already under the cursor,
+    // and immediately clear any active jump-flash or lingering inline selection styles on other rows.
     let currClickEl: MinimalElement | null = me.target;
     for (let depth = 0; currClickEl && depth < 8; depth += 1) {
       const tid = currClickEl.getAttribute?.("data-testid") ?? "";
       if (tid.startsWith("sidebar-workspace-row-")) {
+        clearSidebarJumpFlashes(doc);
         const parsed = parseSidebarWorkspaceRowTestId(tid);
         if (parsed?.workspaceId) {
           lastSidebarDirectClickWsId = parsed.workspaceId;
           lastSidebarDirectClickAtMs = Date.now();
         }
+        break;
+      }
+      if (tid.startsWith("sidebar-project-row-")) {
+        clearSidebarJumpFlashes(doc);
         break;
       }
       currClickEl = currClickEl.parentElement ?? null;

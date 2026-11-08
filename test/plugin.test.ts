@@ -89,6 +89,7 @@ import {
   resolveCurrentActiveWorkspaceId,
   resolveInlineRenameTarget,
   revealWorkspaceInSidebar,
+  clearSidebarJumpFlashes,
   extractActiveWorkspaceHeaderProjectName,
   extractCommandCenterSelectionHint,
   syncImagePanelAssociations,
@@ -2636,6 +2637,50 @@ test("28. Search (⌘F / ⌘K) & Route Navigation Left-Sidebar Auto-Reveal, Unco
     "true",
     "Parent project row must receive theme-aware highlight flash",
   );
+  assert.equal(
+    workspaceRow.style?.outline ?? "",
+    "",
+    "Workspace row must never mutate inline style.outline (prevents stuck white borders)",
+  );
+  assert.equal(
+    workspaceRow.style?.backgroundColor ?? "",
+    "",
+    "Workspace row must never mutate inline style.backgroundColor (prevents stuck multi-selection when switching threads)",
+  );
+
+  // Overlapping rapid reveal on a second workspace must immediately clear the flash from the first workspace
+  const secondWorkspaceRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:ws_job_second",
+  });
+  workspaceList.appendChild?.(secondWorkspaceRow);
+  revealWorkspaceInSidebar(
+    {
+      workspaceId: "ws_job_second",
+      highlightFlash: true,
+    },
+    mockDoc,
+    mockWin,
+  );
+  assert.equal(
+    workspaceRow.getAttribute?.("data-paseo-workspace-jump-flash"),
+    null,
+    "Switching/revealing a second workspace must immediately clear jump-flash on the previous workspace row",
+  );
+  assert.equal(
+    secondWorkspaceRow.getAttribute?.("data-paseo-workspace-jump-flash"),
+    "true",
+    "Second workspace row must receive the active jump-flash",
+  );
+
+  // Legacy stuck inline styles from older sessions must be healed by clearSidebarJumpFlashes
+  assert.ok(workspaceRow.style);
+  workspaceRow.style.outline = "1.5px solid #ffffff";
+  workspaceRow.style.backgroundColor = "#1f1f22";
+  const healedCount = clearSidebarJumpFlashes(mockDoc);
+  assert.ok(healedCount >= 2);
+  assert.equal(workspaceRow.style.outline, "");
+  assert.equal(workspaceRow.style.backgroundColor, "");
+  assert.equal(secondWorkspaceRow.getAttribute?.("data-paseo-workspace-jump-flash"), null);
 });
 
 test("29. Auto-jump cursor to first place (index 0, 0) on inline rename (default enabled on device, shields focus-theft without re-selecting all, supports select-all/end & Option+dblclick)", () => {
