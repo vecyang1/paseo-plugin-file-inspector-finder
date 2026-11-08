@@ -20,6 +20,8 @@ import {
   extractProjectSearchKeywords,
   scoreProjectJumpQuery,
   stripLeadingDatePrefix,
+  VOICE_STT_PRESETS,
+  manageVoiceSttRpc,
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
@@ -35,6 +37,10 @@ import {
   handleRenameThread,
   handleInspectScheduleRuns,
   handleOpenScheduleRunSession,
+  handleManageVoiceStt,
+  resolveVoicePresetOrShorthand,
+  inferSttSourceBadge,
+  maskApiKeyPreview,
   normalizeDaemonListenAddress,
   resolveBestPath,
   resolveDaemonClientModuleHref,
@@ -1918,4 +1924,163 @@ test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspec
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("19. Custom Voice & STT Model Reconciler (handleManageVoiceStt: inspect, apply, test, reset)", async () => {
+  // 1) Shorthand & preset resolution
+  const senseVoicePreset = resolveVoicePresetOrShorthand("sensevoice");
+  assert.ok(senseVoicePreset);
+  assert.equal(senseVoicePreset?.id, "siliconflow-sensevoice-free");
+  assert.equal(senseVoicePreset?.model, "FunAudioLLM/SenseVoiceSmall");
+  assert.equal(senseVoicePreset?.freeTier, true);
+
+  const qwenPreset = resolveVoicePresetOrShorthand("Qwen/Qwen3-ASR-1.7B");
+  assert.ok(qwenPreset);
+  assert.equal(qwenPreset?.id, "siliconflow-qwen3-asr");
+
+  // 2) Source badge & secret masking
+  assert.equal(
+    inferSttSourceBadge("openai", "http://127.0.0.1:8787/v1", "FunAudioLLM/SenseVoiceSmall"),
+    "gateway:8787 -> siliconflow.cn",
+  );
+  assert.equal(
+    inferSttSourceBadge("openai", "http://127.0.0.1:8787/v1", "gemini-3.5-transcribe"),
+    "gateway:8787 -> gemini-6key-pool",
+  );
+  assert.equal(
+    inferSttSourceBadge("openai", "https://api.siliconflow.cn/v1", "Qwen/Qwen3-ASR-1.7B"),
+    "direct · api.siliconflow.cn",
+  );
+  assert.equal(
+    inferSttSourceBadge("local", "", "parakeet-tdt-0.6b-v2"),
+    "local · sherpa-onnx",
+  );
+  assert.equal(maskApiKeyPreview("sk-1234567890abcdef"), "sk-123...cdef");
+  assert.equal(maskApiKeyPreview("shortkey"), "sho***");
+
+  // 3) Isolated config lifecycle (inspect -> apply preset -> apply arbitrary custom model -> test -> reset)
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-voice-stt-test-"));
+  const configPath = path.join(tmpDir, "config.json");
+  try {
+    const initialConfig = {
+      version: 2,
+      daemon: { listen: "127.0.0.1:6767" },
+      features: {
+        dictation: {
+          enabled: true,
+          stt: {
+            provider: "openai",
+            apiKey: "siliconflow-local-pool",
+            baseUrl: "http://127.0.0.1:8787/v1",
+            model: "gemini-2.5-flash",
+          },
+        },
+        voiceMode: {
+          enabled: false,
+          stt: {
+            provider: "openai",
+            apiKey: "siliconflow-local-pool",
+            baseUrl: "http://127.0.0.1:8787/v1",
+            model: "gemini-2.5-flash",
+          },
+        },
+      },
+    };
+    await fs.writeFile(configPath, JSON.stringify(initialConfig, null, 2), "utf-8");
+
+    const patchedPayloads: Array<Record<string, unknown>> = [];
+    const mockOverrides = {
+      paseoDir: tmpDir,
+      patchDaemonFeatures: async (features: Record<string, unknown>) => {
+        patchedPayloads.push(features);
+        return { patchedViaWs: true };
+      },
+      probeGateway: async () => ({
+        reachable: true,
+        url: "http://127.0.0.1:8787/v1",
+        healthyKeys: 6,
+        totalKeys: 6,
+        siliconflowConfigured: true,
+        groqConfigured: true,
+      }),
+      runLiveProbe: async (params: { baseUrl: string; model: string }) => ({
+        ok: true,
+        endpoint: `${params.baseUrl}/audio/transcriptions`,
+        model: params.model,
+        provider: "siliconflow",
+        keyUsed: "gateway-pool",
+        transcript: "Hello Paseo voice test",
+        latencyMs: 412,
+        error: null,
+      }),
+    };
+
+    const inspected = await handleManageVoiceStt(
+      { action: "inspect" },
+      undefined,
+      mockOverrides,
+    );
+    assert.equal(inspected.ok, true);
+    assert.equal(inspected.dictationStt.model, "gemini-2.5-flash");
+    assert.equal(inspected.dictationStt.sourceBadge, "gateway:8787 -> gemini-6key-pool");
+    assert.equal(inspected.presets.length, VOICE_STT_PRESETS.length);
+
+    // Apply SiliconFlow Free SenseVoiceSmall preset
+    const appliedPreset = await handleManageVoiceStt(
+      {
+        action: "apply",
+        presetId: "siliconflow-sensevoice-free",
+      },
+      undefined,
+      mockOverrides,
+    );
+    assert.equal(appliedPreset.ok, true);
+    assert.equal(appliedPreset.action, "apply");
+    assert.equal(appliedPreset.dictationStt.model, "FunAudioLLM/SenseVoiceSmall");
+    assert.equal(appliedPreset.dictationStt.sourceBadge, "gateway:8787 -> siliconflow.cn");
+    assert.equal(patchedPayloads.length, 1);
+
+    // Apply OpenWhispr Qwen/Qwen3-ASR-1.7B custom model
+    const appliedCustom = await handleManageVoiceStt(
+      {
+        action: "apply",
+        model: "Qwen/Qwen3-ASR-1.7B",
+        baseUrl: "http://127.0.0.1:8787/v1",
+      },
+      undefined,
+      mockOverrides,
+    );
+    assert.equal(appliedCustom.ok, true);
+    assert.equal(appliedCustom.dictationStt.model, "Qwen/Qwen3-ASR-1.7B");
+    assert.equal(appliedCustom.voiceModeStt.model, "Qwen/Qwen3-ASR-1.7B");
+
+    const probed = await handleManageVoiceStt(
+      {
+        action: "test",
+        model: "Qwen/Qwen3-ASR-1.7B",
+      },
+      undefined,
+      mockOverrides,
+    );
+    assert.equal(probed.ok, true);
+    assert.ok(probed.testResult);
+    assert.equal(probed.testResult?.ok, true);
+    assert.equal(probed.testResult?.model, "Qwen/Qwen3-ASR-1.7B");
+    assert.equal(probed.testResult?.provider, "siliconflow");
+
+    // Reset back to OpenAI whisper-1 default
+    const resetResult = await handleManageVoiceStt(
+      {
+        action: "reset",
+      },
+      undefined,
+      mockOverrides,
+    );
+    assert.equal(resetResult.ok, true);
+    assert.equal(resetResult.dictationStt.model, "whisper-1");
+    assert.ok(manageVoiceSttRpc.name === "finder.manage_voice_stt");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 

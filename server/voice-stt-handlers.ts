@@ -487,15 +487,55 @@ export async function runLiveSttTranscriptionProbe(options: {
   }
 }
 
+export interface ManageVoiceSttOverrides {
+  paseoDir?: string;
+  probeGateway?: () => Promise<{
+    reachable: boolean;
+    url: string;
+    healthyKeys: number;
+    totalKeys: number;
+    siliconflowConfigured: boolean;
+    groqConfigured: boolean;
+  }>;
+  patchDaemonFeatures?: (
+    featuresPatch: Record<string, unknown>,
+    paseoDir: string,
+  ) => Promise<{ patchedViaWs: boolean; error?: string }>;
+  runLiveProbe?: (options: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    language?: string;
+  }) => Promise<VoiceSttTestReceipt>;
+}
+
 export async function handleManageVoiceStt(
   input: RpcInput<typeof manageVoiceSttRpc>,
   _context?: PluginHandlerContext,
+  overrides?: ManageVoiceSttOverrides,
 ) {
   const startMs = Date.now();
   const action = input.action ?? "inspect";
-  const paseoDir = path.join(os.homedir(), ".paseo");
+  const paseoDir = overrides?.paseoDir ?? path.join(os.homedir(), ".paseo");
+  const patchConfigFn = overrides?.patchDaemonFeatures
+    ? async (patch: Record<string, unknown>, dir: string) => {
+        const configPath = path.join(dir, "config.json");
+        const current = await readPaseoConfigFile(dir);
+        const nextConfig: RawPaseoConfig = {
+          ...current,
+          features: {
+            ...(current.features ?? {}),
+            ...patch,
+          },
+        };
+        await fs.writeFile(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf-8");
+        return overrides.patchDaemonFeatures!(patch, dir);
+      }
+    : applyDaemonVoiceConfigPatch;
 
-  const gateway = await probeAudioPoolGateway();
+  const gateway = overrides?.probeGateway
+    ? await overrides.probeGateway()
+    : await probeAudioPoolGateway();
   const localKeys = await readPoolGatewayLocalKeys();
   let config = await readPaseoConfigFile(paseoDir);
 
@@ -539,7 +579,7 @@ export async function handleManageVoiceStt(
         stt: resetStt,
       },
     };
-    await applyDaemonVoiceConfigPatch(featuresPatch, paseoDir);
+    await patchConfigFn(featuresPatch, paseoDir);
     config = await readPaseoConfigFile(paseoDir);
     const dictationStt = toEndpointSnapshot(config.features?.dictation?.stt);
     const voiceModeStt = toEndpointSnapshot(config.features?.voiceMode?.stt);
@@ -618,7 +658,8 @@ export async function handleManageVoiceStt(
   }
 
   if (action === "test") {
-    const testResult = await runLiveSttTranscriptionProbe({
+    const probeFn = overrides?.runLiveProbe ?? runLiveSttTranscriptionProbe;
+    const testResult = await probeFn({
       baseUrl: targetBaseUrl,
       apiKey: targetApiKey,
       model: targetModel,
@@ -679,7 +720,7 @@ export async function handleManageVoiceStt(
       : {}),
   };
 
-  await applyDaemonVoiceConfigPatch(featuresPatch, paseoDir);
+  await patchConfigFn(featuresPatch, paseoDir);
   config = await readPaseoConfigFile(paseoDir);
 
   const dictationStt = toEndpointSnapshot(config.features?.dictation?.stt);

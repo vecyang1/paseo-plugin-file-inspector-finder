@@ -12,6 +12,7 @@ import {
   extractProjectSearchKeywords,
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
+  manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
   quickJumpWorkspaceRpc,
@@ -20,6 +21,7 @@ import {
 import { getCatalogForLocale, pluginTranslations } from "./client/i18n";
 import { ImageInspectorFilePanel } from "./client/image-panel";
 import { FinderPluginSettingsScreen } from "./client/settings-screen";
+import { installDesktopVoiceSttEnhancer } from "./client/voice-stt-web";
 import {
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
@@ -297,6 +299,70 @@ export default function contribute(client: PluginClientContext) {
       }, 30);
     },
   });
+
+  client.addCommandCenterItem({
+    id: "configure-custom-voice-stt",
+    title: pluginTranslations.message("commands.configureVoiceStt"),
+    icon: "Activity",
+    keywords: [
+      "voice",
+      "stt",
+      "speech",
+      "dictation",
+      "siliconflow",
+      "openwhispr",
+      "sensevoice",
+      "qwen",
+      "telespeech",
+      "whisper",
+      "语音",
+      "硅基流动",
+    ],
+    context: "global",
+    onSelect({ openSettings }) {
+      openSettings("finder-settings");
+    },
+  });
+
+  for (const cmdName of ["voice", "stt"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.voiceSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.voiceSlashHint"),
+      context: "workspace",
+      async onSubmit({ args, rpc }) {
+        const trimmed = args.trim();
+        if (!trimmed) {
+          await rpc(manageVoiceSttRpc, {
+            action: "inspect",
+            source: "slash-command",
+          });
+          return;
+        }
+        const lower = trimmed.toLowerCase();
+        if (lower === "test" || lower === "probe") {
+          await rpc(manageVoiceSttRpc, {
+            action: "test",
+            source: "slash-command",
+          });
+          return;
+        }
+        if (lower === "reset" || lower === "default") {
+          await rpc(manageVoiceSttRpc, {
+            action: "reset",
+            source: "slash-command",
+          });
+          return;
+        }
+        await rpc(manageVoiceSttRpc, {
+          action: "apply",
+          presetId: trimmed,
+          model: trimmed,
+          source: "slash-command",
+        });
+      },
+    });
+  }
 
   // 6. Register Composer Slash Commands (/reveal, /finder, /rename, /title, /label, /tag)
   for (const cmdName of ["reveal", "finder"] as const) {
@@ -798,6 +864,11 @@ export default function contribute(client: PluginClientContext) {
     call: (def, input) => client.rpc(def as never, input as never) as never,
   });
 
+  const cleanupVoiceSttEnhancer = installDesktopVoiceSttEnhancer({
+    call: (def, input) => client.rpc(def, input),
+    getLocale: () => client.i18n.locale,
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -806,6 +877,7 @@ export default function contribute(client: PluginClientContext) {
     clearProjectCommandItems();
     cleanupWebHelpers();
     cleanupScheduleRunsEnhancer();
+    cleanupVoiceSttEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
   };
