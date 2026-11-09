@@ -128,7 +128,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [testInput, setTestInput] = useState(
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
   );
-  const [folderTestInput, setFolderTestInput] = useState("~/Documents");
+  const [folderTestInput, setFolderTestInput] = useState(".");
   const [renameDiagInput, setRenameDiagInput] = useState("");
   const [markDoneTestResult, setMarkDoneTestResult] = useState<string | null>(null);
   const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
@@ -226,6 +226,9 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         enableMarkDoneShortcut: settings.values.enableMarkDoneShortcut,
         markDonePrefix: settings.values.markDonePrefix,
         enableDesktopContextMenuHelper: settings.values.enableDesktopContextMenuHelper,
+        enableCmdClickOpenSystemDefault: settings.values.enableCmdClickOpenSystemDefault,
+        cmdClickDefaultTarget: settings.values.cmdClickDefaultTarget,
+        enableSidebarCmdClickFinder: settings.values.enableSidebarCmdClickFinder,
       });
       syncQuickJumpPreferences({
         enableWorkspaceQuickJump: settings.values.enableWorkspaceQuickJump,
@@ -594,9 +597,92 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 inlineRenameCaretPosition: values.inlineRenameCaretPosition,
                 enableQuickRenameAndLabelShortcuts:
                   values.enableQuickRenameAndLabelShortcuts,
+                enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                markDonePrefix: values.markDonePrefix,
                 enableDesktopContextMenuHelper: next,
+                enableCmdClickOpenSystemDefault: values.enableCmdClickOpenSystemDefault,
+                cmdClickDefaultTarget: values.cmdClickDefaultTarget,
+                enableSidebarCmdClickFinder: values.enableSidebarCmdClickFinder,
               });
               void save({ ...values, enableDesktopContextMenuHelper: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.enableCmdClickOpenSystemDefault")}
+            hint={t("settings.enableCmdClickOpenSystemDefaultDesc")}
+            value={values.enableCmdClickOpenSystemDefault ?? true}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                markDonePrefix: values.markDonePrefix,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+                enableCmdClickOpenSystemDefault: next,
+                cmdClickDefaultTarget: values.cmdClickDefaultTarget,
+                enableSidebarCmdClickFinder: values.enableSidebarCmdClickFinder,
+              });
+              void save({ ...values, enableCmdClickOpenSystemDefault: next }, revision);
+            }}
+          />
+
+          <SettingsSelect
+            label={t("settings.cmdClickDefaultTargetLabel")}
+            hint={t("settings.cmdClickDefaultTargetDesc")}
+            value={values.cmdClickDefaultTarget ?? "system-default"}
+            options={[
+              { label: t("settings.optSystemDefault"), value: "system-default" },
+              { label: t("settings.optSystemPreview"), value: "system-preview" },
+              { label: t("settings.optFinderReveal"), value: "finder-reveal" },
+              { label: t("settings.optFinderFolder"), value: "finder-folder" },
+              { label: t("settings.optAntigravity"), value: "antigravity" },
+              { label: t("settings.optCursor"), value: "cursor" },
+              { label: t("settings.optVscode"), value: "vscode" },
+            ]}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                markDonePrefix: values.markDonePrefix,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+                enableCmdClickOpenSystemDefault: values.enableCmdClickOpenSystemDefault,
+                cmdClickDefaultTarget: next as OpenerTarget,
+                enableSidebarCmdClickFinder: values.enableSidebarCmdClickFinder,
+              });
+              void save(
+                { ...values, cmdClickDefaultTarget: next as OpenerTarget },
+                revision,
+              );
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.enableSidebarCmdClickFinder")}
+            hint={t("settings.enableSidebarCmdClickFinderDesc")}
+            value={values.enableSidebarCmdClickFinder ?? true}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                markDonePrefix: values.markDonePrefix,
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+                enableCmdClickOpenSystemDefault: values.enableCmdClickOpenSystemDefault,
+                cmdClickDefaultTarget: values.cmdClickDefaultTarget,
+                enableSidebarCmdClickFinder: next,
+              });
+              void save({ ...values, enableSidebarCmdClickFinder: next }, revision);
             }}
           />
 

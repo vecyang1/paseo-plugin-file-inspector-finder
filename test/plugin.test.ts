@@ -286,14 +286,23 @@ test("5. handleOpenFileTarget & handleDiagnosePath execute and record observabil
     assert.equal(fallbackRes.ok, true);
     assert.equal(fallbackRes.resolvedPath, tmpRoot);
 
+    const defaultOpenRes = await handleOpenFileTarget(
+      { path: "demo.png", workspaceRoot: tmpRoot, target: "system-default" },
+      ctx,
+      { dryRun: true },
+    );
+    assert.equal(defaultOpenRes.ok, true);
+    assert.equal(defaultOpenRes.resolvedPath, imgPath);
+
     const diagRes = await handleDiagnosePath(
       { rawInput: "demo.png", workspaceRoot: tmpRoot },
       ctx,
     );
     assert.equal(diagRes.resolvedMetadata.exists, true);
-    assert.equal(diagRes.availableTargets.length, 6);
-    assert.equal(diagRes.availableTargets[0].label, "Reveal in Finder");
-    assert.ok(diagRes.recentActions.length >= 2);
+    assert.equal(diagRes.availableTargets.length, 7);
+    assert.equal(diagRes.availableTargets[0].label, "System default application");
+    assert.equal(diagRes.availableTargets[1].label, "Reveal in Finder");
+    assert.ok(diagRes.recentActions.length >= 3);
   } finally {
     await fs.rm(tmpRoot, { recursive: true, force: true });
   }
@@ -337,6 +346,26 @@ test("6. Client DOM & localStorage helpers extract file paths from chat links, t
   assert.equal(
     extractFilePathFromElement(inlineChatLink, mockDoc),
     "reports/mobile_ui_series/00_mobile_ui_5screen_panoramic_showcase.png",
+  );
+
+  assert.equal(
+    extractFilePathFromElement({ textContent: "design/prototype/index.html" } as any, mockDoc),
+    "design/prototype/index.html",
+  );
+  assert.equal(
+    extractFilePathFromElement({ textContent: "design/screenshots/" } as any, mockDoc),
+    "design/screenshots/",
+  );
+  assert.equal(
+    extractFilePathFromElement(
+      { textContent: "文件是 design/prototype/index.html，不用装任何东西" } as any,
+      mockDoc,
+    ),
+    "design/prototype/index.html",
+  );
+  assert.equal(
+    extractFilePathFromElement({ textContent: "`design/prototype/index.html`" } as any, mockDoc),
+    "design/prototype/index.html",
   );
 
   assert.equal(
@@ -476,23 +505,31 @@ test("7. In-place extension of Paseo's official native tab context menu (zero du
     onCopyPath: async () => {},
   });
 
-  assert.equal(count, 3);
-  // Menu order must be: Copy file path -> Reveal in Finder -> Open containing folder -> Open in Preview -> Close
-  assert.equal(menuChildren.length, 5);
+  assert.equal(count, 4);
+  // Menu order must be: Copy file path -> Open with default application -> Reveal in Finder -> Open containing folder -> Open in Preview -> Close
+  assert.equal(menuChildren.length, 6);
   assert.equal(
     menuChildren[1].getAttribute?.("data-testid"),
-    "workspace-tab-context-file_docs/file_inspector_finder_plugin.md-reveal-in-finder",
+    "workspace-tab-context-file_docs/file_inspector_finder_plugin.md-open-system-default",
   );
   assert.equal(
     (menuChildren[1] as unknown as { getLabel: () => string }).getLabel(),
-    "Reveal in Finder",
+    "Open with default application",
+  );
+  assert.equal(
+    menuChildren[2].getAttribute?.("data-testid"),
+    "workspace-tab-context-file_docs/file_inspector_finder_plugin.md-reveal-in-finder",
   );
   assert.equal(
     (menuChildren[2] as unknown as { getLabel: () => string }).getLabel(),
-    "Open containing folder",
+    "Reveal in Finder",
   );
   assert.equal(
     (menuChildren[3] as unknown as { getLabel: () => string }).getLabel(),
+    "Open containing folder",
+  );
+  assert.equal(
+    (menuChildren[4] as unknown as { getLabel: () => string }).getLabel(),
     "Open in Preview",
   );
 
@@ -504,12 +541,19 @@ test("7. In-place extension of Paseo's official native tab context menu (zero du
     onCopyPath: async () => {},
   });
   assert.equal(secondCount, 0);
-  assert.equal(menuChildren.length, 5);
+  assert.equal(menuChildren.length, 6);
 
   // Clicking "Reveal in Finder" triggers the exact path and target
+  (menuChildren[2] as unknown as { triggerClick: () => void }).triggerClick();
+  assert.deepEqual(triggeredCalls, [
+    { path: "docs/file_inspector_finder_plugin.md", target: "finder-reveal" },
+  ]);
+
+  // Clicking "Open with default application" triggers system-default target
   (menuChildren[1] as unknown as { triggerClick: () => void }).triggerClick();
   assert.deepEqual(triggeredCalls, [
     { path: "docs/file_inspector_finder_plugin.md", target: "finder-reveal" },
+    { path: "docs/file_inspector_finder_plugin.md", target: "system-default" },
   ]);
 });
 
@@ -541,12 +585,14 @@ test("8. Single-Language Output Contract: English catalog has zero Chinese or bi
   assert.equal(zhCatalog.actions.revealInFinder, "在 Finder 中显示");
   assert.equal(zhCatalog.actions.openContainingFolder, "打开所在文件夹");
   assert.equal(zhCatalog.actions.openInPreview, "在预览中打开");
+  assert.equal(zhCatalog.actions.openInSystemDefault, "用系统默认应用打开");
   assert.equal(zhCatalog.actions.copyFilePath, "复制文件路径");
 
   const enCatalog = getCatalogForLocale("en-US");
   assert.equal(enCatalog.actions.revealInFinder, "Reveal in Finder");
   assert.equal(enCatalog.actions.openContainingFolder, "Open containing folder");
   assert.equal(enCatalog.actions.openInPreview, "Open in Preview");
+  assert.equal(enCatalog.actions.openInSystemDefault, "Open with default application");
   assert.equal(enCatalog.actions.copyFilePath, "Copy file path");
 
   // Ensure both catalogs have identical key structure
@@ -892,7 +938,7 @@ test("12. Sidebar drop zone boundaries, Electron webUtils path extraction, and w
   const mockWin: MinimalWindow = {
     paseoDesktop: {
       webUtils: {
-        getPathForFile: () => "/Users/dev/Projects/2026-11-08 Design Systems",
+        getPathForFile: () => "/workspace/projects/2026-11-08 Design Systems",
       },
     },
     addEventListener: () => {},
@@ -900,7 +946,7 @@ test("12. Sidebar drop zone boundaries, Electron webUtils path extraction, and w
   };
 
   assert.deepEqual(extractDroppedFilePaths(finderDrag, mockWin), [
-    "/Users/dev/Projects/2026-11-08 Design Systems",
+    "/workspace/projects/2026-11-08 Design Systems",
   ]);
 
   assert.equal(focusWorkspaceInApp("wks_design", null, mockDoc, mockWin), true);
@@ -1454,7 +1500,7 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
 
   const dssKeywords = extractProjectSearchKeywords(
     "2026-11-08 Design System Studio",
-    "/Users/dev/Cowork/2026-11-08 Design System Studio",
+    "/Users/test/workspaces/2026-11-08 Design System Studio",
   );
   assert.ok(dssKeywords.includes("design system studio"));
   assert.ok(dssKeywords.includes("design"));
@@ -1462,14 +1508,14 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
 
   const dssCandidate = {
     projectName: "2026-11-08 Design System Studio",
-    projectRootPath: "/Users/dev/Cowork/2026-11-08 Design System Studio",
-    shortPath: "~/Cowork/2026-11-08 Design System Studio",
+    projectRootPath: "/Users/test/workspaces/2026-11-08 Design System Studio",
+    shortPath: "~/workspaces/2026-11-08 Design System Studio",
     primaryWorkspaceTitle: "Design Thread 9",
   };
   const metaCandidate = {
     projectName: "2026-11-08 Meta harness",
-    projectRootPath: "/Users/dev/Cowork/2026-11-08 Meta harness",
-    shortPath: "~/Cowork/2026-11-08 Meta harness",
+    projectRootPath: "/Users/test/workspaces/2026-11-08 Meta harness",
+    shortPath: "~/workspaces/2026-11-08 Meta harness",
     primaryWorkspaceTitle: "Paseo Plugin Dev",
   };
 
@@ -1694,8 +1740,8 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
           projectId: "prj_dss",
           projectKey: "key_dss",
           projectName: "2026-11-08 Design System Studio",
-          projectRootPath: "/Users/dev/Cowork/2026-11-08 Design System Studio",
-          shortPath: "~/Cowork/2026-11-08 Design System Studio",
+          projectRootPath: "/Users/test/workspaces/2026-11-08 Design System Studio",
+          shortPath: "~/workspaces/2026-11-08 Design System Studio",
           projectKind: "directory",
           activeWorkspaceCount: 10,
           primaryWorkspaceId: "wks_dss_latest",
@@ -1709,8 +1755,8 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
           projectId: "prj_meta",
           projectKey: "key_meta",
           projectName: "2026-11-08 Meta harness",
-          projectRootPath: "/Users/dev/Cowork/2026-11-08 Meta harness",
-          shortPath: "~/Cowork/2026-11-08 Meta harness",
+          projectRootPath: "/Users/test/workspaces/2026-11-08 Meta harness",
+          shortPath: "~/workspaces/2026-11-08 Meta harness",
           projectKind: "git",
           activeWorkspaceCount: 3,
           primaryWorkspaceId: "wks_meta_latest",
@@ -1782,7 +1828,7 @@ test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspec
         type: "new-agent",
         config: {
           provider: "antigravity",
-          cwd: "/Users/dev/webhook-hub",
+          cwd: "/Users/test/webhook-hub",
           modeId: "full-access",
           model: "gemini-3.8-flash-high",
           archiveOnFinish: true,
@@ -1825,7 +1871,7 @@ test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspec
         type: "new-agent",
         config: {
           provider: "antigravity",
-          cwd: "/Users/dev/idle",
+          cwd: "/Users/test/idle",
           modeId: "full-access",
           model: "gemini-3.8-flash-high",
         },
@@ -2021,7 +2067,7 @@ test("19. Custom Voice & STT Model Reconciler (handleManageVoiceStt: inspect, ap
     inferSttSourceBadge("local", "", "parakeet-tdt-0.6b-v2"),
     "local · sherpa-onnx",
   );
-  assert.equal(maskApiKeyPreview("sk-1234567890abcdef"), "sk-123...cdef");
+  assert.equal(maskApiKeyPreview("demo_" + "1234567890abcdef"), "demo_1...cdef");
   assert.equal(maskApiKeyPreview("shortkey"), "sho***");
 
   // 3) Isolated config lifecycle (inspect -> apply preset -> apply arbitrary custom model -> test -> reset)
@@ -2036,7 +2082,7 @@ test("19. Custom Voice & STT Model Reconciler (handleManageVoiceStt: inspect, ap
           enabled: true,
           stt: {
             provider: "openai",
-            apiKey: "siliconflow-local-pool",
+            apiKey: "mock-siliconflow-local-pool",
             baseUrl: "http://127.0.0.1:8787/v1",
             model: "gemini-2.5-flash",
           },
@@ -2045,7 +2091,7 @@ test("19. Custom Voice & STT Model Reconciler (handleManageVoiceStt: inspect, ap
           enabled: false,
           stt: {
             provider: "openai",
-            apiKey: "siliconflow-local-pool",
+            apiKey: "mock-siliconflow-local-pool",
             baseUrl: "http://127.0.0.1:8787/v1",
             model: "gemini-2.5-flash",
           },
@@ -2159,8 +2205,8 @@ test("20. Centralized Paseo 7-Theme & 10-Identity-Color System (shared/paseo-the
   assert.equal(normalizePaseoThemeName("unknown"), null);
 
   // 2) Exact Paseo ProjectIconView identity color hash & initial
-  const colorName = derivePaseoIdentityColorName("dir:/Users/dev/Cowork/2026-11-08 Meta harness");
-  const colorHex = derivePaseoIdentityColorHex("dir:/Users/dev/Cowork/2026-11-08 Meta harness");
+  const colorName = derivePaseoIdentityColorName("dir:/Users/test/workspaces/2026-11-08 Meta harness");
+  const colorHex = derivePaseoIdentityColorHex("dir:/Users/test/workspaces/2026-11-08 Meta harness");
   assert.equal(colorHex, PASEO_IDENTITY_BG_HEX[colorName]);
   assert.equal(deriveProjectIconInitial("2026-11-08 Meta harness"), "2");
   assert.equal(deriveProjectIconInitial("Seller Browser"), "S");
@@ -3208,20 +3254,208 @@ test("extractCurrentRouteAgentId parses /ag/<agentId> routes for subagent tree i
   assert.equal(extractCurrentRouteAgentId(""), null);
 });
 
-test("extractCurrentWorkspaceAndAgent parses workspace and agent routes for session lineage bar", async () => {
-  const { extractCurrentWorkspaceAndAgent } = await import("../client/session-lineage-web");
-  const parsed = extractCurrentWorkspaceAndAgent(
-    null,
-    { location: { pathname: "/workspace/wks_72682062d02ff5d9" } } as unknown as Window,
-  );
-  assert.equal(parsed.workspaceId, "wks_72682062d02ff5d9");
-  assert.equal(parsed.agentId, null);
+test("36. ⌘+Click (Cmd+Click) directly opens file with outside system default app and left sidebar in Finder", () => {
+  const openCalls: {
+    path: string;
+    target: OpenerTarget;
+    workspaceId?: string;
+    projectName?: string;
+  }[] = [];
+  let registeredClickHandler: ((ev: unknown) => void) | null = null;
 
-  const parsedAg = extractCurrentWorkspaceAndAgent(
-    null,
-    { location: { pathname: "/ag/c32f05ca-a8bf-425f-ac1e-dc0e3c7853b3" } } as unknown as Window,
+  const mockDoc: MinimalDocument = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: () => ({ setAttribute: () => {}, style: {} }),
+    addEventListener: (type: string, handler: (ev: unknown) => void) => {
+      if (type === "click") {
+        registeredClickHandler = handler;
+      }
+    },
+    removeEventListener: () => {},
+  };
+
+  const store = new Map<string, string>();
+  const mockWin: MinimalWindow = {
+    localStorage: {
+      get length() {
+        return store.size;
+      },
+      key: (i: number) => Array.from(store.keys())[i] ?? null,
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    document: mockDoc,
+    location: { pathname: "/workspace/wks_test_active" },
+  };
+
+  const cleanup = installDesktopRevealHelpers(
+    {
+      isEnabled: () => true,
+      getLocale: () => "en",
+      onOpenTarget: async (path, target, wsId, projName) => {
+        openCalls.push({ path, target, workspaceId: wsId, projectName: projName });
+      },
+      onCopyPath: async () => {},
+    },
+    mockDoc,
+    mockWin,
   );
-  assert.equal(parsedAg.agentId, "c32f05ca-a8bf-425f-ac1e-dc0e3c7853b3");
+
+  assert.ok(registeredClickHandler, "Click handler must be registered on document");
+  const clickHandler: (ev: any) => void = registeredClickHandler!;
+
+  // 1. ⌘+Click (Cmd+Click) on chat file link (design/prototype/index.html)
+  let prevented = false;
+  let stopped = false;
+  const fileLinkEl = {
+    textContent: "design/prototype/index.html",
+    getAttribute: () => null,
+    parentElement: null,
+  };
+  clickHandler({
+    button: 0,
+    metaKey: true,
+    altKey: false,
+    ctrlKey: false,
+    target: fileLinkEl,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {
+      stopped = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(stopped, true);
+  assert.deepEqual(openCalls[0], {
+    path: "design/prototype/index.html",
+    target: "system-default",
+    workspaceId: undefined,
+    projectName: undefined,
+  });
+
+  // 2. ⌘+Click on a directory link (design/screenshots/)
+  prevented = false;
+  stopped = false;
+  const dirLinkEl = {
+    textContent: "design/screenshots/",
+    getAttribute: () => null,
+    parentElement: null,
+  };
+  clickHandler({
+    button: 0,
+    metaKey: true,
+    altKey: false,
+    ctrlKey: false,
+    target: dirLinkEl,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {
+      stopped = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(stopped, true);
+  assert.deepEqual(openCalls[1], {
+    path: "design/screenshots/",
+    target: "system-default",
+    workspaceId: undefined,
+    projectName: undefined,
+  });
+
+  // 3. ⌘+Click on left sidebar workspace row
+  prevented = false;
+  stopped = false;
+  const wsRowEl = {
+    textContent: "Design LRL multilingual app",
+    getAttribute: (name: string) =>
+      name === "data-testid" ? "sidebar-workspace-row-local:wks_lang_1" : null,
+    parentElement: null,
+  };
+  clickHandler({
+    button: 0,
+    metaKey: true,
+    altKey: false,
+    ctrlKey: false,
+    target: wsRowEl,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {
+      stopped = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(stopped, true);
+  assert.deepEqual(openCalls[2], {
+    path: ".",
+    target: "finder-folder",
+    workspaceId: "wks_lang_1",
+    projectName: undefined,
+  });
+
+  // 4. ⌘+Click on left sidebar project row
+  prevented = false;
+  stopped = false;
+  const projRowEl = {
+    textContent: "Language Learning",
+    getAttribute: (name: string) =>
+      name === "data-testid" ? "sidebar-project-row-local:proj_lang" : null,
+    parentElement: null,
+  };
+  clickHandler({
+    button: 0,
+    metaKey: true,
+    altKey: false,
+    ctrlKey: false,
+    target: projRowEl,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {
+      stopped = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(stopped, true);
+  assert.deepEqual(openCalls[3], {
+    path: ".",
+    target: "finder-folder",
+    workspaceId: undefined,
+    projectName: "Language Learning",
+  });
+
+  // 5. Option+Click on file link still triggers finder-reveal
+  prevented = false;
+  stopped = false;
+  clickHandler({
+    button: 0,
+    metaKey: false,
+    altKey: true,
+    ctrlKey: false,
+    target: fileLinkEl,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {
+      stopped = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.deepEqual(openCalls[4], {
+    path: "design/prototype/index.html",
+    target: "finder-reveal",
+    workspaceId: undefined,
+    projectName: undefined,
+  });
+
+  cleanup();
 });
 
 

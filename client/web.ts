@@ -183,7 +183,7 @@ export interface MinimalWindow {
   dispatchEvent?(event: unknown): boolean;
 }
 
-function getWebWindow(): MinimalWindow | null {
+export function getWebWindow(): MinimalWindow | null {
   if (Platform.OS !== "web") return null;
   const g = globalThis as unknown as { window?: MinimalWindow };
   return g.window ?? null;
@@ -278,6 +278,9 @@ export interface InlineRenamePreferences {
   enableMarkDoneShortcut: boolean;
   markDonePrefix: string;
   enableDesktopContextMenuHelper: boolean;
+  enableCmdClickOpenSystemDefault: boolean;
+  cmdClickDefaultTarget: OpenerTarget;
+  enableSidebarCmdClickFinder: boolean;
 }
 
 export function syncInlineRenamePreferences(
@@ -320,6 +323,12 @@ export function syncInlineRenamePreferences(
       markDonePrefix: prefs.markDonePrefix ?? existing.markDonePrefix ?? "d ",
       enableDesktopContextMenuHelper:
         prefs.enableDesktopContextMenuHelper ?? existing.enableDesktopContextMenuHelper,
+      enableCmdClickOpenSystemDefault:
+        prefs.enableCmdClickOpenSystemDefault ?? existing.enableCmdClickOpenSystemDefault,
+      cmdClickDefaultTarget:
+        prefs.cmdClickDefaultTarget ?? existing.cmdClickDefaultTarget ?? "system-default",
+      enableSidebarCmdClickFinder:
+        prefs.enableSidebarCmdClickFinder ?? existing.enableSidebarCmdClickFinder,
     };
     storage.setItem(INLINE_RENAME_STORAGE_KEY, JSON.stringify(merged));
   } catch {
@@ -338,6 +347,9 @@ export function readInlineRenamePreferences(
     enableMarkDoneShortcut: true,
     markDonePrefix: "d ",
     enableDesktopContextMenuHelper: true,
+    enableCmdClickOpenSystemDefault: true,
+    cmdClickDefaultTarget: "system-default",
+    enableSidebarCmdClickFinder: true,
   };
   if (!storage) return defaults;
   try {
@@ -360,6 +372,20 @@ export function readInlineRenamePreferences(
           ? "start"
           : "select-all";
 
+    const target = parsed.cmdClickDefaultTarget;
+    const validTarget: OpenerTarget =
+      target === "finder-reveal" ||
+      target === "finder-folder" ||
+      target === "system-preview" ||
+      target === "system-default" ||
+      target === "quicklook" ||
+      target === "antigravity" ||
+      target === "cursor" ||
+      target === "vscode" ||
+      target === "terminal"
+        ? target
+        : "system-default";
+
     return {
       enableInlineDoubleClickRename: parsed.enableInlineDoubleClickRename !== false,
       autoJumpToFirstPlaceInput: caretPosition === "start",
@@ -372,6 +398,9 @@ export function readInlineRenamePreferences(
           ? parsed.markDonePrefix
           : "d ",
       enableDesktopContextMenuHelper: parsed.enableDesktopContextMenuHelper !== false,
+      enableCmdClickOpenSystemDefault: parsed.enableCmdClickOpenSystemDefault !== false,
+      cmdClickDefaultTarget: validTarget,
+      enableSidebarCmdClickFinder: parsed.enableSidebarCmdClickFinder !== false,
     };
   } catch {
     return defaults;
@@ -496,8 +525,15 @@ export function syncImagePanelAssociations(
   }
 }
 
-const FILE_PATH_TOKEN_REGEX =
-  /(?:\/(?:Users|home|var|tmp|opt|etc)\/[^\s"'`<>()]+|[A-Za-z]:\\[^\s"'`<>()]+|~\/[^\s"'`<>()]+|[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,8}|[A-Za-z0-9_-]{3,}\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico|avif|heic|tif|tiff|pdf|md|json|ts|tsx|py|html|css|mp4|mov))/i;
+export const FILE_PATH_TOKEN_REGEX =
+  /(?:\/(?:Users|home|var|tmp|opt|etc)\/[^\s"'`<>()]+|[A-Za-z]:\\[^\s"'`<>()]+|~\/[^\s"'`<>()]+|(?:\.?\.)?\/[^\s"'`<>()]+|[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+(?:\.[A-Za-z0-9]{1,8}|\/)?|[A-Za-z0-9_-]{2,}\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico|avif|heic|tif|tiff|pdf|md|json|ts|tsx|py|html|css|mp4|mov|jsx|mjs|cjs|sh|zsh|yaml|yml|toml|sql))/i;
+
+export function cleanExtractedFilePath(raw: string): string {
+  let val = raw.trim();
+  val = val.replace(/^[`"'\s(\[]+/, "").replace(/[`"'\s)\]]+$/, "");
+  val = val.replace(/[,:;!?\u3002\uff0c\u3001\uff1b\uff1a]+$/, "");
+  return val.trim();
+}
 
 export function decodeTabCloseTestId(testId: string): string | null {
   const prefix = "workspace-file-close-";
@@ -1186,24 +1222,31 @@ export function extractFilePathFromElement(
       if (decoded) return decoded;
     }
 
+    const dataPath =
+      curr.getAttribute?.("data-path") ?? curr.getAttribute?.("data-file-path") ?? "";
+    if (dataPath) {
+      return cleanExtractedFilePath(dataPath);
+    }
+
     const href = curr.getAttribute?.("href") ?? "";
     if (href && !href.startsWith("http://") && !href.startsWith("https://")) {
-      return href;
+      return cleanExtractedFilePath(href);
     }
 
     const text = (curr.textContent ?? "").trim();
     if (text && text.length < 260) {
       const match = text.match(FILE_PATH_TOKEN_REGEX);
       if (match) {
+        const cleaned = cleanExtractedFilePath(match[0]);
         const tooltips = doc.querySelectorAll('[data-testid*="tooltip"]');
         for (let i = 0; i < tooltips.length; i += 1) {
           const tipText = (tooltips[i]?.textContent ?? "").trim();
-          if (tipText && tipText.includes(match[0]) && tipText.includes("/")) {
+          if (tipText && tipText.includes(cleaned) && tipText.includes("/")) {
             const tipMatch = tipText.match(FILE_PATH_TOKEN_REGEX);
-            if (tipMatch) return tipMatch[0];
+            if (tipMatch) return cleanExtractedFilePath(tipMatch[0]);
           }
         }
-        return match[0];
+        return cleaned;
       }
     }
     curr = curr.parentElement ?? null;
@@ -1293,7 +1336,12 @@ export interface DesktopRevealHelperCallbacks {
   isEnabled(): boolean;
   getLocale?(): string;
   getFallbackWorkspaceId?(): string | undefined;
-  onOpenTarget(path: string, target: OpenerTarget): Promise<void>;
+  onOpenTarget(
+    path: string,
+    target: OpenerTarget,
+    explicitWorkspaceId?: string,
+    projectNameHint?: string,
+  ): Promise<void>;
   onCopyPath(path: string): Promise<void>;
   onFetchThreadMetadata?(workspaceId?: string): Promise<ThreadMetadataSnapshot | null>;
   onRenameThread?(newTitle: string | null, options?: RenameThreadOptions): Promise<void>;
@@ -2427,6 +2475,12 @@ export function injectIntoNativeTabMenus(
       target: OpenerTarget;
     }[] = [
       {
+        key: "open-system-default",
+        label: catalog.actions.openInSystemDefault,
+        icon: "ExternalLink",
+        target: "system-default",
+      },
+      {
         key: "reveal-in-finder",
         label: catalog.actions.revealInFinder,
         icon: "FolderOpen",
@@ -3203,6 +3257,12 @@ export function installDesktopRevealHelpers(
       separatorBefore?: boolean;
     }[] = [
       {
+        key: "open-system-default",
+        label: catalog.actions.openInSystemDefault,
+        icon: "ExternalLink",
+        target: "system-default",
+      },
+      {
         key: "reveal-in-finder",
         label: catalog.actions.revealInFinder,
         icon: "FolderOpen",
@@ -3893,6 +3953,50 @@ export function installDesktopRevealHelpers(
         me.preventDefault();
         me.stopPropagation();
         void callbacks.onOpenTarget(detected, "finder-reveal");
+        return;
+      }
+    }
+
+    // ⌘+Click (Cmd+Click / Ctrl+Click) on file links, pills, tabs, or left sidebar rows directly opens in system default app / Finder
+    if (
+      prefs.enableCmdClickOpenSystemDefault &&
+      (me.metaKey || me.ctrlKey) &&
+      !me.altKey &&
+      me.button === 0
+    ) {
+      // 1. Check if left sidebar workspace or project row was clicked
+      if (prefs.enableSidebarCmdClickFinder) {
+        let sidebarTargetEl: MinimalElement | null = isUserClick ? me.target : null;
+        for (let depth = 0; sidebarTargetEl && depth < 8; depth += 1) {
+          const tid = sidebarTargetEl.getAttribute?.("data-testid") ?? "";
+          if (tid.startsWith("sidebar-workspace-row-")) {
+            const parsed = parseSidebarWorkspaceRowTestId(tid);
+            if (parsed?.workspaceId) {
+              me.preventDefault();
+              me.stopPropagation();
+              void callbacks.onOpenTarget(".", "finder-folder", parsed.workspaceId);
+              return;
+            }
+            break;
+          }
+          if (tid.startsWith("sidebar-project-row-")) {
+            const projName = (sidebarTargetEl.textContent ?? "").trim();
+            me.preventDefault();
+            me.stopPropagation();
+            void callbacks.onOpenTarget(".", "finder-folder", undefined, projName);
+            return;
+          }
+          sidebarTargetEl = sidebarTargetEl.parentElement ?? null;
+        }
+      }
+
+      // 2. Check if a file link, tool-call pill, code block, or file tab was clicked
+      const detected = extractFilePathFromElement(me.target, doc);
+      if (detected) {
+        me.preventDefault();
+        me.stopPropagation();
+        const targetOpener = prefs.cmdClickDefaultTarget ?? "system-default";
+        void callbacks.onOpenTarget(detected, targetOpener);
         return;
       }
     }

@@ -108,6 +108,7 @@ export async function resolveWorkspaceDirectory(
   context: PluginHandlerContext,
   workspaceId?: string,
   workspaceRoot?: string,
+  projectName?: string,
 ): Promise<string> {
   if (workspaceRoot && workspaceRoot.trim().length > 0) {
     return expandHome(workspaceRoot);
@@ -131,6 +132,14 @@ export async function resolveWorkspaceDirectory(
     if (workspaceId) {
       const matched = list.entries.find((w) => w.id === workspaceId);
       if (matched?.workspaceDirectory) return expandHome(matched.workspaceDirectory);
+    }
+    if (projectName && projectName.trim()) {
+      const cleanName = projectName.trim().toLowerCase();
+      const matchedProj = list.entries.find((w) => {
+        const rawProj = (w as { projectName?: string; name?: string }).projectName ?? w.name;
+        return rawProj && rawProj.toLowerCase() === cleanName && Boolean(w.workspaceDirectory);
+      });
+      if (matchedProj?.workspaceDirectory) return expandHome(matchedProj.workspaceDirectory);
     }
     const firstWithDir = list.entries.find((w) => Boolean(w.workspaceDirectory));
     if (firstWithDir?.workspaceDirectory) return expandHome(firstWithDir.workspaceDirectory);
@@ -371,6 +380,18 @@ async function openFolderCrossPlatform(folderPath: string): Promise<void> {
   }
 }
 
+async function openSystemDefaultCrossPlatform(targetPath: string): Promise<void> {
+  if (process.platform === "darwin") {
+    await execCommand("/usr/bin/open", [targetPath], { timeout: 5000 });
+  } else if (process.platform === "win32") {
+    await execCommand("cmd.exe", ["/c", "start", '""', targetPath], { timeout: 5000 }).catch(
+      () => execCommand("explorer.exe", [targetPath], { timeout: 5000 }),
+    );
+  } else {
+    await execCommand("xdg-open", [targetPath], { timeout: 5000 });
+  }
+}
+
 async function revealPathCrossPlatform(targetPath: string, isDirectory: boolean, parentDir: string): Promise<void> {
   if (isDirectory) {
     await openFolderCrossPlatform(targetPath);
@@ -395,6 +416,7 @@ export async function handleOpenFileTarget(
     context,
     input.workspaceId,
     input.workspaceRoot,
+    input.projectName,
   );
   const extraRoots = await listAllWorkspaceDirectories(context, workspaceRoot);
   const { resolvedPath, metadata } = await resolveBestPath(input.path, workspaceRoot, extraRoots);
@@ -402,9 +424,12 @@ export async function handleOpenFileTarget(
   const dryRun = options?.dryRun === true || process.env.PASEO_FINDER_DRY_RUN === "1";
 
   if (!metadata.exists) {
-    // If file does not exist but parentDir exists, reveal parentDir on finder-folder
+    // If file does not exist but parentDir exists, reveal parentDir on finder-folder or system-default
     const parentMeta = await inspectSinglePath(metadata.parentDir, workspaceRoot, false);
-    if (parentMeta.exists && (target === "finder-folder" || target === "finder-reveal")) {
+    if (
+      parentMeta.exists &&
+      (target === "finder-folder" || target === "finder-reveal" || target === "system-default")
+    ) {
       if (!dryRun) {
         await openFolderCrossPlatform(metadata.parentDir);
       }
@@ -446,6 +471,12 @@ export async function handleOpenFileTarget(
       } else if (target === "finder-folder") {
         const folder = metadata.isDirectory ? resolvedPath : metadata.parentDir;
         await openFolderCrossPlatform(folder);
+      } else if (target === "system-default") {
+        if (metadata.isDirectory) {
+          await openFolderCrossPlatform(resolvedPath);
+        } else {
+          await openSystemDefaultCrossPlatform(resolvedPath);
+        }
       } else if (target === "system-preview") {
         if (process.platform === "darwin" && IMAGE_EXT_SET.has(metadata.extension)) {
           await execCommand("/usr/bin/open", ["-a", "Preview", resolvedPath], { timeout: 5000 }).catch(
@@ -602,6 +633,12 @@ export async function handleDiagnosePath(
     available: boolean;
     commandPreview: string;
   }[] = [
+    {
+      target: "system-default",
+      label: "System default application",
+      available: true,
+      commandPreview: `open "${resolvedPath}"`,
+    },
     {
       target: "finder-reveal",
       label: "Reveal in Finder",

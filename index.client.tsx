@@ -29,11 +29,13 @@ import { installDesktopVoiceSttEnhancer } from "./client/voice-stt-web";
 import {
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
+  getWebWindow,
   installDesktopRevealHelpers,
   locateProjectInSidebar,
   mountInlineTitleInput,
   openQuickWorkspaceSwitcherModal,
   readQuickJumpPreferences,
+  resolveCurrentActiveWorkspaceId,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
   toggleCurrentSessionDone,
@@ -1267,8 +1269,21 @@ export default function contribute(client: PluginClientContext) {
     isEnabled: () => true,
     getLocale: () => client.i18n.locale,
     getFallbackWorkspaceId: () => lastKnownWorkspaceId,
-    onOpenTarget: async (path: string, target: OpenerTarget) => {
+    onOpenTarget: async (
+      path: string,
+      target: OpenerTarget,
+      explicitWorkspaceId?: string,
+      projectNameHint?: string,
+    ) => {
+      const win = getWebWindow();
+      const doc = win?.document ?? null;
+      const activeWsId =
+        explicitWorkspaceId ??
+        (doc ? resolveCurrentActiveWorkspaceId(doc, win, lastKnownWorkspaceId) : undefined) ??
+        lastKnownWorkspaceId;
       await client.rpc(openFileTargetRpc, {
+        workspaceId: activeWsId,
+        projectName: projectNameHint,
         path,
         target,
       });

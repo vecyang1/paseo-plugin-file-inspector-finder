@@ -192,6 +192,7 @@ export const openFileTargetRpc = defineRpc({
   input: z.object({
     workspaceId: z.string().optional(),
     workspaceRoot: z.string().optional(),
+    projectName: z.string().optional(),
     path: z.string(),
     target: OpenerTargetSchema,
   }),
