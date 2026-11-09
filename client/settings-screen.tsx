@@ -66,6 +66,14 @@ import {
   syncModelQuickSwitchPrefs,
 } from "./model-quick-switch-web";
 import {
+  SIDEBAR_DEFAULT_COLLAPSE_EVENT,
+  type SidebarDefaultCollapseStatus,
+  collapseEmptySidebarProjectsNow,
+  getSidebarDefaultCollapseStatus,
+  runSidebarDefaultCollapseSelfTest,
+  syncSidebarDefaultCollapsePrefs,
+} from "./sidebar-default-collapse-web";
+import {
   applyInlineInputCaret,
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
@@ -139,6 +147,15 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     window.addEventListener(MODEL_QUICK_SWITCH_EVENT, onReceipt);
     return () => window.removeEventListener(MODEL_QUICK_SWITCH_EVENT, onReceipt);
   }, []);
+  const [sidebarCollapseStatus, setSidebarCollapseStatus] =
+    useState<SidebarDefaultCollapseStatus | null>(null);
+  useEffect(() => {
+    setSidebarCollapseStatus(getSidebarDefaultCollapseStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setSidebarCollapseStatus(getSidebarDefaultCollapseStatus());
+    window.addEventListener(SIDEBAR_DEFAULT_COLLAPSE_EVENT, onReceipt);
+    return () => window.removeEventListener(SIDEBAR_DEFAULT_COLLAPSE_EVENT, onReceipt);
+  }, []);
   const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
   const [agentHistorySnapData, setAgentHistorySnapData] = useState<
     Awaited<ReturnType<typeof manageAgentHistory>> | null
@@ -180,6 +197,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         enabled: settings.values.enableModelQuickSwitch,
         digitMode: settings.values.modelQuickSwitchDigits,
       });
+      syncSidebarDefaultCollapsePrefs({ enabled: settings.values.startNewProjectsCollapsed });
     }
   }, [settings]);
 
@@ -665,6 +683,17 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 quickJumpDefaultAction: values.quickJumpDefaultAction,
               });
               void save({ ...values, autoRevealActiveWorkspaceInSidebar: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.startNewProjectsCollapsedLabel")}
+            hint={t("settings.startNewProjectsCollapsedHint")}
+            value={values.startNewProjectsCollapsed}
+            onValueChange={(next) => {
+              syncSidebarDefaultCollapsePrefs({ enabled: next });
+              setSidebarCollapseStatus(getSidebarDefaultCollapseStatus());
+              void save({ ...values, startNewProjectsCollapsed: next }, revision);
             }}
           />
 
@@ -1376,6 +1405,44 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               ))}
             </View>
           ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionSidebarDefaultCollapse")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {t("settings.sidebarCollapseStatusPrefix")}{" "}
+            {sidebarCollapseStatus
+              ? `${sidebarCollapseStatus.prefs.enabled ? "on" : "off"} · installed=${sidebarCollapseStatus.installed} · visible=${sidebarCollapseStatus.projects.length} · open=${sidebarCollapseStatus.projects.filter((p) => p.expanded).length} · remembered=${sidebarCollapseStatus.knownCount ?? "none yet"}`
+              : "-"}
+          </Text>
+          <View style={styles.row}>
+            <Pressable
+              style={styles.btn}
+              onPress={() => setSidebarCollapseStatus(runSidebarDefaultCollapseSelfTest())}
+            >
+              <Text style={styles.btnText}>{t("settings.sidebarCollapseSelfTestBtn")}</Text>
+            </Pressable>
+            <Pressable
+              style={styles.btn}
+              onPress={() => {
+                collapseEmptySidebarProjectsNow();
+                setSidebarCollapseStatus(getSidebarDefaultCollapseStatus());
+              }}
+            >
+              <Text style={styles.btnText}>{t("settings.sidebarCollapseTidyBtn")}</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.detail}>{t("settings.sidebarCollapseReceiptsTitle")}</Text>
+          {sidebarCollapseStatus && sidebarCollapseStatus.receipts.length > 0 ? (
+            sidebarCollapseStatus.receipts.slice(0, 6).map((r) => (
+              <Text key={`${r.at}-${r.trigger}`} style={styles.detail}>
+                • {r.ok ? "✓" : "✕"} {r.at.slice(11, 19)} [{r.trigger}] {r.outcome}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settings.sidebarCollapseNoReceipts")}</Text>
+          )}
         </View>
       </SettingsSection>
 

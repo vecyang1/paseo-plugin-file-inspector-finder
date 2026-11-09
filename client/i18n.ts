@@ -163,6 +163,9 @@ export const enMessages = {
       "Auto-reveal & scroll left sidebar when switching workspace from Search (Cmd+F / Cmd+K)",
     autoRevealSidebarHint:
       "Automatically uncollapse the parent project folder, scroll the left sidebar into vision, and highlight the active workspace row whenever selecting a Workspace or Agent in Search",
+    startNewProjectsCollapsedLabel: "Start new projects collapsed",
+    startNewProjectsCollapsedHint:
+      "A project that first shows up in the sidebar, for example from a schedule run, starts collapsed. Projects you open yourself stay open, and a new project that holds the workspace you are on is left open.",
     quickJumpModeLabel: "Default Enter action in Quick Workspace Switcher",
     quickJumpModeHint:
       "What pressing Enter on a project folder does (Shift+Enter always locates in sidebar; Option+Enter creates a new thread)",
@@ -231,6 +234,12 @@ export const enMessages = {
     dictationGuardSelfTestBtn: "Run guard self-test",
     dictationGuardReceiptsTitle: "Recent guard receipts",
     dictationGuardNoReceipts: "No receipts yet. Dictate once, then stop with Enter or Cmd+D.",
+    sectionSidebarDefaultCollapse: "New sidebar projects",
+    sidebarCollapseStatusPrefix: "New projects:",
+    sidebarCollapseSelfTestBtn: "Run self-test",
+    sidebarCollapseTidyBtn: "Collapse empty projects now",
+    sidebarCollapseReceiptsTitle: "Recent receipts",
+    sidebarCollapseNoReceipts: "No receipts yet. One is written when a new project shows up in the sidebar.",
     sectionModelQuickSwitch: "Model quick switch",
     modelQuickSwitchLabel: "Change model with ⌘/ and 1–9",
     modelQuickSwitchHint:
@@ -444,6 +453,9 @@ export const zhMessages: PluginMessageCatalog = {
     autoRevealSidebarLabel: "搜索跳转后左侧边栏自动展开并滚动定位到当前工作区 (Cmd+F / Cmd+K)",
     autoRevealSidebarHint:
       "在搜索面板 (Cmd+F / Cmd+K) 点击任意工作区或智能体会话后，自动展开其所属项目目录、将左侧边栏滚动到视野中央并高亮闪烁对应工作区行",
+    startNewProjectsCollapsedLabel: "侧边栏新项目默认折叠",
+    startNewProjectsCollapsedHint:
+      "首次出现在侧边栏的项目（例如定时任务运行时自动添加的）默认折叠。你手动展开的项目保持展开；包含当前工作区的新项目不会被折叠。",
     quickJumpModeLabel: "快速跳转面板默认回车动作",
     quickJumpModeHint:
       "选中项目后直接按回车时的默认行为（按 Shift+回车 始终仅定位左侧边栏，按 Option+回车 始终新建会话）",
@@ -510,6 +522,12 @@ export const zhMessages: PluginMessageCatalog = {
     dictationGuardSelfTestBtn: "运行守卫自检",
     dictationGuardReceiptsTitle: "最近守卫回执",
     dictationGuardNoReceipts: "暂无回执。先听写一次，再用回车或 Cmd+D 结束。",
+    sectionSidebarDefaultCollapse: "侧边栏新项目",
+    sidebarCollapseStatusPrefix: "新项目：",
+    sidebarCollapseSelfTestBtn: "运行自检",
+    sidebarCollapseTidyBtn: "立即折叠空项目",
+    sidebarCollapseReceiptsTitle: "最近回执",
+    sidebarCollapseNoReceipts: "暂无回执。侧边栏出现新项目时会在这里记录。",
     sectionModelQuickSwitch: "快速切换模型",
     modelQuickSwitchLabel: "用 ⌘/ 和 1–9 切换模型",
     modelQuickSwitchHint:

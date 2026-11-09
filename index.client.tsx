@@ -44,6 +44,7 @@ import {
   triggerScheduleRunsDrawer,
 } from "./client/schedule-runs-web";
 import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
+import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
 
 export default function contribute(client: PluginClientContext) {
   // 1. Pre-associate image extensions with our Image Inspector file panel & materialize default inline rename prefs
@@ -1050,6 +1051,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupModelQuickSwitch = installModelQuickSwitch();
 
+  const cleanupSidebarDefaultCollapse = installSidebarDefaultCollapse();
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -1060,6 +1063,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupScheduleRunsEnhancer();
     cleanupVoiceSttEnhancer();
     cleanupModelQuickSwitch();
+    cleanupSidebarDefaultCollapse();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
   };

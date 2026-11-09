@@ -113,6 +113,7 @@ export const pluginSettings = defineSettings({
     enableWorkspaceQuickJump: z.boolean().default(true),
     enableCommandCenterProjectItems: z.boolean().default(true),
     autoRevealActiveWorkspaceInSidebar: z.boolean().default(true),
+    startNewProjectsCollapsed: z.boolean().default(true),
     quickJumpDefaultAction: QuickJumpActionSchema.default("open-latest"),
     enableScheduleRunsInspector: z.boolean().default(true),
     enableVoiceCustomModelHelper: z.boolean().default(true),
