@@ -12,6 +12,7 @@ import type {
   SlashDryRunResolution,
   SubagentAgentTree,
   SubagentTimelineItem,
+  SubagentTimerOrTaskNode,
   WritebackReplayEvent,
   manageAgentHistoryRpc,
   manageSessionLineageRpc,
@@ -999,6 +1000,34 @@ function normalizeTimelineItems(rawItems: unknown): SubagentTimelineItem[] {
   return out;
 }
 
+function normalizeTimersAndTasks(rawItems: unknown): SubagentTimerOrTaskNode[] {
+  if (!Array.isArray(rawItems)) return [];
+  const out: SubagentTimerOrTaskNode[] = [];
+  for (const r of rawItems) {
+    if (!r || typeof r !== "object") continue;
+    const obj = r as Record<string, unknown>;
+    const rawKind = String(obj.kind ?? "timer");
+    const kind: "timer" | "background_task" =
+      rawKind === "background_task" ? "background_task" : "timer";
+    const rawSt = String(obj.status ?? "completed");
+    const status: "running" | "completed" | "canceled" =
+      rawSt === "running" || rawSt === "canceled" ? rawSt : "completed";
+    out.push({
+      id: String(obj.id ?? ""),
+      taskId: String(obj.taskId ?? ""),
+      kind,
+      stepIndex: Number(obj.stepIndex ?? 0),
+      durationSeconds: typeof obj.durationSeconds === "number" ? obj.durationSeconds : null,
+      cronExpression: typeof obj.cronExpression === "string" ? obj.cronExpression : null,
+      timerCondition: typeof obj.timerCondition === "string" ? obj.timerCondition : null,
+      prompt: String(obj.prompt ?? ""),
+      status,
+      timestamp: typeof obj.timestamp === "string" ? obj.timestamp : null,
+    });
+  }
+  return out;
+}
+
 function normalizeFlatSubagentNode(raw: unknown): FlatSubagentNode | null {
   if (!raw || typeof raw !== "object") return null;
   const n = raw as Record<string, unknown>;
@@ -1026,6 +1055,7 @@ function normalizeFlatSubagentNode(raw: unknown): FlatSubagentNode | null {
     transcriptPath: String(n.transcriptPath ?? ""),
     nestedSubagentCount: Number(n.nestedSubagentCount ?? 0),
     nestedRunningCount: Number(n.nestedRunningCount ?? 0),
+    timersAndTasks: normalizeTimersAndTasks(n.timersAndTasks),
     timeline: normalizeTimelineItems(n.timeline),
   };
 }
@@ -1040,6 +1070,9 @@ export async function handleManageSubagents(
     const cliArgs = ["subagents", action, "--json"];
     if (input.agentId && input.agentId.trim()) {
       cliArgs.push("--agent", input.agentId.trim());
+    }
+    if (input.workspaceId && input.workspaceId.trim()) {
+      cliArgs.push("--workspace", input.workspaceId.trim());
     }
     if (input.conversationId && input.conversationId.trim()) {
       cliArgs.push("--cid", input.conversationId.trim());
@@ -1077,6 +1110,7 @@ export async function handleManageSubagents(
         rootStepCount: Number(tr.rootStepCount ?? 0),
         rootToolCallCount: Number(tr.rootToolCallCount ?? 0),
         rootLastMessagePreview: String(tr.rootLastMessagePreview ?? ""),
+        rootTimersAndTasks: normalizeTimersAndTasks(tr.rootTimersAndTasks),
         updatedAt: String(tr.updatedAt ?? ""),
         subagentSummary: {
           total: Number(subSum.total ?? flatSubagents.length),
@@ -1091,7 +1125,9 @@ export async function handleManageSubagents(
       };
     });
 
-    const singleConversation = normalizeFlatSubagentNode(parsed.singleConversation);
+    const singleConversation = normalizeFlatSubagentNode(
+      parsed.singleConversation ?? parsed.focusedConversation,
+    );
     const totalSubagents = Number(summaryRaw.totalSubagents ?? 0);
     const runningSubagents = Number(summaryRaw.runningSubagents ?? 0);
     const completedSubagents = Number(summaryRaw.completedSubagents ?? 0);
@@ -1102,6 +1138,8 @@ export async function handleManageSubagents(
       ok: Boolean(parsed.ok ?? true),
       action,
       targetAgentId: typeof parsed.targetAgentId === "string" ? parsed.targetAgentId : null,
+      targetWorkspaceId:
+        typeof parsed.targetWorkspaceId === "string" ? parsed.targetWorkspaceId : null,
       targetConversationId:
         typeof parsed.targetConversationId === "string" ? parsed.targetConversationId : null,
       summary: {
@@ -1123,6 +1161,7 @@ export async function handleManageSubagents(
       ok: false,
       action,
       targetAgentId: input.agentId ?? null,
+      targetWorkspaceId: input.workspaceId ?? null,
       targetConversationId: input.conversationId ?? null,
       summary: {
         agentsWithSubagents: 0,

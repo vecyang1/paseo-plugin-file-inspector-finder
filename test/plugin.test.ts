@@ -24,6 +24,7 @@ import {
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
   manageSlashSkillsRpc,
+  manageSubagentsRpc,
   manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
 } from "../shared/contracts";
@@ -115,6 +116,11 @@ import {
   setTextContentIfChanged,
   syncScheduleRunsPreferences,
 } from "../client/schedule-runs-web";
+import {
+  extractCurrentRouteAgentId,
+  normalizeWorkspaceKey,
+} from "../client/subagents-tree-web";
+import { extractCurrentWorkspaceAndAgent } from "../client/session-lineage-web";
 
 // Minimal valid 1x1 PNG buffer
 const TINY_PNG_BASE64 =
@@ -3641,6 +3647,37 @@ test("36. ⌘+Click (Cmd+Click) directly opens file with outside system default 
 
   cleanup();
 });
+
+test("43. Subagent & Timer Sidebar route resolution on /workspace/local:wks_... and manageSubagentsRpc schema", () => {
+  assert.equal(normalizeWorkspaceKey("local:wks_c206b1aecedb6750"), "wks_c206b1aecedb6750");
+  assert.equal(normalizeWorkspaceKey("wks_c206b1aecedb6750"), "wks_c206b1aecedb6750");
+  assert.equal(normalizeWorkspaceKey(""), null);
+  assert.equal(
+    extractCurrentRouteAgentId("/ag/0db20d19-074c-43a4-a4de-77b3b3d16a02"),
+    "0db20d19-074c-43a4-a4de-77b3b3d16a02",
+  );
+  assert.equal(
+    extractCurrentRouteAgentId("/workspace/local:wks_c206b1aecedb6750"),
+    null,
+  );
+
+  const ctx = extractCurrentWorkspaceAndAgent(
+    null,
+    { location: { pathname: "/workspace/local:wks_c206b1aecedb6750" } } as unknown as Window,
+  );
+  assert.equal(ctx.workspaceId, "local:wks_c206b1aecedb6750");
+  assert.equal(normalizeWorkspaceKey(ctx.workspaceId), "wks_c206b1aecedb6750");
+
+  const parsedInput = manageSubagentsRpc.input.parse({
+    action: "inspect",
+    workspaceId: "wks_c206b1aecedb6750",
+    includeTimeline: true,
+    source: "drawer",
+  });
+  assert.equal(parsedInput.workspaceId, "wks_c206b1aecedb6750");
+  assert.equal(parsedInput.includeTimeline, true);
+});
+
 
 
 

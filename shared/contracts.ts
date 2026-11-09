@@ -863,6 +863,21 @@ export const manageWritebackHookRpc = defineRpc({
   }),
 });
 
+export const SubagentTimerOrTaskNodeSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  kind: z.enum(["timer", "background_task"]),
+  stepIndex: z.number(),
+  durationSeconds: z.number().nullable().optional(),
+  cronExpression: z.string().nullable().optional(),
+  timerCondition: z.string().nullable().optional(),
+  prompt: z.string(),
+  status: z.enum(["running", "completed", "canceled"]),
+  timestamp: z.string().nullable().optional(),
+});
+
+export type SubagentTimerOrTaskNode = z.infer<typeof SubagentTimerOrTaskNodeSchema>;
+
 export const SubagentTimelineItemSchema = z.object({
   id: z.string(),
   stepIndex: z.number(),
@@ -899,6 +914,7 @@ export const FlatSubagentNodeSchema = z.object({
   transcriptPath: z.string(),
   nestedSubagentCount: z.number(),
   nestedRunningCount: z.number(),
+  timersAndTasks: z.array(SubagentTimerOrTaskNodeSchema).optional(),
   timeline: z.array(SubagentTimelineItemSchema).optional(),
 });
 
@@ -917,6 +933,7 @@ export const SubagentAgentTreeSchema = z.object({
   rootStepCount: z.number(),
   rootToolCallCount: z.number(),
   rootLastMessagePreview: z.string(),
+  rootTimersAndTasks: z.array(SubagentTimerOrTaskNodeSchema).optional(),
   updatedAt: z.string(),
   subagentSummary: z.object({
     total: z.number(),
@@ -937,6 +954,7 @@ export const manageSubagentsRpc = defineRpc({
   input: z.object({
     action: z.enum(["status", "tree", "inspect", "timeline"]).default("status"),
     agentId: z.string().optional(),
+    workspaceId: z.string().optional(),
     conversationId: z.string().optional(),
     includeTimeline: z.boolean().optional(),
     limit: z.number().int().min(1).max(50).optional(),
@@ -948,6 +966,7 @@ export const manageSubagentsRpc = defineRpc({
     ok: z.boolean(),
     action: z.string(),
     targetAgentId: z.string().nullable(),
+    targetWorkspaceId: z.string().nullable().optional(),
     targetConversationId: z.string().nullable(),
     summary: z.object({
       agentsWithSubagents: z.number(),
