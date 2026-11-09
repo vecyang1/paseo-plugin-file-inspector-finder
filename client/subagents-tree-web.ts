@@ -1972,7 +1972,9 @@ export function installDesktopSubagentsTreeEnhancer(
     if (!scope.scopeKey || !tree || tree.subagentSummary.total === 0) {
       existingBar?.remove();
     } else {
-      const composer = document.querySelector<HTMLElement>('[data-testid="agent-composer"]');
+      const composer = document.querySelector<HTMLElement>(
+        '[data-testid="agent-composer"], [data-testid="message-input-root"]',
+      );
       const hostParent = composer?.parentElement ?? null;
       if (hostParent && composer) {
         let bar = existingBar;
@@ -2206,11 +2208,35 @@ export function installDesktopSubagentsTreeEnhancer(
       return;
     }
 
-    const badge = target.closest<HTMLElement>('[data-testid="tool-call-badge"]');
-    if (!badge) return;
-
     const scope = resolveActiveScope();
     const curTree = getCachedTreeForScope(scope);
+
+    // 1. Check if clicking an inline `conversationId: <uuid>` code span or subagent UUID token in assistant text
+    const codeEl = target.closest<HTMLElement>("code");
+    if (codeEl && curTree && curTree.flatSubagents.length > 0) {
+      const codeText = (codeEl.textContent ?? "").trim();
+      const uuidMatch = codeText.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (uuidMatch) {
+        const matchedSub = curTree.flatSubagents.find(
+          (s) => s.conversationId.toLowerCase() === uuidMatch[1].toLowerCase(),
+        );
+        if (matchedSub) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          void openDrawer({
+            agentId: curTree.agentId,
+            workspaceId: curTree.workspaceId,
+            conversationId: matchedSub.conversationId,
+            layoutMode: "docked-right",
+          });
+          return;
+        }
+      }
+    }
+
+    // 2. Check if clicking `[data-testid="tool-call-badge"]`
+    const badge = target.closest<HTMLElement>('[data-testid="tool-call-badge"]');
+    if (!badge) return;
     const existingChip = badge.querySelector<HTMLElement>(
       '[data-testid="paseo-finder-inline-subagent-chip"]',
     );
