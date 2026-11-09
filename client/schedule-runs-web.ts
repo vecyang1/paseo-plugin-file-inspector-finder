@@ -98,11 +98,11 @@ const COPY_ZH: ScheduleRunsCopy = {
   allRunsBtn: "全部运行记录",
   runsPillPrefix: "运行",
   viewRunsMenu: "查看运行历史与会话详情",
-  drawerBreadcrumbRoot: "定时任务 (Schedules)",
+  drawerBreadcrumbRoot: "定时任务",
   drawerTitleAllRuns: "定时任务运行历史与会话巡检器",
   drawerSubtitleAllRuns:
     "对标 Antigravity Automations：查看所有任务历史运行次数、执行耗时与输出摘要，一键唤醒并进入任意历史运行对话。",
-  runNowBtn: "▶ 立即运行",
+  runNowBtn: "立即运行",
   runningNowToast: "已触发 Paseo 立即执行该定时任务",
   keepOpenToggleOn: "完成后自动归档: 开启",
   keepOpenToggleOff: "常驻侧边栏: 开启",
@@ -111,26 +111,26 @@ const COPY_ZH: ScheduleRunsCopy = {
   workspaceLabel: "工作目录",
   modelLabel: "执行模型",
   archivePolicyLabel: "会话保留策略",
-  archivePolicyTrue: "完成后归档（点击进入对话时自动恢复）",
+  archivePolicyTrue: "完成后归档，点击进入对话时自动恢复",
   archivePolicyFalse: "完成后保留在左侧边栏",
-  instructionsHeading: "任务指令 (Prompt)",
+  instructionsHeading: "任务指令",
   showAllPrompt: "展开全部",
   collapsePrompt: "收起指令",
-  runsHeading: "历史运行记录 (Runs)",
+  runsHeading: "历史运行记录",
   noRunsYet: "该定时任务尚无历史运行记录，可点击右上角「立即运行」触发。",
-  openConversationBtn: "进入对话 ↗",
+  openConversationBtn: "进入对话",
   openingConversationToast: "正在恢复并打开该次运行的工作区会话...",
   previewTimelineBtn: "预览对话与输出",
   hideTimelineBtn: "收起预览",
   filterOnlyWithRuns: "仅看有运行记录",
   filterAllSchedules: "全部定时任务",
   searchPlaceholder: "搜索任务名称、模型或运行输出内容...",
-  statusActive: "运行中 (Active)",
-  statusPaused: "已暂停 (Standby)",
+  statusActive: "运行中",
+  statusPaused: "已暂停",
   standbyBadge: "AG 灾备孪生",
-  archivedBadge: "已归档 (点击自动恢复)",
+  archivedBadge: "已归档，点击自动恢复",
   activeWorkspaceBadge: "侧边栏活跃",
-  closeBtn: "关闭 (Esc)",
+  closeBtn: "关闭",
 };
 
 function isZhLocale(): boolean {
@@ -169,6 +169,90 @@ function formatShortTimestamp(iso: string | null): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+const EN_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const ZH_WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+const EN_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+export function formatAntigravityRunTimestamp(
+  iso: string | null | undefined,
+  options?: { nowMs?: number; isZh?: boolean; emptyLabel?: string },
+): string {
+  const isZh = options?.isZh ?? false;
+  const empty = options?.emptyLabel ?? (isZh ? "—" : "—");
+  if (!iso) return empty;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const now = new Date(options?.nowMs ?? Date.now());
+
+  const startOfTarget = new Date(
+    d.getFullYear(),
+    d.getMonth(),
+    d.getDate(),
+  ).getTime();
+  const startOfNow = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).getTime();
+  const diffDays = Math.round((startOfTarget - startOfNow) / 86_400_000);
+
+  const rawHours = d.getHours();
+  const mins = String(d.getMinutes()).padStart(2, "0");
+  const timePart = isZh
+    ? `${String(rawHours).padStart(2, "0")}:${mins}`
+    : `${rawHours % 12 || 12}:${mins} ${rawHours >= 12 ? "PM" : "AM"}`;
+
+  if (diffDays === 0) {
+    return isZh ? `今天 ${timePart}` : `Today ${timePart}`;
+  }
+  if (diffDays === 1) {
+    return isZh ? `明天 ${timePart}` : `Tomorrow ${timePart}`;
+  }
+  if (diffDays === -1) {
+    return isZh ? `昨天 ${timePart}` : `Yesterday ${timePart}`;
+  }
+  if (Math.abs(diffDays) <= 6) {
+    const wd = d.getDay();
+    return isZh
+      ? `${ZH_WEEKDAYS[wd]} ${timePart}`
+      : `${EN_WEEKDAYS[wd]} ${timePart}`;
+  }
+  return isZh
+    ? `${d.getMonth() + 1}月${d.getDate()}日 ${timePart}`
+    : `${EN_MONTHS[d.getMonth()]} ${d.getDate()}, ${timePart}`;
+}
+
+export function formatCompactSidebarAge(
+  iso: string | null | undefined,
+  nowMs?: number,
+): string {
+  if (!iso) return "";
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return "";
+  const diffSec = Math.max(0, Math.floor(((nowMs ?? Date.now()) - ts) / 1000));
+  if (diffSec < 60) return "now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 14) return `${diffDays}d`;
+  return `${Math.floor(diffDays / 7)}w`;
 }
 
 const SCHEDULE_RUNS_STORAGE_KEY = "paseo:finder-plugin:schedule-runs-config";
@@ -212,6 +296,7 @@ export interface ScheduleRunsDomSelfTestResult {
 }
 
 let cachedSchedulesById = new Map<string, ScheduleRunsSummary>();
+let cachedProjectLastActiveByKey: Record<string, string> = {};
 let cachedTotals = {
   totalSchedules: 0,
   schedulesWithRuns: 0,
@@ -356,7 +441,9 @@ function isInjectedScheduleRunsNode(node: unknown): boolean {
     if (
       cursor.id === "paseo-finder-all-runs-toolbar" ||
       cursor.id === "paseo-finder-all-runs-summary" ||
-      cursor.id === "paseo-finder-schedule-runs-drawer"
+      cursor.id === "paseo-finder-schedules-col-header" ||
+      cursor.id === "paseo-finder-schedule-runs-drawer" ||
+      cursor.id === "paseo-finder-sidebar-ts-style"
     ) {
       return true;
     }
@@ -367,8 +454,13 @@ function isInjectedScheduleRunsNode(node: unknown): boolean {
       const tid = cursor.getAttribute("data-testid") ?? "";
       if (
         tid === "schedules-all-runs-btn" ||
+        tid === "schedules-col-header" ||
         tid === "schedule-runs-drawer" ||
         tid.startsWith("schedule-runs-pill-") ||
+        tid.startsWith("schedule-time-cols-") ||
+        tid.startsWith("schedule-next-run-col-") ||
+        tid.startsWith("schedule-last-run-col-") ||
+        tid.startsWith("sidebar-project-timestamp-") ||
         tid.startsWith("schedule-menu-runs-")
       ) {
         return true;
@@ -453,11 +545,14 @@ export interface MinimalScheduleDomDocument {
   ): ArrayLike<T>;
 }
 
+export type ScheduleRowSummarySlice = Pick<
+  ScheduleRunsSummary,
+  "totalRuns" | "lastRunStatus"
+> &
+  Partial<Pick<ScheduleRunsSummary, "lastRunAt" | "nextRunAt" | "status">>;
+
 export interface DecorateSchedulesDomOptions {
-  schedulesById: ReadonlyMap<
-    string,
-    Pick<ScheduleRunsSummary, "totalRuns" | "lastRunStatus">
-  >;
+  schedulesById: ReadonlyMap<string, ScheduleRowSummarySlice>;
   totals: {
     totalSchedules: number;
     schedulesWithRuns: number;
@@ -465,7 +560,35 @@ export interface DecorateSchedulesDomOptions {
   };
   isZh: boolean;
   theme?: PaseoThemeTokens;
+  nowMs?: number;
+  projectLastActiveByKey?: Record<string, string>;
   onOpenDrawer: (scheduleId: string | null) => void;
+}
+
+export function ensurePaseoSidebarTimestampSetting(
+  storageOverride?: Pick<Storage, "getItem" | "setItem"> | null,
+): boolean {
+  const storage =
+    storageOverride ??
+    (typeof window !== "undefined" ? window.localStorage : null);
+  if (!storage) return false;
+  const HEALED_KEY = "paseo:finder-plugin:healed-sidebar-trailing-v1";
+  try {
+    if (storage.getItem(HEALED_KEY) === "1") return false;
+    const raw = storage.getItem("paseo:app-settings");
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed && parsed.sidebarWorkspaceTrailing === "diff") {
+      parsed.sidebarWorkspaceTrailing = "timestamp";
+      storage.setItem("paseo:app-settings", JSON.stringify(parsed));
+      storage.setItem(HEALED_KEY, "1");
+      return true;
+    }
+    storage.setItem(HEALED_KEY, "1");
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export function decorateSchedulesDomOnDocument(
@@ -475,17 +598,94 @@ export function decorateSchedulesDomOnDocument(
   const copy = options.isZh ? COPY_ZH : COPY_EN;
   const theme = options.theme;
   const themeKey = theme?.name ?? "default";
+  const nowMs = options.nowMs ?? Date.now();
+  const minuteBucket = Math.floor(nowMs / 60_000);
+  let domWrites = 0;
+
+  // Decorate left-sidebar project folder rows (`sidebar-project-row-<viewKey>`) with compact relative age (`18h`, `2d`)
+  const projMap = options.projectLastActiveByKey;
+  if (projMap && Object.keys(projMap).length > 0) {
+    const projectRows = doc.querySelectorAll<MinimalScheduleDomElement>(
+      '[data-testid^="sidebar-project-row-"]',
+    );
+    if (projectRows && projectRows.length > 0) {
+      let hoverStyle = doc.getElementById("paseo-finder-sidebar-ts-style");
+      if (!hoverStyle && typeof document !== "undefined" && doc === (document as unknown)) {
+        const headEl = document.head ?? document.body;
+        if (headEl) {
+          const styleEl = document.createElement("style");
+          styleEl.id = "paseo-finder-sidebar-ts-style";
+          styleEl.setAttribute("data-finder-runs-injected", "true");
+          styleEl.textContent =
+            '[data-testid^="sidebar-project-row-"]:hover [data-testid^="sidebar-project-timestamp-"] { opacity: 0 !important; }';
+          headEl.appendChild(styleEl);
+          hoverStyle = styleEl as unknown as MinimalScheduleDomElement;
+          domWrites += 1;
+        }
+      }
+      for (let p = 0; p < projectRows.length; p += 1) {
+        const projRow = projectRows[p];
+        if (!projRow) continue;
+        const projTestId = projRow.getAttribute("data-testid") ?? "";
+        const viewKey = projTestId.replace(/^sidebar-project-row-/, "").trim();
+        if (!viewKey) continue;
+        const iso = projMap[viewKey] ?? null;
+        const ageText = formatCompactSidebarAge(iso, nowMs);
+        if (!ageText) continue;
+
+        let tsBadge = projRow.querySelector<MinimalScheduleDomElement>(
+          `[data-testid="sidebar-project-timestamp-${viewKey}"]`,
+        );
+        if (!tsBadge) {
+          tsBadge = doc.createElement("span");
+          tsBadge.setAttribute(
+            "data-testid",
+            `sidebar-project-timestamp-${viewKey}`,
+          );
+          tsBadge.setAttribute("data-finder-runs-injected", "true");
+          if (!projRow.style.position) {
+            projRow.style.position = "relative";
+          }
+          projRow.appendChild(tsBadge);
+          domWrites += 1;
+        }
+        const projSig = `${themeKey}:${minuteBucket}:${ageText}`;
+        if (tsBadge.getAttribute("data-finder-proj-ts-sig") !== projSig) {
+          tsBadge.setAttribute("data-finder-proj-ts-sig", projSig);
+          if (setTextContentIfChanged(tsBadge, ageText)) {
+            domWrites += 1;
+          }
+          tsBadge.title = iso
+            ? `${formatAntigravityRunTimestamp(iso, { nowMs, isZh: options.isZh })} (${iso})`
+            : ageText;
+          Object.assign(tsBadge.style, {
+            position: "absolute",
+            right: "10px",
+            top: "50%",
+            transform: "translateY(-50%)",
+            fontSize: "12px",
+            lineHeight: "20px",
+            fontWeight: "400",
+            color: theme ? theme.foregroundMuted : "#9ca3af",
+            opacity: "0.75",
+            pointerEvents: "none",
+            userSelect: "none",
+            transition: "opacity 120ms ease",
+          });
+        }
+      }
+    }
+  }
+
   const rows = doc.querySelectorAll<MinimalScheduleDomElement>(
     '[data-testid^="schedule-row-"]',
   );
   if (!rows || rows.length === 0) {
-    return { rowCount: 0, domWrites: 0 };
+    return { rowCount: 0, domWrites };
   }
 
-  let domWrites = 0;
-
   // Mount `#paseo-finder-all-runs-toolbar` safely inside `[data-testid="schedules-table"]`
-  // (never via `tableEl.parentElement.insertBefore`, which collides with React sibling reconciliation
+  // (never via `tableEl.parentElement.insertBefore`, which collides with host sibling reconciliation
   // when toggling Active <-> Ended filter tabs).
   const tableEl = doc.querySelector<MinimalScheduleDomElement>(
     '[data-testid="schedules-table"]',
@@ -557,7 +757,7 @@ export function decorateSchedulesDomOnDocument(
           summaryEl.style.color = theme.foregroundMuted;
         }
         const nextSummary = options.isZh
-          ? `共 ${options.totals.totalSchedules} 个定时任务 · ${options.totals.schedulesWithRuns} 个有运行记录（累计 ${options.totals.totalRuns} 次运行，点击行内「运行 (N)」查看详情与对话）`
+          ? `共 ${options.totals.totalSchedules} 个定时任务 · ${options.totals.schedulesWithRuns} 个有运行记录，累计 ${options.totals.totalRuns} 次运行，点击行内运行徽章查看详情与对话`
           : `${options.totals.totalSchedules} schedules · ${options.totals.schedulesWithRuns} with recorded runs (${options.totals.totalRuns} total runs — click any 'Runs (N)' pill to inspect or open conversation)`;
         if (setTextContentIfChanged(summaryEl, nextSummary)) {
           domWrites += 1;
@@ -576,6 +776,131 @@ export function decorateSchedulesDomOnDocument(
         if (setTextContentIfChanged(allBtnEl, nextBtnText)) {
           domWrites += 1;
         }
+      }
+    }
+  }
+
+  // Mount Antigravity-style column header (`Scheduled` | `Next run` | `Last run` | `Status & Runs`)
+  let colHeader = doc.getElementById("paseo-finder-schedules-col-header");
+  if (tableEl && !colHeader) {
+    colHeader = doc.createElement("div");
+    colHeader.id = "paseo-finder-schedules-col-header";
+    colHeader.setAttribute("data-testid", "schedules-col-header");
+    colHeader.setAttribute("data-finder-runs-injected", "true");
+    Object.assign(colHeader.style, {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "6px 14px",
+      marginBottom: "4px",
+      fontSize: "11px",
+      fontWeight: "600",
+      letterSpacing: "0.02em",
+      color: theme ? theme.foregroundMuted : "#9ca3af",
+      borderBottom: theme
+        ? `1px solid ${theme.border}`
+        : "1px solid rgba(156, 163, 175, 0.16)",
+      userSelect: "none",
+    });
+
+    const leftColLabel = doc.createElement("span");
+    leftColLabel.id = "paseo-finder-col-header-scheduled";
+    leftColLabel.setAttribute("data-finder-runs-injected", "true");
+    Object.assign(leftColLabel.style, {
+      flex: "1",
+      minWidth: "0",
+    });
+    colHeader.appendChild(leftColLabel);
+
+    const rightColsGroup = doc.createElement("div");
+    rightColsGroup.setAttribute("data-finder-runs-injected", "true");
+    Object.assign(rightColsGroup.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "12px",
+      flexShrink: "0",
+    });
+
+    const nextColLabel = doc.createElement("span");
+    nextColLabel.id = "paseo-finder-col-header-next";
+    nextColLabel.setAttribute("data-finder-runs-injected", "true");
+    Object.assign(nextColLabel.style, {
+      width: "140px",
+      textAlign: "left",
+    });
+    rightColsGroup.appendChild(nextColLabel);
+
+    const lastColLabel = doc.createElement("span");
+    lastColLabel.id = "paseo-finder-col-header-last";
+    lastColLabel.setAttribute("data-finder-runs-injected", "true");
+    Object.assign(lastColLabel.style, {
+      width: "140px",
+      textAlign: "left",
+    });
+    rightColsGroup.appendChild(lastColLabel);
+
+    const statusColLabel = doc.createElement("span");
+    statusColLabel.id = "paseo-finder-col-header-status";
+    statusColLabel.setAttribute("data-finder-runs-injected", "true");
+    Object.assign(statusColLabel.style, {
+      width: "184px",
+      textAlign: "right",
+      paddingRight: "4px",
+    });
+    rightColsGroup.appendChild(statusColLabel);
+
+    colHeader.appendChild(rightColsGroup);
+    // Insert right after `#paseo-finder-all-runs-toolbar` (or as first child if no toolbar)
+    const rowsCardEl = rows[0]?.parentElement ?? null;
+    if (rowsCardEl && rowsCardEl.parentElement === tableEl) {
+      tableEl.insertBefore(colHeader, rowsCardEl);
+    } else {
+      tableEl.appendChild(colHeader);
+    }
+    domWrites += 1;
+  }
+
+  if (colHeader) {
+    const colHeaderSig = `${options.isZh ? "zh" : "en"}:${themeKey}`;
+    if (colHeader.getAttribute("data-finder-col-header-sig") !== colHeaderSig) {
+      colHeader.setAttribute("data-finder-col-header-sig", colHeaderSig);
+      if (theme) {
+        colHeader.style.color = theme.foregroundMuted;
+        colHeader.style.borderBottom = `1px solid ${theme.border}`;
+      }
+      const schedLbl = doc.getElementById("paseo-finder-col-header-scheduled");
+      const nextLbl = doc.getElementById("paseo-finder-col-header-next");
+      const lastLbl = doc.getElementById("paseo-finder-col-header-last");
+      const statusLbl = doc.getElementById("paseo-finder-col-header-status");
+      if (
+        schedLbl &&
+        setTextContentIfChanged(
+          schedLbl,
+          options.isZh ? "定时任务" : "Scheduled",
+        )
+      ) {
+        domWrites += 1;
+      }
+      if (
+        nextLbl &&
+        setTextContentIfChanged(nextLbl, options.isZh ? "下次运行" : "Next run")
+      ) {
+        domWrites += 1;
+      }
+      if (
+        lastLbl &&
+        setTextContentIfChanged(lastLbl, options.isZh ? "上次运行" : "Last run")
+      ) {
+        domWrites += 1;
+      }
+      if (
+        statusLbl &&
+        setTextContentIfChanged(
+          statusLbl,
+          options.isZh ? "状态与历史" : "Status & Runs",
+        )
+      ) {
+        domWrites += 1;
       }
     }
   }
@@ -606,6 +931,134 @@ export function decorateSchedulesDomOnDocument(
     const summary = options.schedulesById.get(scheduleId);
     const runCount = summary?.totalRuns ?? 0;
     const lastStatus = summary?.lastRunStatus ?? "none";
+    const nextRunIso = summary?.nextRunAt ?? null;
+    const lastRunIso = summary?.lastRunAt ?? null;
+    const schedStatus = summary?.status ?? "active";
+
+    const kebab = row.querySelector<MinimalScheduleDomElement>(
+      `[data-testid="schedule-kebab-${scheduleId}"]`,
+    );
+    const trailingGroup =
+      kebab && kebab.parentElement && kebab.parentElement !== row
+        ? kebab.parentElement
+        : null;
+
+    let timeCols = row.querySelector<MinimalScheduleDomElement>(
+      `[data-testid="schedule-time-cols-${scheduleId}"]`,
+    );
+    if (!timeCols) {
+      timeCols = doc.createElement("div");
+      timeCols.setAttribute("data-testid", `schedule-time-cols-${scheduleId}`);
+      timeCols.setAttribute("data-finder-runs-injected", "true");
+      Object.assign(timeCols.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "12px",
+        flexShrink: "0",
+        marginRight: "4px",
+      });
+
+      const nextCol = doc.createElement("span");
+      nextCol.setAttribute(
+        "data-testid",
+        `schedule-next-run-col-${scheduleId}`,
+      );
+      nextCol.setAttribute("data-finder-runs-injected", "true");
+      Object.assign(nextCol.style, {
+        width: "140px",
+        fontSize: "13px",
+        lineHeight: "18px",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        textAlign: "left",
+      });
+      timeCols.appendChild(nextCol);
+
+      const lastCol = doc.createElement("span");
+      lastCol.setAttribute(
+        "data-testid",
+        `schedule-last-run-col-${scheduleId}`,
+      );
+      lastCol.setAttribute("data-finder-runs-injected", "true");
+      Object.assign(lastCol.style, {
+        width: "140px",
+        fontSize: "13px",
+        lineHeight: "18px",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        textAlign: "left",
+        cursor: "pointer",
+      });
+      lastCol.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        options.onOpenDrawer(scheduleId);
+      });
+      timeCols.appendChild(lastCol);
+
+      if (trailingGroup) {
+        trailingGroup.style.minWidth = "184px";
+        trailingGroup.style.justifyContent = "flex-end";
+        row.insertBefore(timeCols, trailingGroup);
+      } else if (kebab && kebab.parentElement === row) {
+        row.insertBefore(timeCols, kebab);
+      } else {
+        row.appendChild(timeCols);
+      }
+      domWrites += 1;
+    }
+
+    const timeColsSig = `${options.isZh ? "zh" : "en"}:${themeKey}:${minuteBucket}:${schedStatus}:${nextRunIso ?? ""}:${lastRunIso ?? ""}`;
+    if (timeCols.getAttribute("data-finder-time-cols-sig") !== timeColsSig) {
+      timeCols.setAttribute("data-finder-time-cols-sig", timeColsSig);
+      const nextColEl = timeCols.querySelector<MinimalScheduleDomElement>(
+        `[data-testid="schedule-next-run-col-${scheduleId}"]`,
+      );
+      const lastColEl = timeCols.querySelector<MinimalScheduleDomElement>(
+        `[data-testid="schedule-last-run-col-${scheduleId}"]`,
+      );
+      if (nextColEl) {
+        const nextText =
+          schedStatus === "paused" && !nextRunIso
+            ? options.isZh
+              ? "已暂停"
+              : "Paused"
+            : formatAntigravityRunTimestamp(nextRunIso, {
+                nowMs,
+                isZh: options.isZh,
+                emptyLabel: "—",
+              });
+        if (setTextContentIfChanged(nextColEl, nextText)) {
+          domWrites += 1;
+        }
+        nextColEl.title = nextRunIso
+          ? `Next run: ${nextText} (${nextRunIso})`
+          : nextText;
+        nextColEl.style.color = theme ? theme.foregroundMuted : "#9ca3af";
+      }
+      if (lastColEl) {
+        const lastText = formatAntigravityRunTimestamp(lastRunIso, {
+          nowMs,
+          isZh: options.isZh,
+          emptyLabel: options.isZh ? "从未运行" : "Never run",
+        });
+        if (setTextContentIfChanged(lastColEl, lastText)) {
+          domWrites += 1;
+        }
+        lastColEl.title = lastRunIso
+          ? `Last run: ${lastText} (${formatRelativeIso(lastRunIso)} · ${lastRunIso})`
+          : lastText;
+        lastColEl.style.color = theme
+          ? lastRunIso
+            ? theme.foreground
+            : theme.foregroundMuted
+          : lastRunIso
+            ? "#e5e7eb"
+            : "#9ca3af";
+      }
+    }
 
     let pill = row.querySelector<MinimalScheduleDomElement>(
       `[data-testid="schedule-runs-pill-${scheduleId}"]`,
@@ -621,9 +1074,6 @@ export function decorateSchedulesDomOnDocument(
         options.onOpenDrawer(scheduleId);
       });
 
-      const kebab = row.querySelector<MinimalScheduleDomElement>(
-        `[data-testid="schedule-kebab-${scheduleId}"]`,
-      );
       if (kebab && kebab.parentElement) {
         kebab.parentElement.insertBefore(pill, kebab);
       } else {
@@ -637,8 +1087,7 @@ export function decorateSchedulesDomOnDocument(
       pill.setAttribute("data-finder-pill-sig", pillSig);
       const hasRuns = runCount > 0;
       const isFailed = lastStatus === "failed";
-      const icon = isFailed ? "✕ " : hasRuns ? "✓ " : "";
-      const nextPillText = `${icon}${copy.runsPillPrefix} (${runCount})`;
+      const nextPillText = `${copy.runsPillPrefix} (${runCount})`;
       if (setTextContentIfChanged(pill, nextPillText)) {
         domWrites += 1;
       }
@@ -846,6 +1295,10 @@ export function runScheduleRunsDomIdempotencySelfTest(): ScheduleRunsDomSelfTest
   };
 
   const body = makeNode("body");
+  const sidebarProj = makeNode("div", {
+    "data-testid": "sidebar-project-row-proj_alpha",
+  });
+  body.appendChild(sidebarProj);
   const table = makeNode("div", { "data-testid": "schedules-table" });
   const card = makeNode("div");
   for (const id of ["sched_alpha", "sched_beta", "sched_gamma"]) {
@@ -889,9 +1342,9 @@ export function runScheduleRunsDomIdempotencySelfTest(): ScheduleRunsDomSelfTest
         succeededRuns: 5,
         failedRuns: 0,
         runningRuns: 0,
-        lastRunAt: new Date().toISOString(),
+        lastRunAt: new Date(started - 3600_000).toISOString(),
         lastRunStatus: "succeeded",
-        nextRunAt: null,
+        nextRunAt: new Date(started + 3600_000).toISOString(),
         runs: [],
       },
     ],
@@ -899,8 +1352,12 @@ export function runScheduleRunsDomIdempotencySelfTest(): ScheduleRunsDomSelfTest
 
   const opts: DecorateSchedulesDomOptions = {
     schedulesById: schedulesMap,
+    projectLastActiveByKey: {
+      proj_alpha: new Date(started - 7200_000).toISOString(),
+    },
     totals: { totalSchedules: 3, schedulesWithRuns: 1, totalRuns: 5 },
     isZh: false,
+    nowMs: started,
     onOpenDrawer: () => {},
   };
 
@@ -1016,6 +1473,7 @@ async function refreshScheduleCache(
           nextMap.set(item.id, item);
         }
         cachedSchedulesById = nextMap;
+        cachedProjectLastActiveByKey = res.projectLastActiveByKey ?? {};
         cachedTotals = {
           totalSchedules: res.totalSchedules,
           schedulesWithRuns: res.schedulesWithRuns,
@@ -1195,7 +1653,7 @@ export function installDesktopScheduleRunsEnhancer(
 
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
-      closeBtn.textContent = "✕";
+      closeBtn.textContent = "×";
       closeBtn.title = copy.closeBtn;
       Object.assign(closeBtn.style, {
         background: theme.surface2,
@@ -1537,7 +1995,7 @@ export function installDesktopScheduleRunsEnhancer(
 
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
-      closeBtn.textContent = "✕";
+      closeBtn.textContent = "×";
       closeBtn.title = copy.closeBtn;
       Object.assign(closeBtn.style, {
         background: theme.surface2,
@@ -1737,11 +2195,13 @@ export function installDesktopScheduleRunsEnhancer(
   const removeInjectedScheduleNodes = () => {
     document
       .querySelectorAll(
-        '#paseo-finder-all-runs-toolbar, [data-testid^="schedule-runs-pill-"], [data-testid^="schedule-menu-runs-"]',
+        '#paseo-finder-all-runs-toolbar, #paseo-finder-schedules-col-header, #paseo-finder-sidebar-ts-style, [data-testid^="schedule-runs-pill-"], [data-testid^="schedule-time-cols-"], [data-testid^="sidebar-project-timestamp-"], [data-testid^="schedule-menu-runs-"]',
       )
       .forEach((el) => el.remove());
     observer?.takeRecords();
   };
+
+  ensurePaseoSidebarTimestampSetting();
 
   // Coalesced, idempotent, circuit-breaker-guarded Schedules DOM decoration.
   // Never mutates `.textContent` unconditionally inside a synchronous MutationObserver microtask!
@@ -1753,7 +2213,10 @@ export function installDesktopScheduleRunsEnhancer(
     }
 
     const rowsProbe = document.querySelector('[data-testid^="schedule-row-"]');
-    if (!rowsProbe) {
+    const sidebarProbe = document.querySelector(
+      '[data-testid^="sidebar-project-row-"]',
+    );
+    if (!rowsProbe && !sidebarProbe) {
       domHealthState.lastDecoratedRowCount = 0;
       return;
     }
@@ -1767,6 +2230,7 @@ export function installDesktopScheduleRunsEnhancer(
         document as unknown as MinimalScheduleDomDocument,
         {
           schedulesById: cachedSchedulesById,
+          projectLastActiveByKey: cachedProjectLastActiveByKey,
           totals: {
             totalSchedules: cachedTotals.totalSchedules,
             schedulesWithRuns: cachedTotals.schedulesWithRuns,
@@ -1982,7 +2446,7 @@ function buildRunCardElement(
   const statusBadge = document.createElement("span");
   const isOk = run.status === "succeeded";
   const isFail = run.status === "failed";
-  statusBadge.textContent = isOk ? "✓" : isFail ? "✕" : "⟳";
+  statusBadge.textContent = isOk ? "•" : isFail ? "!" : "·";
   Object.assign(statusBadge.style, {
     width: "20px",
     height: "20px",

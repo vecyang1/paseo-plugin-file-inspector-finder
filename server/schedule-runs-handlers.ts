@@ -232,6 +232,162 @@ async function readSchedulesFromDisk(
   return results.filter((item): item is RawScheduleOnDisk => item !== null);
 }
 
+function msToIsoUtc(rawMs: unknown): string | null {
+  const n = typeof rawMs === "number" ? rawMs : Number(String(rawMs ?? ""));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return new Date(n).toISOString();
+}
+
+async function readFallbackSidecarRuns(
+  slug: string,
+  sidecarDataDir: string,
+  maxEvents = 25,
+): Promise<RawScheduleRunOnDisk[]> {
+  const eventsDir = path.join(sidecarDataDir, slug, "events");
+  let files: string[] = [];
+  try {
+    files = await fs.readdir(eventsDir);
+  } catch {
+    return [];
+  }
+  const jsonFiles = files
+    .filter((f) => f.endsWith(".json"))
+    .sort()
+    .slice(-maxEvents);
+  const runs: RawScheduleRunOnDisk[] = [];
+  for (const fileName of jsonFiles) {
+    try {
+      const raw = JSON.parse(
+        await fs.readFile(path.join(eventsDir, fileName), "utf-8"),
+      ) as {
+        timestampMs?: string | number;
+        commandInvocationTimestampMs?: string | number;
+        error?: string;
+        payload?: { newConversation?: { conversationId?: string } };
+      };
+      const endedAt = msToIsoUtc(raw.timestampMs);
+      const startedAt =
+        msToIsoUtc(raw.commandInvocationTimestampMs) ?? endedAt;
+      if (!startedAt) continue;
+      const errText = (raw.error ?? "").trim();
+      const convId = raw.payload?.newConversation?.conversationId;
+      const stem = path.basename(fileName, ".json");
+      runs.push({
+        id: `ag-sidecar-${stem}`,
+        scheduledFor: startedAt,
+        startedAt,
+        endedAt: endedAt && endedAt >= startedAt ? endedAt : startedAt,
+        status: errText ? "failed" : "succeeded",
+        agentId: null,
+        workspaceId: null,
+        output: errText
+          ? null
+          : `Antigravity Automations historical run (sidecar=${slug}${
+              convId ? `, conversationId=${convId}` : ""
+            })`,
+        error: errText || null,
+      });
+    } catch {
+      // Ignore corrupt event JSON
+    }
+  }
+  return runs;
+}
+
+async function resolveProjectLastActiveByKey(
+  paseoProjectsDir: string,
+  summaries: ReadonlyArray<Pick<ScheduleRunsSummary, "cwd" | "lastRunAt">>,
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const bump = (key: string | null | undefined, iso: string | null | undefined) => {
+    if (!key || !iso) return;
+    const trimmedKey = key.trim();
+    const trimmedIso = iso.trim();
+    if (!trimmedKey || !trimmedIso) return;
+    const prev = out[trimmedKey];
+    if (!prev || trimmedIso > prev) {
+      out[trimmedKey] = trimmedIso;
+    }
+  };
+
+  let projectsList: Array<{
+    projectId?: string;
+    rootPath?: string;
+    displayName?: string;
+    projectKey?: string;
+    updatedAt?: string | null;
+  }> = [];
+  let workspacesList: Array<{
+    projectId?: string;
+    cwd?: string;
+    updatedAt?: string | null;
+    createdAt?: string | null;
+  }> = [];
+
+  try {
+    const rawProjs = await fs.readFile(
+      path.join(paseoProjectsDir, "projects.json"),
+      "utf-8",
+    );
+    const parsed = JSON.parse(rawProjs);
+    if (Array.isArray(parsed)) projectsList = parsed;
+  } catch {
+    // Ignore when projects.json is absent
+  }
+
+  try {
+    const rawWs = await fs.readFile(
+      path.join(paseoProjectsDir, "workspaces.json"),
+      "utf-8",
+    );
+    const parsed = JSON.parse(rawWs);
+    if (Array.isArray(parsed)) workspacesList = parsed;
+  } catch {
+    // Ignore when workspaces.json is absent
+  }
+
+  const maxByProjectId = new Map<string, string>();
+  const maxByRootPath = new Map<string, string>();
+
+  for (const w of workspacesList) {
+    const ts = w.updatedAt || w.createdAt || null;
+    if (!ts) continue;
+    if (w.projectId) {
+      const prev = maxByProjectId.get(w.projectId);
+      if (!prev || ts > prev) maxByProjectId.set(w.projectId, ts);
+    }
+    if (w.cwd) {
+      const prev = maxByRootPath.get(w.cwd);
+      if (!prev || ts > prev) maxByRootPath.set(w.cwd, ts);
+    }
+  }
+
+  for (const s of summaries) {
+    if (s.cwd && s.lastRunAt) {
+      const prev = maxByRootPath.get(s.cwd);
+      if (!prev || s.lastRunAt > prev) {
+        maxByRootPath.set(s.cwd, s.lastRunAt);
+      }
+    }
+  }
+
+  for (const p of projectsList) {
+    const candidates = [
+      p.updatedAt ?? null,
+      p.projectId ? maxByProjectId.get(p.projectId) ?? null : null,
+      p.rootPath ? maxByRootPath.get(p.rootPath) ?? null : null,
+    ].filter((x): x is string => Boolean(x));
+    if (candidates.length === 0) continue;
+    candidates.sort();
+    const latest = candidates[candidates.length - 1];
+    bump(p.projectKey, latest);
+    bump(p.displayName, latest);
+    bump(p.projectId, latest);
+  }
+
+  return out;
+}
+
 export async function handleInspectScheduleRuns(
   input: RpcInput<typeof inspectScheduleRunsRpc>,
   context: PluginHandlerContext,
@@ -300,6 +456,12 @@ export async function handleInspectScheduleRuns(
   let failedRuns = 0;
   let runningRuns = 0;
   let schedulesWithRuns = 0;
+  const sidecarDataDir = path.join(
+    os.homedir(),
+    ".gemini",
+    "antigravity",
+    "sidecar_data",
+  );
 
   for (const raw of rawSchedules) {
     const sid = raw.id ?? "unknown";
@@ -309,7 +471,10 @@ export async function handleInspectScheduleRuns(
     const isStandbyTwin = Boolean(standbyMatch || sname.startsWith("AG · "));
     const standbySlug = standbyMatch?.groups?.slug ?? null;
     const cfg = raw.target?.config ?? {};
-    const rawRuns = Array.isArray(raw.runs) ? raw.runs : [];
+    let rawRuns = Array.isArray(raw.runs) ? raw.runs : [];
+    if (rawRuns.length === 0 && standbySlug) {
+      rawRuns = await readFallbackSidecarRuns(standbySlug, sidecarDataDir, maxRuns);
+    }
 
     let schedSucceeded = 0;
     let schedFailed = 0;
@@ -455,6 +620,12 @@ export async function handleInspectScheduleRuns(
     ),
   );
 
+  const paseoProjectsDir = path.join(path.dirname(schedulesDir), "projects");
+  const projectLastActiveByKey = await resolveProjectLastActiveByKey(
+    paseoProjectsDir,
+    summaries,
+  );
+
   const durationMs = Date.now() - startMs;
   return {
     ok: true,
@@ -467,6 +638,7 @@ export async function handleInspectScheduleRuns(
     runningRuns,
     schedules: summaries,
     recentRuns: allRecentRuns.slice(0, 50),
+    projectLastActiveByKey,
     durationMs,
     message: `Inspected ${rawSchedules.length} schedules (${schedulesWithRuns} with runs, ${totalRuns} total runs) in ${durationMs}ms`,
   };

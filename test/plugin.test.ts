@@ -27,6 +27,7 @@ import {
   manageSubagentsRpc,
   manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
+  LabelShortcutComboSchema,
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
 import {
@@ -105,11 +106,16 @@ import {
   extractCommandCenterSelectionHint,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
+  annotateNativeWorkspaceMenusWithShortcuts,
+  triggerQuickThreadMetadataBar,
 } from "../client/web";
 import {
   type MinimalScheduleDomDocument,
   type MinimalScheduleDomElement,
   decorateSchedulesDomOnDocument,
+  ensurePaseoSidebarTimestampSetting,
+  formatAntigravityRunTimestamp,
+  formatCompactSidebarAge,
   isSelfInjectedMutationBatch,
   readScheduleRunsPreferences,
   runScheduleRunsDomIdempotencySelfTest,
@@ -121,6 +127,14 @@ import {
   normalizeWorkspaceKey,
 } from "../client/subagents-tree-web";
 import { extractCurrentWorkspaceAndAgent } from "../client/session-lineage-web";
+import {
+  DEFAULT_MARKDOWN_TABLE_SAMPLE,
+  TABLE_CELL_BR_SENTINEL,
+  installMetroMarkdownTableHooks,
+  normalizeMarkdownTablesForPaseo,
+  repairMarkdownAstTables,
+  runMarkdownTableSelfTest,
+} from "../client/markdown-table-web";
 
 // Minimal valid 1x1 PNG buffer
 const TINY_PNG_BASE64 =
@@ -729,6 +743,19 @@ test("10. Thread rename & workspace label management RPCs + header double-click 
   );
   assert.equal(updateRes.ok, true);
   assert.deepEqual(updateRes.assignedLabels, ["⭐️", "feature"]);
+
+  const deleteRes = await handleManageWorkspaceLabels(
+    {
+      action: "delete",
+      workspaceId: "ws_0",
+      labelName: "feature",
+    },
+    ctx,
+    { bridge: mockBridge },
+  );
+  assert.equal(deleteRes.ok, true);
+  assert.deepEqual(deleteRes.assignedLabels, ["⭐️"]);
+  assert.equal(deleteRes.catalog.some((c) => c.name === "feature"), false);
 });
 
 test("11. Sidebar folder drag & drop workspace import: creates if not yet existed, reuses if already existed, resolves file parent, and supports Option+Drop force-new & dry-run", async () => {
@@ -2573,6 +2600,41 @@ test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver i
     querySelectorAll: (sel) => queryTree(scrollParent, sel) as never,
   };
 
+  const fixedNowMs = new Date(2026, 10, 9, 18, 0, 0).getTime();
+  const sameDayRunIso = new Date(2026, 10, 9, 17, 25, 0).toISOString();
+  const tomorrowRunIso = new Date(2026, 10, 10, 0, 0, 0).toISOString();
+  const yesterdayRunIso = new Date(2026, 10, 8, 23, 0, 0).toISOString();
+  const satRunIso = new Date(2026, 10, 7, 3, 0, 0).toISOString();
+
+  assert.equal(
+    formatAntigravityRunTimestamp(sameDayRunIso, { nowMs: fixedNowMs, isZh: false }),
+    "Today 5:25 PM",
+  );
+  assert.equal(
+    formatAntigravityRunTimestamp(tomorrowRunIso, { nowMs: fixedNowMs, isZh: false }),
+    "Tomorrow 12:00 AM",
+  );
+  assert.equal(
+    formatAntigravityRunTimestamp(yesterdayRunIso, { nowMs: fixedNowMs, isZh: false }),
+    "Yesterday 11:00 PM",
+  );
+  assert.equal(
+    formatAntigravityRunTimestamp(satRunIso, { nowMs: fixedNowMs, isZh: false }),
+    "Sat 3:00 AM",
+  );
+  assert.equal(
+    formatAntigravityRunTimestamp(sameDayRunIso, { nowMs: fixedNowMs, isZh: true }),
+    "今天 17:25",
+  );
+  assert.equal(
+    formatCompactSidebarAge(new Date(fixedNowMs - 18 * 3600_000).toISOString(), fixedNowMs),
+    "18h",
+  );
+  assert.equal(
+    formatCompactSidebarAge(new Date(fixedNowMs - 2 * 86_400_000).toISOString(), fixedNowMs),
+    "2d",
+  );
+
   const map = new Map([
     [
       "sched_0",
@@ -2581,6 +2643,7 @@ test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver i
         name: "Morning Brief",
         cron: "0 8 * * *",
         enabled: true,
+        status: "active" as const,
         isStandbyTwin: false,
         workspaceDirectory: "/tmp",
         provider: "claude",
@@ -2591,9 +2654,9 @@ test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver i
         succeededRuns: 3,
         failedRuns: 0,
         runningRuns: 0,
-        lastRunAt: null,
+        lastRunAt: sameDayRunIso,
         lastRunStatus: "succeeded" as const,
-        nextRunAt: null,
+        nextRunAt: tomorrowRunIso,
         runs: [],
       },
     ],
@@ -2603,21 +2666,29 @@ test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver i
     schedulesById: map,
     totals: { totalSchedules: 135, schedulesWithRuns: 1, totalRuns: 3 },
     isZh: false,
+    nowMs: fixedNowMs,
     onOpenDrawer: () => {},
   });
   assert.equal(first.rowCount, 135);
   assert.ok(first.domWrites > 135);
 
-  // Verify toolbar was mounted INSIDE schedules-table (first child), NOT in scrollParent!
+  // Verify toolbar & column header were mounted INSIDE schedules-table, NOT in scrollParent!
   assert.equal(scrollParent.childrenList.length, 1);
   assert.equal(scrollParent.childrenList[0], tableEl);
   assert.equal(tableEl.childrenList[0]?.id, "paseo-finder-all-runs-toolbar");
+  assert.equal(tableEl.childrenList[1]?.id, "paseo-finder-schedules-col-header");
+
+  const nextCol0 = queryTree(scrollParent, '[data-testid="schedule-next-run-col-sched_0"]')[0];
+  const lastCol0 = queryTree(scrollParent, '[data-testid="schedule-last-run-col-sched_0"]')[0];
+  assert.equal(nextCol0?.textContent, "Tomorrow 12:00 AM");
+  assert.equal(lastCol0?.textContent, "Today 5:25 PM");
 
   // Second pass with identical state performs ZERO DOM writes across all 135 rows!
   const second = decorateSchedulesDomOnDocument(doc, {
     schedulesById: map,
     totals: { totalSchedules: 135, schedulesWithRuns: 1, totalRuns: 3 },
     isZh: false,
+    nowMs: fixedNowMs,
     onOpenDrawer: () => {},
   });
   assert.equal(second.rowCount, 135);
@@ -3780,6 +3851,518 @@ test("43. Subagent & Timer Sidebar route resolution on /workspace/local:wks_... 
   });
   assert.equal(parsedInput.workspaceId, "wks_c206b1aecedb6750");
   assert.equal(parsedInput.includeTimeline, true);
+});
+
+test("44. Markdown table <br> cell line-break, <truncated N bytes> row repair, and AST/Metro hooks", () => {
+  const selfTest = runMarkdownTableSelfTest(DEFAULT_MARKDOWN_TABLE_SAMPLE);
+  assert.equal(selfTest.ok, true, selfTest.summary);
+  assert.equal(selfTest.bodyRowCount, 4);
+  assert.equal(selfTest.colCount, 4);
+  assert.equal(selfTest.cellLineBreaksPreserved, true);
+  assert.equal(selfTest.truncatedRowRepaired, true);
+  assert.equal(selfTest.codeSpanBrPreserved, true);
+
+  // Verify fenced code block with <br> is untouched while table cell <br> becomes sentinel
+  const mixedMd = [
+    "| Col A | Col B |",
+    "| --- | --- |",
+    "| [a](file:///a)<br>[b](file:///b) | keep `<br>` literal |",
+    "",
+    "```html",
+    "| fenced | <br> |",
+    "```",
+  ].join("\n");
+  const norm = normalizeMarkdownTablesForPaseo(mixedMd);
+  assert.equal(norm.lineBreaksConverted, 1);
+  assert.ok(norm.text.includes(`[a](file:///a)${TABLE_CELL_BR_SENTINEL}[b](file:///b)`));
+  assert.ok(norm.text.includes("keep `<br>` literal"));
+  assert.ok(norm.text.includes("| fenced | <br> |"));
+
+  // Verify AST repair splits Text with sentinel into LineBreak and unescapes \| inside Code
+  const sampleAst = {
+    type: "Document",
+    children: [
+      {
+        type: "Table",
+        children: [
+          {
+            type: "TableBody",
+            children: [
+              {
+                type: "TableRow",
+                children: [
+                  {
+                    type: "TableCell",
+                    children: [
+                      { type: "Text", text: `line1${TABLE_CELL_BR_SENTINEL}line2` },
+                      { type: "Code", text: "a \\| b" },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const repaired = repairMarkdownAstTables(sampleAst);
+  assert.equal(repaired.lineBreaksConverted, 1);
+  const cellChildren = (
+    repaired.ast as {
+      children: Array<{
+        children: Array<{
+          children: Array<{
+            children: Array<{ children: Array<{ type: string; text?: string }> }>;
+          }>;
+        }>;
+      }>;
+    }
+  ).children[0]!.children[0]!.children[0]!.children[0]!.children;
+  assert.deepEqual(cellChildren, [
+    { type: "Text", text: "line1" },
+    { type: "LineBreak" },
+    { type: "Text", text: "line2" },
+    { type: "Code", text: "a | b" },
+  ]);
+
+  // Verify Metro module registry hook intercepts normalizeMarkdownHtml and parseMarkdownSync
+  const fakeModules = new Map<number, unknown>();
+  for (let i = 0; i < 60; i++) {
+    fakeModules.set(i, { isInitialized: true, publicModule: { exports: {} } });
+  }
+  const mod4117 = {
+    isInitialized: true,
+    publicModule: {
+      exports: {
+        // Simulates Paseo's bug: replaces <br> with "  \n"
+        normalizeMarkdownHtml: (s: string) => s.replace(/<br\s*\/?>/gi, "  \n"),
+      },
+    },
+  };
+  const mod3993 = {
+    isInitialized: true,
+    publicModule: {
+      exports: {
+        parseMarkdownSync: (s: string) => ({
+          type: "Document",
+          children: [
+            {
+              type: "Table",
+              children: [
+                {
+                  type: "TableBody",
+                  children: [
+                    {
+                      type: "TableRow",
+                      children: [
+                        {
+                          type: "TableCell",
+                          children: [{ type: "Text", text: s }],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    },
+  };
+  fakeModules.set(4117, mod4117);
+  fakeModules.set(3993, mod3993);
+
+  const fakeWin = {
+    __r: (id: number) => fakeModules.get(id),
+  } as unknown as Window & { __r?: unknown };
+
+  const hooked = installMetroMarkdownTableHooks(fakeWin);
+  assert.equal(hooked, true);
+  const afterNorm = mod4117.publicModule.exports.normalizeMarkdownHtml(
+    "| A | B |\n| --- | --- |\n| 1<br>2 | 3 |",
+  );
+  // Must remain 3 lines (table row NOT split by "  \n")
+  assert.equal(afterNorm.split("\n").length, 3);
+
+  // Verify getpaseo/paseo#8782 edge case: <details><summary>Results</summary>| A | B | and blockquote table > | 1 | first<br>second |
+  const detailsWrapped = normalizeMarkdownTablesForPaseo(
+    "<details><summary>Results</summary>| A | B |\n|---|---|\n| 1 | first<br>second |\n</details>",
+  );
+  assert.equal(detailsWrapped.lineBreaksConverted, 1);
+  assert.ok(detailsWrapped.text.includes("</summary>\n\n| A | B |"));
+  assert.ok(detailsWrapped.text.includes(`first${TABLE_CELL_BR_SENTINEL}second`));
+
+  const quotedTable = normalizeMarkdownTablesForPaseo(
+    "> | A | B |\n> |---|---|\n> | 1 | alpha<br/>beta |",
+  );
+  assert.equal(quotedTable.lineBreaksConverted, 1);
+  assert.ok(quotedTable.text.includes(`alpha${TABLE_CELL_BR_SENTINEL}beta`));
+});
+
+test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut annotation with UI Observability", async () => {
+  // 1. LabelShortcutComboSchema validation
+  assert.equal(LabelShortcutComboSchema.parse("both"), "both");
+  assert.equal(LabelShortcutComboSchema.parse("cmd_l"), "cmd_l");
+  assert.equal(LabelShortcutComboSchema.parse("cmd_shift_l"), "cmd_shift_l");
+  assert.throws(() => LabelShortcutComboSchema.parse("alt_l"));
+
+  // 2. Storage defaults & sync
+  const storageMap = new Map<string, string>();
+  const mockStorage = {
+    length: 0,
+    key: () => null,
+    getItem: (k: string) => storageMap.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      storageMap.set(k, v);
+    },
+    removeItem: (k: string) => {
+      storageMap.delete(k);
+    },
+    clear: () => storageMap.clear(),
+  };
+
+  assert.equal(readInlineRenamePreferences(mockStorage).labelShortcutCombo, "both");
+  syncInlineRenamePreferences({ labelShortcutCombo: "cmd_l" }, mockStorage);
+  assert.equal(readInlineRenamePreferences(mockStorage).labelShortcutCombo, "cmd_l");
+  syncInlineRenamePreferences({ labelShortcutCombo: "both" }, mockStorage);
+  assert.equal(readInlineRenamePreferences(mockStorage).labelShortcutCombo, "both");
+
+  // 3. annotateNativeWorkspaceMenusWithShortcuts
+  const createdElements: Array<ReturnType<typeof createInteractiveDomNode>> = [];
+  const persistentLabelItem = createInteractiveDomNode("div");
+  persistentLabelItem.setAttribute?.("data-testid", "sidebar-workspace-menu-labels-wks_meta");
+  persistentLabelItem.appendChild?.(createInteractiveDomNode("svg"));
+  persistentLabelItem.appendChild?.(createInteractiveDomNode("span"));
+  persistentLabelItem.appendChild?.(createInteractiveDomNode("svg"));
+
+  const persistentRenameItem = createInteractiveDomNode("div");
+  persistentRenameItem.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-wks_meta");
+  persistentRenameItem.appendChild?.(createInteractiveDomNode("svg"));
+  persistentRenameItem.appendChild?.(createInteractiveDomNode("span"));
+
+  const mockDocForMenu = {
+    createElement: (tag: string) => {
+      const el = createInteractiveDomNode(tag);
+      createdElements.push(el);
+      return el;
+    },
+    querySelectorAll: (selector: string) => {
+      if (selector === '[data-testid^="sidebar-workspace-menu-labels-"]') {
+        return [persistentLabelItem];
+      }
+      if (selector === '[data-testid^="sidebar-workspace-menu-rename-"]') {
+        return [persistentRenameItem];
+      }
+      return [];
+    },
+  } as unknown as Parameters<typeof annotateNativeWorkspaceMenusWithShortcuts>[0];
+
+  const prefs = readInlineRenamePreferences(mockStorage);
+  const count = annotateNativeWorkspaceMenusWithShortcuts(mockDocForMenu, prefs);
+  assert.equal(count, 2, "Annotated both labels and rename menu items");
+
+  // Check labels badge shows ⌘L with pill styling
+  const labelsHintBadge = createdElements.find(
+    (e) => e.getAttribute?.("data-testid") === "sidebar-workspace-menu-label-shortcut-hint",
+  );
+  assert.ok(labelsHintBadge, "Label shortcut badge must be created");
+  assert.equal(labelsHintBadge.textContent, "⌘L");
+  assert.equal(labelsHintBadge.style?.borderRadius, "4px");
+  assert.equal(labelsHintBadge.style?.padding, "1px 5px");
+
+  // Check rename badge shows F2 with pill styling
+  const renameHintBadge = createdElements.find(
+    (e) => e.getAttribute?.("data-testid") === "sidebar-workspace-menu-rename-shortcut-hint",
+  );
+  assert.ok(renameHintBadge, "Rename shortcut badge must be created");
+  assert.equal(renameHintBadge.textContent, "F2");
+  assert.equal(renameHintBadge.style?.borderRadius, "4px");
+
+  // Dynamic preference update: changing to cmd_shift_l updates existing badge text to ⇧⌘L without creating duplicate
+  const shiftOnlyPrefs = { ...prefs, labelShortcutCombo: "cmd_shift_l" as const };
+  const prevCount = createdElements.length;
+  annotateNativeWorkspaceMenusWithShortcuts(mockDocForMenu, shiftOnlyPrefs);
+  assert.equal(labelsHintBadge.textContent, "⇧⌘L", "Existing badge must update text reactively");
+  assert.equal(createdElements.length, prevCount, "Must not create duplicate badge elements");
+
+  // Non-macOS platform formatting: Windows/Linux shows Ctrl+L / Ctrl+Shift+L
+  const winMock = {
+    navigator: { platform: "Win32", userAgent: "Windows NT 10.0" },
+  } as unknown as Parameters<typeof annotateNativeWorkspaceMenusWithShortcuts>[2];
+  annotateNativeWorkspaceMenusWithShortcuts(mockDocForMenu, prefs, winMock);
+  assert.equal(labelsHintBadge.textContent, "Ctrl+L", "Non-Mac shows Ctrl+L for both/cmd_l");
+  annotateNativeWorkspaceMenusWithShortcuts(mockDocForMenu, shiftOnlyPrefs, winMock);
+  assert.equal(labelsHintBadge.textContent, "Ctrl+Shift+L", "Non-Mac shows Ctrl+Shift+L");
+
+  // 4. resolveCurrentActiveWorkspaceId extracts workspace from active context menu
+  const menuDoc = {
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-menu-labels-")) {
+        const el = createInteractiveDomNode("div");
+        el.setAttribute?.("data-testid", "sidebar-workspace-menu-labels-wks_special_focus");
+        return el;
+      }
+      return null;
+    },
+  } as unknown as Parameters<typeof resolveCurrentActiveWorkspaceId>[0];
+
+  const resolvedWsId = resolveCurrentActiveWorkspaceId(menuDoc, null, "fallback_id");
+  assert.equal(resolvedWsId, "wks_special_focus", "Targeted workspace extracted from context menu");
+
+  // 5. findF2InlineRenameTarget prioritizes open context menu workspace over inactive selectedRow
+  const inactiveSelectedRow = createInteractiveDomNode("div");
+  inactiveSelectedRow.setAttribute?.("data-testid", "sidebar-workspace-row-local:wks_selected_inactive");
+  inactiveSelectedRow.setAttribute?.("aria-selected", "true");
+  const unselectedMenuRow = createInteractiveDomNode("div");
+  unselectedMenuRow.setAttribute?.("data-testid", "sidebar-workspace-row-local:wks_right_clicked_target");
+  const menuTitleEl = createInteractiveDomNode("span");
+  menuTitleEl.setAttribute?.("data-testid", "sidebar-workspace-row-title-local:wks_right_clicked_target");
+  menuTitleEl.textContent = "Right Clicked Target";
+  unselectedMenuRow.appendChild?.(menuTitleEl);
+
+  const f2MenuDoc = {
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-menu-")) {
+        const el = createInteractiveDomNode("div");
+        el.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-local:wks_right_clicked_target");
+        return el;
+      }
+      if (sel.includes('[aria-selected="true"]')) {
+        return inactiveSelectedRow;
+      }
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-")) {
+        return [inactiveSelectedRow, unselectedMenuRow];
+      }
+      return [];
+    },
+  } as unknown as Parameters<typeof findF2InlineRenameTarget>[0];
+
+  const f2Target = findF2InlineRenameTarget(f2MenuDoc, null);
+  assert.equal(f2Target?.workspaceId, "wks_right_clicked_target", "F2 targets the open context menu workspace");
+
+  // 6. Cmd+L keyboard capture behavior
+  const winListeners = new Map<string, Array<(ev: unknown) => void>>();
+  const docListeners = new Map<string, Array<(ev: unknown) => void>>();
+  const body = createInteractiveDomNode("body");
+  const textInput = createInteractiveDomNode("textarea");
+  const sidebarRow = createInteractiveDomNode("div");
+  sidebarRow.setAttribute?.("data-testid", "sidebar-workspace-row-local:wks_meta");
+
+  let querySelectorHook: ((sel: string) => ReturnType<typeof createInteractiveDomNode> | null) | null = null;
+  const testDoc = {
+    body,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => {
+      if (!docListeners.has(t)) docListeners.set(t, []);
+      docListeners.get(t)!.push(fn);
+    },
+    removeEventListener: () => {},
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    querySelector: (sel: string) => (querySelectorHook ? querySelectorHook(sel) : null),
+    querySelectorAll: () => [],
+  } as unknown as Parameters<typeof installDesktopRevealHelpers>[1];
+
+  const testWin = {
+    localStorage: mockStorage,
+    innerWidth: 1200,
+    innerHeight: 800,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => {
+      if (!winListeners.has(t)) winListeners.set(t, []);
+      winListeners.get(t)!.push(fn);
+    },
+    removeEventListener: () => {},
+    requestAnimationFrame: (cb: () => void) => {
+      cb();
+      return 1;
+    },
+    cancelAnimationFrame: () => {},
+  } as unknown as Parameters<typeof installDesktopRevealHelpers>[2];
+
+  let fetchMetadataCalled = false;
+  let deletedLabelName: string | null = null;
+  let toggleLabelCalled = false;
+  const cleanup = installDesktopRevealHelpers(
+    {
+      isEnabled: () => true,
+      onOpenTarget: async () => {},
+      onCopyPath: async () => {},
+      onFetchThreadMetadata: async () => {
+        fetchMetadataCalled = true;
+        return {
+          workspaceId: "wks_meta",
+          workspaceTitle: "Meta Workspace",
+          assignedLabels: ["feat"],
+          catalog: [{ name: "feat", color: "pink" }],
+        };
+      },
+      onToggleLabel: async () => {
+        toggleLabelCalled = true;
+        return null;
+      },
+      onDeleteLabel: async (labelName) => {
+        deletedLabelName = labelName;
+        return {
+          workspaceId: "wks_meta",
+          workspaceTitle: "Meta Workspace",
+          assignedLabels: [],
+          catalog: [],
+        };
+      },
+    },
+    testDoc,
+    testWin,
+  );
+
+  const keyListeners = winListeners.get("keydown") ?? [];
+
+  // A) Cmd+L on editable input is NOT hijacked (typing in composer/textboxes preserved)
+  let prevented = false;
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: textInput,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, false, "Cmd+L on text input should NOT preventDefault");
+  assert.equal(fetchMetadataCalled, false, "Should NOT trigger metadata bar while typing");
+
+  // B) Cmd+L in general chat view with combo === "both": passes through to Paseo native composer focus!
+  fetchMetadataCalled = false;
+  prevented = false;
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: body,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, false, "Cmd+L on body in chat view should pass through to native composer focus");
+  assert.equal(fetchMetadataCalled, false, "Should NOT hijack Cmd+L outside workspace context");
+
+  // C) Cmd+L when targeting sidebar workspace row opens labels bar
+  fetchMetadataCalled = false;
+  prevented = false;
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: sidebarRow,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, true, "Cmd+L on sidebar row opens labels bar");
+  assert.equal(fetchMetadataCalled, true, "Metadata fetched to mount labels bar");
+
+  // D) Cmd+L when context menu is open on screen opens labels bar
+  querySelectorHook = (sel: string) => {
+    if (sel.includes("sidebar-workspace-menu-")) {
+      const el = createInteractiveDomNode("div");
+      el.setAttribute?.("data-testid", "sidebar-workspace-menu-labels-wks_meta");
+      return el;
+    }
+    return null;
+  };
+  fetchMetadataCalled = false;
+  prevented = false;
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: body,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, true, "Cmd+L with open context menu triggers labels bar");
+  assert.equal(fetchMetadataCalled, true);
+  querySelectorHook = null;
+
+  // E) Cmd+Shift+L (⇧⌘L) is universal and triggers labels bar anywhere (even on body)
+  fetchMetadataCalled = false;
+  prevented = false;
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: true,
+    altKey: false,
+    target: body,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, true, "Cmd+Shift+L universally opens labels bar");
+  assert.equal(fetchMetadataCalled, true);
+
+  // F) When labelShortcutCombo is explicitly "cmd_l", Cmd+L opens labels bar universally
+  syncInlineRenamePreferences({ labelShortcutCombo: "cmd_l" }, mockStorage);
+  fetchMetadataCalled = false;
+  prevented = false;
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: body,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, true, "Cmd+L opens labels bar universally when combo is cmd_l");
+  assert.equal(fetchMetadataCalled, true);
+  syncInlineRenamePreferences({ labelShortcutCombo: "both" }, mockStorage);
+
+  // G) triggerQuickThreadMetadataBar test & tag deletion via small 'x'
+  const triggerRes = await triggerQuickThreadMetadataBar("labels");
+  assert.equal(triggerRes.ok, true);
+  assert.ok(triggerRes.message.includes("labels mode"));
+
+  const quickBar = body.querySelector?.(
+    '[data-testid="paseo-finder-quick-thread-bar"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(quickBar, "Quick thread bar should be mounted in document body");
+
+  const delBtn = quickBar.querySelector?.(
+    '[data-testid="delete-tag-feat"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(delBtn, "Small delete button 'x' should be rendered on tag chip");
+  assert.equal(delBtn.textContent, "×");
+
+  delBtn.dispatch("click");
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(deletedLabelName, "feat", "onDeleteLabel should be called with tag name");
+  assert.equal(toggleLabelCalled, false, "Clicking delete button should stop propagation and NOT toggle tag");
+
+  const delBtnAfter = quickBar.querySelector?.('[data-testid="delete-tag-feat"]');
+  assert.equal(delBtnAfter, null, "Deleted tag should be removed from chips row");
+
+  cleanup();
 });
 
 

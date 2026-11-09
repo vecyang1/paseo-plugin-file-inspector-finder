@@ -375,7 +375,9 @@ export function markdownToCleanPlainText(
     linkFormat: options?.linkFormat ?? currentPrefs.linkFormat,
   };
 
-  const normalized = input.replace(/\r\n?/g, "\n");
+  const normalized = input
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u2063\u200a|\u2028/g, " · ");
   const lines = normalized.split("\n");
   const outLines: string[] = [];
   let strippedTokens = 0;

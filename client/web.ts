@@ -55,6 +55,7 @@ export interface MinimalElement {
   insertBefore?(newNode: MinimalElement, referenceNode: MinimalElement | null): void;
   cloneNode?(deep?: boolean): MinimalElement;
   remove?(): void;
+  replaceChildren?(...nodes: unknown[]): void;
   click?(): void;
   focus?(): void;
   select?(): void;
@@ -866,6 +867,28 @@ export function findF2InlineRenameTarget(
   win?: MinimalWindow | null,
   fallbackWorkspaceId?: string,
 ): InlineRenameTarget | null {
+  // If a context menu is open for a workspace, that workspace takes precedence over selectedRow!
+  const menuLabelEl = doc.querySelector?.(
+    '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"]',
+  );
+  if (menuLabelEl) {
+    const tid = menuLabelEl.getAttribute?.("data-testid") ?? "";
+    const m = tid.match(/^sidebar-workspace-menu-(?:labels|rename)-(.+)$/);
+    if (m?.[1]) {
+      const parsedFromMenu = parseSidebarWorkspaceRowTestId(`sidebar-workspace-row-${m[1]}`);
+      const menuWsId = parsedFromMenu?.workspaceId ?? m[1];
+      if (menuWsId) {
+        const row = findSidebarWorkspaceRow(doc, menuWsId);
+        if (row) {
+          const resolved = resolveInlineRenameTarget(row, doc, win, fallbackWorkspaceId);
+          if (resolved) {
+            return { ...resolved, source: "f2-inline" };
+          }
+        }
+      }
+    }
+  }
+
   const selectedRow = doc.querySelector(
     '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
   );
@@ -1375,6 +1398,10 @@ export interface DesktopRevealHelperCallbacks {
   onToggleLabel?(
     labelName: string,
     color?: WorkspaceLabelColor,
+    workspaceId?: string,
+  ): Promise<ThreadMetadataSnapshot | null>;
+  onDeleteLabel?(
+    labelName: string,
     workspaceId?: string,
   ): Promise<ThreadMetadataSnapshot | null>;
   onDropFolders?(
@@ -2695,6 +2722,63 @@ export function injectIntoNativeTabMenus(
   return injectedCount;
 }
 
+export function isMacPlatform(win?: MinimalWindow | null): boolean {
+  const nav = (win?.navigator ?? (typeof navigator !== "undefined" ? navigator : null)) as {
+    platform?: string;
+    userAgent?: string;
+  } | null;
+  if (nav) {
+    const p = nav.platform ?? "";
+    const u = nav.userAgent ?? "";
+    if (p || u) {
+      return /Mac|iPhone|iPad/i.test(p) || /Mac OS/i.test(u);
+    }
+  }
+  return true;
+}
+
+export function isInsideSidebarOrWorkspaceRow(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 10; depth += 1) {
+    const tid = (curr.getAttribute?.("data-testid") ?? "").toLowerCase();
+    if (
+      tid.startsWith("sidebar-workspace-") ||
+      tid.startsWith("sidebar-project-") ||
+      tid.startsWith("sidebar-workspace-row-") ||
+      tid === "sidebar" ||
+      tid === "sidebar-content"
+    ) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export function isInsideWorkspaceHeaderOrTab(el: MinimalElement | null): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 10; depth += 1) {
+    const tid = curr.getAttribute?.("data-testid") ?? "";
+    if (
+      tid.startsWith("workspace-header") ||
+      tid.startsWith("workspace-tab-") ||
+      tid === "workspace-header-title"
+    ) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export function hasOpenWorkspaceContextMenu(doc: MinimalDocument): boolean {
+  return Boolean(
+    doc.querySelector?.(
+      '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"], [data-testid^="sidebar-workspace-context-menu-"]',
+    ),
+  );
+}
+
 export function annotateNativeWorkspaceMenusWithShortcuts(
   doc: MinimalDocument,
   prefs: InlineRenamePreferences,
@@ -2704,20 +2788,32 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
     return 0;
   }
   let annotatedCount = 0;
+  const mac = isMacPlatform(win);
+  const combo = prefs.labelShortcutCombo ?? "both";
+  const labelShortcutText =
+    combo === "cmd_shift_l"
+      ? (mac ? "⇧⌘L" : "Ctrl+Shift+L")
+      : (mac ? "⌘L" : "Ctrl+L");
+  const renameShortcutText = "F2";
 
   // 1. Labels trigger: [data-testid^="sidebar-workspace-menu-labels-"]
   const labelItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-labels-"]');
   if (labelItems) {
-    const labelShortcutText =
-      prefs.labelShortcutCombo === "cmd_l"
-        ? "⌘L"
-        : prefs.labelShortcutCombo === "cmd_shift_l"
-          ? "⇧⌘L"
-          : "⌘L";
-
     for (let i = 0; i < labelItems.length; i += 1) {
       const item = labelItems[i];
-      if (!item || item.getAttribute?.("data-paseo-shortcut-annotated") === "true") continue;
+      if (!item) continue;
+
+      const existingBadge = item.querySelector?.(
+        '[data-testid="sidebar-workspace-menu-label-shortcut-hint"]',
+      );
+      if (existingBadge) {
+        if (existingBadge.textContent !== labelShortcutText) {
+          existingBadge.textContent = labelShortcutText;
+          annotatedCount += 1;
+        }
+        continue;
+      }
+
       item.setAttribute?.("data-paseo-shortcut-annotated", "true");
 
       const badge = doc.createElement("span");
@@ -2727,11 +2823,18 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
         badge.style.marginLeft = "auto";
         badge.style.marginRight = "6px";
         badge.style.fontSize = "11px";
-        badge.style.opacity = "0.45";
+        badge.style.lineHeight = "14px";
+        badge.style.padding = "1px 5px";
+        badge.style.borderRadius = "4px";
+        badge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
+        badge.style.color = "currentColor";
+        badge.style.opacity = "0.65";
         badge.style.pointerEvents = "none";
         badge.style.userSelect = "none";
         badge.style.fontWeight = "400";
         badge.style.letterSpacing = "0.02em";
+        badge.style.display = "inline-flex";
+        badge.style.alignItems = "center";
       }
 
       const children = item.children;
@@ -2754,21 +2857,40 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
   if (renameItems) {
     for (let i = 0; i < renameItems.length; i += 1) {
       const item = renameItems[i];
-      if (!item || item.getAttribute?.("data-paseo-shortcut-annotated") === "true") continue;
+      if (!item) continue;
+
+      const existingBadge = item.querySelector?.(
+        '[data-testid="sidebar-workspace-menu-rename-shortcut-hint"]',
+      );
+      if (existingBadge) {
+        if (existingBadge.textContent !== renameShortcutText) {
+          existingBadge.textContent = renameShortcutText;
+          annotatedCount += 1;
+        }
+        continue;
+      }
+
       item.setAttribute?.("data-paseo-shortcut-annotated", "true");
 
       const badge = doc.createElement("span");
-      badge.textContent = "F2";
+      badge.textContent = renameShortcutText;
       badge.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-shortcut-hint");
       if (badge.style) {
         badge.style.marginLeft = "auto";
         badge.style.marginRight = "4px";
         badge.style.fontSize = "11px";
-        badge.style.opacity = "0.45";
+        badge.style.lineHeight = "14px";
+        badge.style.padding = "1px 5px";
+        badge.style.borderRadius = "4px";
+        badge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
+        badge.style.color = "currentColor";
+        badge.style.opacity = "0.65";
         badge.style.pointerEvents = "none";
         badge.style.userSelect = "none";
         badge.style.fontWeight = "400";
         badge.style.letterSpacing = "0.02em";
+        badge.style.display = "inline-flex";
+        badge.style.alignItems = "center";
       }
       item.appendChild?.(badge);
       annotatedCount += 1;
@@ -3877,6 +3999,7 @@ export function installDesktopRevealHelpers(
 
   const showQuickThreadMetadataBar = async (mode: "rename" | "labels"): Promise<boolean> => {
     removeMenu();
+    dismissNativeMenu(win, doc);
     if (!doc.body || !callbacks.onFetchThreadMetadata) return false;
 
     const tokens = syncPaseoThemeCssVariables(doc, win);
@@ -4002,8 +4125,13 @@ export function installDesktopRevealHelpers(
     let currentCatalog = [...snap.catalog];
 
     const renderChips = () => {
-      if (chipsWrap.innerHTML !== undefined) {
+      if (typeof chipsWrap.replaceChildren === "function") {
+        chipsWrap.replaceChildren();
+      } else if (chipsWrap.innerHTML !== undefined) {
         chipsWrap.innerHTML = "";
+      }
+      if (Array.isArray(chipsWrap.children) && chipsWrap.children.length > 0) {
+        (chipsWrap.children as MinimalElement[]).length = 0;
       }
       for (const entry of currentCatalog) {
         const isAssigned = currentAssigned.has(entry.name);
@@ -4035,6 +4163,75 @@ export function installDesktopRevealHelpers(
         txt.textContent = isAssigned ? `${entry.name} ✓` : entry.name;
         chip.appendChild?.(dot);
         chip.appendChild?.(txt);
+
+        const delBtn = doc.createElement("span");
+        delBtn.textContent = "×";
+        delBtn.setAttribute?.("role", "button");
+        delBtn.setAttribute?.("tabindex", "0");
+        delBtn.setAttribute?.(
+          "aria-label",
+          `${catalog.actions.deleteLabel} ${entry.name}`,
+        );
+        delBtn.setAttribute?.(
+          "title",
+          `${catalog.actions.deleteLabel} ${entry.name}`,
+        );
+        delBtn.setAttribute?.("data-testid", `delete-tag-${entry.name}`);
+        if (delBtn.style) {
+          delBtn.style.display = "inline-flex";
+          delBtn.style.alignItems = "center";
+          delBtn.style.justifyContent = "center";
+          delBtn.style.width = "14px";
+          delBtn.style.height = "14px";
+          delBtn.style.marginLeft = "2px";
+          delBtn.style.borderRadius = "999px";
+          delBtn.style.fontSize = "12px";
+          delBtn.style.lineHeight = "1";
+          delBtn.style.color = tokens.foregroundMuted;
+          delBtn.style.cursor = "pointer";
+          delBtn.style.opacity = "0.7";
+          delBtn.style.transition = "background-color 0.15s, color 0.15s, opacity 0.15s";
+        }
+        delBtn.addEventListener?.("mouseenter", () => {
+          if (delBtn.style) {
+            delBtn.style.backgroundColor = `${tokens.foreground}1f`;
+            delBtn.style.color = tokens.foreground;
+            delBtn.style.opacity = "1";
+          }
+        });
+        delBtn.addEventListener?.("mouseleave", () => {
+          if (delBtn.style) {
+            delBtn.style.backgroundColor = "transparent";
+            delBtn.style.color = tokens.foregroundMuted;
+            delBtn.style.opacity = "0.7";
+          }
+        });
+
+        const handleDelete = (ev: MinimalMouseEvent | MinimalKeyboardEvent) => {
+          ev.preventDefault?.();
+          ev.stopPropagation?.();
+          void callbacks
+            .onDeleteLabel?.(entry.name, snap.workspaceId)
+            .then((updated) => {
+              if (updated) {
+                currentAssigned = new Set(updated.assignedLabels);
+                currentCatalog = [...updated.catalog];
+                renderChips();
+              }
+            });
+        };
+
+        delBtn.addEventListener?.("click", (ev) => {
+          handleDelete(ev as MinimalMouseEvent);
+        });
+        delBtn.addEventListener?.("keydown", (ev) => {
+          const ke = ev as MinimalKeyboardEvent;
+          if (ke.key === "Enter" || ke.key === " ") {
+            handleDelete(ke);
+          }
+        });
+
+        chip.appendChild?.(delBtn);
 
         chip.addEventListener?.("click", (ev) => {
           const me = ev as MinimalMouseEvent;
@@ -4713,6 +4910,7 @@ export function installDesktopRevealHelpers(
         ((ke.metaKey || ke.ctrlKey) && ke.shiftKey && ke.key.toLowerCase() === "e"))
     ) {
       ke.preventDefault();
+      dismissNativeMenu(win, doc);
       if (prefs.enableInlineDoubleClickRename) {
         const target = findF2InlineRenameTarget(
           doc,
@@ -4758,20 +4956,41 @@ export function installDesktopRevealHelpers(
       isKeyL
     ) {
       const combo = prefs.labelShortcutCombo ?? "both";
-      const matchesCombo =
-        (ke.shiftKey && (combo === "cmd_shift_l" || combo === "both")) ||
-        (!ke.shiftKey && (combo === "cmd_l" || combo === "both"));
+      const isShift = Boolean(ke.shiftKey);
 
-      if (matchesCombo) {
-        // If it's Cmd+L without shift, avoid triggering when actively typing inside an editable input (input, textarea, contenteditable)
-        // so that typing text or form fields is never interrupted.
-        if (!ke.shiftKey && isEditableInput(ke.target ?? null)) {
+      // 1. Shift chord: Cmd+Shift+L is universal and never collides with Paseo's chat input focus
+      if (isShift && (combo === "cmd_shift_l" || combo === "both")) {
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        dismissNativeMenu(win, doc);
+        void showQuickThreadMetadataBar("labels");
+        return;
+      }
+
+      // 2. Non-shift chord: Cmd+L
+      if (!isShift && (combo === "cmd_l" || combo === "both")) {
+        // If actively typing inside an editable input (input, textarea, contenteditable), never hijack
+        if (isEditableInput(ke.target ?? null)) {
           // Do not hijack typing inside textboxes
         } else {
-          ke.preventDefault();
-          ke.stopPropagation?.();
-          void showQuickThreadMetadataBar("labels");
-          return;
+          // If combo is "both" (default), Cmd+L targets labels when in a workspace context:
+          // A) Workspace context menu is currently open on screen
+          // B) Focus/target is on sidebar or workspace row
+          // C) Focus/target is on workspace header title or tab
+          // D) If combo === "cmd_l", user explicitly chose Cmd+L as universal trigger
+          const hasOpenMenu = hasOpenWorkspaceContextMenu(doc);
+          const inSidebar = isInsideSidebarOrWorkspaceRow(ke.target ?? null);
+          const inHeaderOrTab = isInsideWorkspaceHeaderOrTab(ke.target ?? null);
+
+          if (combo === "cmd_l" || hasOpenMenu || inSidebar || inHeaderOrTab) {
+            ke.preventDefault();
+            ke.stopPropagation?.();
+            dismissNativeMenu(win, doc);
+            void showQuickThreadMetadataBar("labels");
+            return;
+          }
+          // Otherwise in chat view with combo === "both":
+          // Allow event to bubble through to Paseo's native message-input-focus-cmd-l-mac!
         }
       }
     }

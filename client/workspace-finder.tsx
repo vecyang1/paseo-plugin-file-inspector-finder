@@ -521,6 +521,33 @@ function FinderBrowserView({
                   <Text style={styles.btnText}>
                     {isAssigned ? `${entry.name} ✓` : entry.name}
                   </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${t("actions.deleteLabel")}: ${entry.name}`}
+                    hitSlop={6}
+                    onPress={(ev) => {
+                      ev?.stopPropagation?.();
+                      labelMutation.mutate({
+                        action: "delete",
+                        labelName: entry.name,
+                      });
+                    }}
+                    style={{
+                      marginLeft: 3,
+                      paddingHorizontal: 2,
+                      opacity: 0.7,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        color: theme.colors.foregroundMuted,
+                        lineHeight: 12,
+                      }}
+                    >
+                      ×
+                    </Text>
+                  </Pressable>
                 </Pressable>
               );
             })

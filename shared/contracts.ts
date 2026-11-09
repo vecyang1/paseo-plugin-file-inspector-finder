@@ -104,6 +104,13 @@ export type InlineRenameCaretPosition = z.infer<
 export const SmartCopyModeSchema = z.enum(["smart", "markdown", "plain"]);
 export type SmartCopyMode = z.infer<typeof SmartCopyModeSchema>;
 
+export const LabelShortcutComboSchema = z.enum([
+  "cmd_l",
+  "cmd_shift_l",
+  "both",
+]);
+export type LabelShortcutCombo = z.infer<typeof LabelShortcutComboSchema>;
+
 export const SmartCopyBulletMarkerSchema = z.enum(["bullet", "dash"]);
 export type SmartCopyBulletMarker = z.infer<typeof SmartCopyBulletMarkerSchema>;
 
@@ -127,12 +134,14 @@ export const pluginSettings = defineSettings({
     autoJumpToFirstPlaceInput: z.boolean().default(true),
     inlineRenameCaretPosition: InlineRenameCaretPositionSchema.default("start"),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
+    labelShortcutCombo: LabelShortcutComboSchema.default("both"),
     enableMarkDoneShortcut: z.boolean().default(true),
     markDonePrefix: z.string().default("d "),
     enableSmartClipboardCopy: z.boolean().default(true),
     defaultClipboardCopyMode: SmartCopyModeSchema.default("smart"),
     smartCopyBulletMarker: SmartCopyBulletMarkerSchema.default("bullet"),
     smartCopyLinkFormat: SmartCopyLinkFormatSchema.default("label-only"),
+    enableMarkdownTableEnhancer: z.boolean().default(true),
     enableSidebarFolderDrop: z.boolean().default(true),
     sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),
     enableWorkspaceQuickJump: z.boolean().default(true),

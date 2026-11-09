@@ -24,6 +24,7 @@ import {
   type CustomizeCategory,
   type CustomizeScope,
   type InlineRenameCaretPosition,
+  type LabelShortcutCombo,
   type OpenerTarget,
   type QuickJumpAction,
   VOICE_STT_PRESETS,
@@ -97,6 +98,16 @@ import {
   syncSmartCopyPreferences,
 } from "./smart-copy-web";
 import {
+  DEFAULT_MARKDOWN_TABLE_SAMPLE,
+  MARKDOWN_TABLE_EVENT,
+  type MarkdownTableSelfTestResult,
+  type MarkdownTableStatus,
+  getMarkdownTableStatus,
+  repairRenderedDomTables,
+  runMarkdownTableSelfTest,
+  syncMarkdownTablePreferences,
+} from "./markdown-table-web";
+import {
   applyInlineInputCaret,
   computeDoneToggledTitle,
   findF2InlineRenameTarget,
@@ -111,6 +122,7 @@ import {
   syncQuickJumpPreferences,
   syncSidebarDropPreferences,
   toggleCurrentSessionDone,
+  triggerQuickThreadMetadataBar,
 } from "./web";
 
 export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps) {
@@ -140,6 +152,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [folderTestInput, setFolderTestInput] = useState(".");
   const [renameDiagInput, setRenameDiagInput] = useState("");
   const [markDoneTestResult, setMarkDoneTestResult] = useState<string | null>(null);
+  const [labelsBarTestResult, setLabelsBarTestResult] = useState<string | null>(null);
   const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
   const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
   const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
@@ -205,6 +218,19 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     const onReceipt = () => setSmartCopyStatus(getSmartCopyStatus());
     window.addEventListener(SMART_COPY_EVENT, onReceipt);
     return () => window.removeEventListener(SMART_COPY_EVENT, onReceipt);
+  }, []);
+  const [markdownTableStatus, setMarkdownTableStatus] = useState<MarkdownTableStatus | null>(null);
+  const [markdownTableSampleInput, setMarkdownTableSampleInput] = useState(
+    DEFAULT_MARKDOWN_TABLE_SAMPLE,
+  );
+  const [markdownTableSelfTest, setMarkdownTableSelfTest] =
+    useState<MarkdownTableSelfTestResult | null>(null);
+  useEffect(() => {
+    setMarkdownTableStatus(getMarkdownTableStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setMarkdownTableStatus(getMarkdownTableStatus());
+    window.addEventListener(MARKDOWN_TABLE_EVENT, onReceipt);
+    return () => window.removeEventListener(MARKDOWN_TABLE_EVENT, onReceipt);
   }, []);
   const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
   const [agentHistorySnapData, setAgentHistorySnapData] = useState<
@@ -277,6 +303,9 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         defaultMode: settings.values.defaultClipboardCopyMode ?? "smart",
         bulletMarker: settings.values.smartCopyBulletMarker ?? "bullet",
         linkFormat: settings.values.smartCopyLinkFormat ?? "label-only",
+      });
+      syncMarkdownTablePreferences({
+        enabled: settings.values.enableMarkdownTableEnhancer ?? true,
       });
     }
   }, [settings]);
@@ -795,6 +824,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
                 inlineRenameCaretPosition: values.inlineRenameCaretPosition,
                 enableQuickRenameAndLabelShortcuts: next,
+                labelShortcutCombo: values.labelShortcutCombo ?? "both",
                 enableMarkDoneShortcut: values.enableMarkDoneShortcut,
                 markDonePrefix: values.markDonePrefix,
                 enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
@@ -802,6 +832,60 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               void save({ ...values, enableQuickRenameAndLabelShortcuts: next }, revision);
             }}
           />
+
+          {values.enableQuickRenameAndLabelShortcuts && (
+            <SettingsSelect
+              label={t("settings.labelShortcutComboLabel")}
+              hint={t("settings.labelShortcutComboHint")}
+              value={values.labelShortcutCombo ?? "both"}
+              options={[
+                { label: t("settings.optLabelShortcutBoth"), value: "both" },
+                { label: t("settings.optLabelShortcutCmdL"), value: "cmd_l" },
+                { label: t("settings.optLabelShortcutCmdShiftL"), value: "cmd_shift_l" },
+              ]}
+              onValueChange={(next) => {
+                syncInlineRenamePreferences({
+                  enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                  autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                  inlineRenameCaretPosition: values.inlineRenameCaretPosition,
+                  enableQuickRenameAndLabelShortcuts:
+                    values.enableQuickRenameAndLabelShortcuts,
+                  labelShortcutCombo: next as LabelShortcutCombo,
+                  enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                  markDonePrefix: values.markDonePrefix,
+                  enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+                });
+                void save(
+                  { ...values, labelShortcutCombo: next as LabelShortcutCombo },
+                  revision,
+                );
+              }}
+            />
+          )}
+
+          {values.enableQuickRenameAndLabelShortcuts && (
+            <SettingsAction
+              label={t("settings.testLabelsBarLabel")}
+              hint={
+                labelsBarTestResult
+                  ? labelsBarTestResult
+                  : isZh
+                    ? "点击即刻测试打开工作区标签管理栏（能试：验证当前工作区标签读取、颜色选择器与标签切换）"
+                    : "Click to test opening the workspace labels bar (verify active labels, color picker, and tag toggles)"
+              }
+              actionLabel={isZh ? "测试标签栏" : "Test Labels"}
+              onPress={async () => {
+                const res = await triggerQuickThreadMetadataBar("labels");
+                if (res.ok) {
+                  setLabelsBarTestResult(res.message);
+                  toast.show(res.message);
+                } else {
+                  setLabelsBarTestResult(res.message);
+                  toast.show(res.message);
+                }
+              }}
+            />
+          )}
 
           <SettingsSwitch
             label={t("settings.markDoneShortcutLabel")}
@@ -3037,6 +3121,122 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                   {rc.plainChars}c / html={rc.htmlChars}c · "{rc.preview}"
                 </Text>
               ))}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "Markdown 表格渲染与断行修复对账器 (能读 / 能试 / 能调)"
+            : "Markdown Table Rendering & Row-Split Reconciler"
+        }
+      >
+        <SettingsCard>
+          <SettingsSwitch
+            label={
+              isZh
+                ? "启用 Markdown 表格单元格换行与截断自动修复"
+                : "Enable Markdown table cell line-break & truncated row healer"
+            }
+            hint={
+              isZh
+                ? "拦截 Paseo normalizeMarkdownHtml 将表格内 <br> 转为换行符导致的错列断行，自动修复 <truncated N bytes> 截断行与长代码列挤压"
+                : "Prevents normalizeMarkdownHtml from splitting GFM table rows on <br> and heals truncated rows"
+            }
+            value={values.enableMarkdownTableEnhancer ?? true}
+            onValueChange={(next) => {
+              syncMarkdownTablePreferences({ enabled: next });
+              setMarkdownTableStatus(getMarkdownTableStatus());
+              void save({ ...values, enableMarkdownTableEnhancer: next }, revision);
+            }}
+          />
+        </SettingsCard>
+
+        <View style={styles.diagBox}>
+          <Text style={styles.detail}>
+            • {isZh ? "当前生效状态 (能读)" : "Active Status"}:{" "}
+            {markdownTableStatus?.preferences.enabled !== false ? "✓ true" : "✕ false"} · Metro
+            Hooks:{" "}
+            {markdownTableStatus?.metroHookInstalled
+              ? `✓ (${markdownTableStatus.hookedExports.join(", ")})`
+              : "DOM-Healer Active"}{" "}
+            · Scanned: {markdownTableStatus?.tablesScanned ?? 0} · Healed:{" "}
+            {markdownTableStatus?.tablesHealed ?? 0} · Rows Merged:{" "}
+            {markdownTableStatus?.rowsMergedTotal ?? 0} · Cell &lt;br&gt; Fixed:{" "}
+            {markdownTableStatus?.lineBreaksConvertedTotal ?? 0}
+          </Text>
+
+          <View style={styles.row}>
+            <TextInput
+              value={markdownTableSampleInput}
+              onChangeText={setMarkdownTableSampleInput}
+              placeholder={
+                isZh
+                  ? "输入包含 <br> 或 <truncated N bytes> 的 GFM 表格样本进行实时验算..."
+                  : "Enter GFM table sample with <br> or <truncated N bytes>..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const res = runMarkdownTableSelfTest(markdownTableSampleInput);
+                if (typeof document !== "undefined") {
+                  repairRenderedDomTables(document);
+                }
+                setMarkdownTableSelfTest(res);
+                setMarkdownTableStatus(getMarkdownTableStatus());
+                toast.show(res.summary);
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "验算并修复表格 (能试)" : "Run Table Self-Test"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                syncMarkdownTablePreferences({
+                  enabled: true,
+                  convertCellBrToLineBreak: true,
+                  healTruncatedRows: true,
+                  enhanceTableTypographyCss: true,
+                });
+                void save(
+                  {
+                    ...values,
+                    enableMarkdownTableEnhancer: true,
+                  },
+                  revision,
+                );
+                setMarkdownTableStatus(getMarkdownTableStatus());
+                toast.show(
+                  isZh ? "已恢复 Markdown 表格修复默认配置" : "Restored Markdown table defaults",
+                );
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "恢复默认 (能调)" : "Restore Defaults"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {markdownTableSelfTest ? (
+            <View style={{ gap: 4, marginTop: 6 }}>
+              <Text style={styles.label}>• {markdownTableSelfTest.summary}</Text>
+              <Text style={styles.detail}>
+                • Rows × Columns: {markdownTableSelfTest.bodyRowCount} ×{" "}
+                {markdownTableSelfTest.colCount} · Cell &lt;br&gt; Preserved:{" "}
+                {markdownTableSelfTest.cellLineBreaksPreserved ? "✓ Yes" : "✕ No"} · Truncated
+                Row Repaired: {markdownTableSelfTest.truncatedRowRepaired ? "✓ Yes" : "✕ No"} ·
+                Inline `&lt;br&gt;` Guard:{" "}
+                {markdownTableSelfTest.codeSpanBrPreserved ? "✓ Preserved" : "✕ Failed"}
+              </Text>
             </View>
           ) : null}
         </View>

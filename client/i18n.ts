@@ -67,6 +67,7 @@ export const enMessages = {
     manageLabels: "Edit labels",
     saveTitle: "Save title",
     addLabel: "Add label",
+    deleteLabel: "Delete label",
     titleSaved: "Updated workspace title",
     labelUpdated: "Updated workspace label",
     importFolderBtn: "Open / Create",
@@ -193,7 +194,16 @@ export const enMessages = {
     optCaretEnd: "End of title",
     quickRenameLabelShortcutsLabel: "Enable quick thread rename & label shortcuts",
     quickRenameLabelShortcutsHint:
-      "Press F2 or Cmd+Shift+E for in-place inline rename, or Cmd+Shift+L for colored workspace labels",
+      "Press F2 or Cmd+Shift+E for in-place inline rename, or Cmd+L / Cmd+Shift+L for colored workspace labels",
+    labelShortcutComboLabel: "Workspace label shortcut trigger",
+    labelShortcutComboHint:
+      "Choose which keyboard shortcut opens the quick labels bar. Cmd+L provides fast 2-key access; Cmd+Shift+L avoids overriding Paseo's composer focus",
+    optLabelShortcutBoth: "Both Cmd+L and Cmd+Shift+L (Recommended)",
+    optLabelShortcutCmdL: "Cmd+L only (Fast 2-key chord)",
+    optLabelShortcutCmdShiftL: "Cmd+Shift+L only (Preserve composer focus)",
+    testLabelsBarLabel: "Test open workspace labels bar",
+    testLabelsBarHint:
+      "Click to test opening the workspace labels management bar on the active workspace",
     markDoneShortcutLabel: "Enable mark session done shortcut (Option+D / ⌥D)",
     markDoneShortcutHint:
       "Press Option+D or Option+Shift+D to automatically toggle the 'd ' prefix on the current session and scroll the left sidebar to its row",
@@ -413,6 +423,7 @@ export const zhMessages: PluginMessageCatalog = {
     manageLabels: "编辑标签",
     saveTitle: "保存标题",
     addLabel: "添加标签",
+    deleteLabel: "删除标签",
     titleSaved: "已更新工作区标题",
     labelUpdated: "已更新工作区标签",
     importFolderBtn: "打开或新建",
@@ -536,7 +547,16 @@ export const zhMessages: PluginMessageCatalog = {
     optCaretEnd: "跳至末尾",
     quickRenameLabelShortcutsLabel: "启用会话重命名与标签快捷键",
     quickRenameLabelShortcutsHint:
-      "按 F2 或 Cmd+Shift+E 直接原位重命名工作区，按 Cmd+Shift+L 快速管理彩色标签",
+      "按 F2 或 Cmd+Shift+E 直接原位重命名工作区，按 Cmd+L 或 Cmd+Shift+L 快速管理彩色标签",
+    labelShortcutComboLabel: "工作区标签快捷键触发方式",
+    labelShortcutComboHint:
+      "选择打开彩色标签管理栏的快捷键。Cmd+L 提供极速双键唤起；Cmd+Shift+L 避免覆盖 Paseo 原生聚焦输入框快捷键",
+    optLabelShortcutBoth: "同时支持 Cmd+L 与 Cmd+Shift+L（推荐）",
+    optLabelShortcutCmdL: "仅使用 Cmd+L（极速双键）",
+    optLabelShortcutCmdShiftL: "仅使用 Cmd+Shift+L（保留原生输入框聚焦）",
+    testLabelsBarLabel: "测试打开工作区标签栏",
+    testLabelsBarHint:
+      "点击即刻在当前活跃工作区打开彩色标签管理栏，测试标签列表与切换响应",
     markDoneShortcutLabel: "启用快捷键一键标记会话已完成 (Option+D / ⌥D)",
     markDoneShortcutHint:
       "按 Option+D 或 Option+Shift+D 自动为当前会话名称切换「d 」前缀，并在左侧边栏高亮闪烁定位该会话",

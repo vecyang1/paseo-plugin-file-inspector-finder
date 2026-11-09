@@ -40,6 +40,7 @@ import {
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
   toggleCurrentSessionDone,
+  triggerQuickThreadMetadataBar,
 } from "./client/web";
 import {
   WorkspaceFinderPanel,
@@ -57,6 +58,10 @@ import {
   installSmartClipboardCopy,
   syncSmartCopyPreferences,
 } from "./client/smart-copy-web";
+import {
+  registerMarkdownTableEnhancer,
+  syncMarkdownTablePreferences,
+} from "./client/markdown-table-web";
 import {
   extractCurrentRouteAgentId,
   installDesktopSubagentsTreeEnhancer,
@@ -254,6 +259,7 @@ export default function contribute(client: PluginClientContext) {
     context: "workspace",
     onSelect({ openPanel }) {
       openPanel("finder-panel", { location: "explorer" });
+      void triggerQuickThreadMetadataBar("labels");
     },
   });
 
@@ -984,7 +990,10 @@ export default function contribute(client: PluginClientContext) {
       context: "workspace",
       async onSubmit({ args, workspace, rpc }) {
         const tokens = args.trim().split(/\s+/).filter(Boolean);
-        if (tokens.length === 0) return;
+        if (tokens.length === 0) {
+          void triggerQuickThreadMetadataBar("labels");
+          return;
+        }
 
         const firstLower = tokens[0].toLowerCase();
         if (firstLower === "delete" || firstLower === "rm" || firstLower === "remove") {
@@ -1427,6 +1436,23 @@ export default function contribute(client: PluginClientContext) {
         catalog: res.catalog,
       };
     },
+    onDeleteLabel: async (
+      labelName: string,
+      explicitWorkspaceId?: string,
+    ) => {
+      const res = await client.rpc(manageWorkspaceLabelsRpc, {
+        action: "delete",
+        workspaceId: explicitWorkspaceId ?? lastKnownWorkspaceId,
+        labelName,
+      });
+      if (!res.ok) return null;
+      return {
+        workspaceId: res.workspaceId,
+        workspaceTitle: res.workspaceTitle,
+        assignedLabels: res.assignedLabels,
+        catalog: res.catalog,
+      };
+    },
     onDropFolders: async (paths: string[], options: { forceNew: boolean }) => {
       const res = await client.rpc(importFolderWorkspaceRpc, {
         paths,
@@ -1530,6 +1556,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupSmartClipboardCopy = installSmartClipboardCopy();
 
+  const cleanupMarkdownTableEnhancer = registerMarkdownTableEnhancer();
+
   const cleanupSubagentsTreeEnhancer = installDesktopSubagentsTreeEnhancer({
     call: (def, input) => client.rpc(def as never, input as never) as never,
     getLocale: () => client.i18n.locale,
@@ -1553,6 +1581,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSidebarDefaultCollapse();
     cleanupSettingsSearch();
     cleanupSmartClipboardCopy();
+    cleanupMarkdownTableEnhancer();
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();
     for (const btn of headerButtons.values()) btn.remove();

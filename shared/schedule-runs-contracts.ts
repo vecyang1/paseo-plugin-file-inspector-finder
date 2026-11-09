@@ -90,6 +90,7 @@ export const inspectScheduleRunsRpc = defineRpc({
     runningRuns: z.number(),
     schedules: z.array(ScheduleRunsSummarySchema),
     recentRuns: z.array(ScheduleRunEntrySchema),
+    projectLastActiveByKey: z.record(z.string(), z.string()).default({}),
     durationMs: z.number(),
     message: z.string(),
   }),
