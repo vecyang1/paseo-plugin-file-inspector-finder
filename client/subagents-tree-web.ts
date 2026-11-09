@@ -619,9 +619,22 @@ export function installDesktopSubagentsTreeEnhancer(
     body.appendChild(rightPane);
     modal.appendChild(body);
 
-    let allTrees: SubagentAgentTree[] = [];
-    let selectedTree: SubagentAgentTree | null = null;
-    let selectedCid: string | null = opts?.conversationId ?? null;
+    const preCached = getCachedTreeForScope({
+      agentId: targetAgentId ?? null,
+      workspaceId: targetWorkspaceId ?? null,
+      scopeKey: targetAgentId
+        ? `ag:${targetAgentId}`
+        : targetWorkspaceId
+          ? `ws:${targetWorkspaceId}`
+          : "",
+    });
+    let allTrees: SubagentAgentTree[] = preCached ? [preCached] : [];
+    let selectedTree: SubagentAgentTree | null = preCached ?? null;
+    let selectedCid: string | null =
+      opts?.conversationId ??
+      preCached?.flatSubagents[0]?.conversationId ??
+      preCached?.rootConversationId ??
+      null;
     let timelineFilter: "all" | "messages" | "tools" | "timers" = "all";
 
     modeToggleBtn.addEventListener("click", () => {
@@ -646,82 +659,7 @@ export function installDesktopSubagentsTreeEnhancer(
       renderPanes();
     };
 
-    const loadAndRender = async () => {
-      subtitleEl.textContent = zh
-        ? "正在读取会话与子智能体执行轨迹..."
-        : "Loading session and subagent timelines...";
-      const [focusedRes, listRes] = await Promise.all([
-        targetAgentId || targetWorkspaceId || opts?.conversationId
-          ? client
-              .call(manageSubagentsRpc, {
-                action: "inspect",
-                agentId: targetAgentId,
-                workspaceId: targetWorkspaceId,
-                conversationId: opts?.conversationId ?? undefined,
-                includeTimeline: true,
-                limit: 5,
-                source: "drawer",
-              })
-              .catch(() => null)
-          : Promise.resolve(null),
-        client
-          .call(manageSubagentsRpc, {
-            action: "inspect",
-            includeTimeline: true,
-            limit: 12,
-            source: "drawer",
-          })
-          .catch(() => null),
-      ]);
-
-      const mergedMap = new Map<string, SubagentAgentTree>();
-      for (const tr of focusedRes?.trees ?? []) {
-        if (tr.agentId) mergedMap.set(tr.agentId, tr);
-      }
-      for (const tr of listRes?.trees ?? []) {
-        if (tr.agentId && !mergedMap.has(tr.agentId)) {
-          mergedMap.set(tr.agentId, tr);
-        }
-      }
-      allTrees = Array.from(mergedMap.values());
-      for (const tr of allTrees) {
-        cacheTreeUnderAllKeys(tr);
-      }
-
-      if (!selectedTree) {
-        if (opts?.conversationId) {
-          selectedTree =
-            allTrees.find(
-              (t) =>
-                t.rootConversationId.startsWith(opts.conversationId!) ||
-                t.flatSubagents.some((s) => s.conversationId.startsWith(opts.conversationId!)),
-            ) ?? null;
-        }
-        if (!selectedTree && targetAgentId) {
-          selectedTree =
-            allTrees.find(
-              (t) => t.agentId === targetAgentId || t.agentId.startsWith(targetAgentId),
-            ) ?? null;
-        }
-        if (!selectedTree && targetWorkspaceId) {
-          selectedTree =
-            allTrees.find(
-              (t) => normalizeWorkspaceKey(t.workspaceId) === targetWorkspaceId,
-            ) ?? null;
-        }
-        if (!selectedTree) {
-          selectedTree = allTrees[0] ?? null;
-        }
-      } else {
-        selectedTree =
-          allTrees.find((t) => t.agentId === selectedTree!.agentId) ?? allTrees[0] ?? null;
-      }
-
-      if (selectedTree && !selectedCid) {
-        selectedCid =
-          selectedTree.flatSubagents[0]?.conversationId ?? selectedTree.rootConversationId;
-      }
-
+    const updateHeaderSubtitle = () => {
       if (selectedTree) {
         const runningCnt = selectedTree.subagentSummary.running;
         subtitleEl.textContent = zh
@@ -732,9 +670,84 @@ export function installDesktopSubagentsTreeEnhancer(
           ? "当前暂无包含子智能体的会话记录"
           : "No sessions with subagents found";
       }
+    };
 
+    const loadAndRender = async () => {
+      if (selectedTree) {
+        updateHeaderSubtitle();
+        renderPanes();
+      } else {
+        subtitleEl.textContent = zh
+          ? "正在读取会话与子智能体执行轨迹..."
+          : "Loading session and subagent timelines...";
+      }
+
+      const hasScopedTarget = Boolean(
+        targetAgentId || targetWorkspaceId || opts?.conversationId,
+      );
+      const focusedRes = await client
+        .call(manageSubagentsRpc, {
+          action: "inspect",
+          agentId: targetAgentId,
+          workspaceId: targetWorkspaceId,
+          conversationId: opts?.conversationId ?? undefined,
+          includeTimeline: true,
+          limit: hasScopedTarget ? 5 : 12,
+          source: "drawer",
+        })
+        .catch(() => null);
+
+      const mergedMap = new Map<string, SubagentAgentTree>();
+      for (const tr of focusedRes?.trees ?? []) {
+        if (tr.agentId) mergedMap.set(tr.agentId, tr);
+      }
+      for (const tr of allTrees) {
+        if (tr.agentId && !mergedMap.has(tr.agentId)) {
+          mergedMap.set(tr.agentId, tr);
+        }
+      }
+      allTrees = Array.from(mergedMap.values());
+      for (const tr of allTrees) {
+        cacheTreeUnderAllKeys(tr);
+      }
+
+      if (opts?.conversationId) {
+        selectedTree =
+          allTrees.find(
+            (t) =>
+              t.rootConversationId.startsWith(opts.conversationId!) ||
+              t.flatSubagents.some((s) => s.conversationId.startsWith(opts.conversationId!)),
+          ) ?? selectedTree;
+      }
+      if (!selectedTree && targetAgentId) {
+        selectedTree =
+          allTrees.find(
+            (t) => t.agentId === targetAgentId || t.agentId.startsWith(targetAgentId),
+          ) ?? null;
+      }
+      if (!selectedTree && targetWorkspaceId) {
+        selectedTree =
+          allTrees.find(
+            (t) => normalizeWorkspaceKey(t.workspaceId) === targetWorkspaceId,
+          ) ?? null;
+      }
+      if (!selectedTree) {
+        selectedTree = allTrees[0] ?? null;
+      } else {
+        selectedTree =
+          allTrees.find((t) => t.agentId === selectedTree!.agentId) ??
+          selectedTree ??
+          allTrees[0] ??
+          null;
+      }
+
+      if (selectedTree && !selectedCid) {
+        selectedCid =
+          selectedTree.flatSubagents[0]?.conversationId ?? selectedTree.rootConversationId;
+      }
+
+      updateHeaderSubtitle();
       renderPanes();
-      // Also keep main DOM & left sidebar synced
       if (selectedTree) {
         decorateActiveAgentSubagentsDom(selectedTree);
       }
