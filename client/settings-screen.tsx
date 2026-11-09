@@ -78,6 +78,15 @@ import {
   syncSidebarDefaultCollapsePrefs,
 } from "./sidebar-default-collapse-web";
 import {
+  SETTINGS_SEARCH_EVENT,
+  type SettingsSearchStatus,
+  getSettingsSearchStatus,
+  rebuildSettingsIndex,
+  resetLearnedSettingsPages,
+  runSettingsSearchSelfTest,
+  syncSettingsSearchPrefs,
+} from "./settings-search-web";
+import {
   DEFAULT_SMART_COPY_SAMPLE,
   SMART_COPY_EVENT,
   type SmartCopyMode,
@@ -175,6 +184,16 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     window.addEventListener(SIDEBAR_DEFAULT_COLLAPSE_EVENT, onReceipt);
     return () => window.removeEventListener(SIDEBAR_DEFAULT_COLLAPSE_EVENT, onReceipt);
   }, []);
+  const [settingsSearchStatus, setSettingsSearchStatus] =
+    useState<SettingsSearchStatus | null>(null);
+  const [settingsSearchQuery, setSettingsSearchQuery] = useState("restart daemon");
+  useEffect(() => {
+    setSettingsSearchStatus(getSettingsSearchStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setSettingsSearchStatus(getSettingsSearchStatus());
+    window.addEventListener(SETTINGS_SEARCH_EVENT, onReceipt);
+    return () => window.removeEventListener(SETTINGS_SEARCH_EVENT, onReceipt);
+  }, []);
   const [smartCopyStatus, setSmartCopyStatus] = useState<SmartCopyStatus | null>(null);
   const [smartCopySampleInput, setSmartCopySampleInput] = useState(
     DEFAULT_SMART_COPY_SAMPLE.slice(0, 220),
@@ -249,6 +268,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         digitMode: settings.values.modelQuickSwitchDigits,
       });
       syncSidebarDefaultCollapsePrefs({ enabled: settings.values.startNewProjectsCollapsed });
+      syncSettingsSearchPrefs({
+        enabled: settings.values.enableSettingsSearch ?? true,
+        shortcut: settings.values.settingsSearchShortcut ?? true,
+      });
       syncSmartCopyPreferences({
         enabled: settings.values.enableSmartClipboardCopy ?? true,
         defaultMode: settings.values.defaultClipboardCopyMode ?? "smart",
@@ -1769,6 +1792,110 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             ))
           ) : (
             <Text style={styles.detail}>{t("settings.sidebarCollapseNoReceipts")}</Text>
+          )}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection title={t("settingsSearch.cardTitle")}>
+        <SettingsSwitch
+          label={t("settingsSearch.enableLabel")}
+          hint={t("settingsSearch.enableHint")}
+          value={values.enableSettingsSearch}
+          onValueChange={(next) => {
+            syncSettingsSearchPrefs({ enabled: next });
+            setSettingsSearchStatus(getSettingsSearchStatus());
+            void save({ ...values, enableSettingsSearch: next }, revision);
+          }}
+        />
+        <SettingsSwitch
+          label={t("settingsSearch.shortcutLabel")}
+          hint={t("settingsSearch.shortcutHint")}
+          value={values.settingsSearchShortcut}
+          onValueChange={(next) => {
+            syncSettingsSearchPrefs({ shortcut: next });
+            setSettingsSearchStatus(getSettingsSearchStatus());
+            void save({ ...values, settingsSearchShortcut: next }, revision);
+          }}
+        />
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {t("settingsSearch.statusPrefix")}{" "}
+            {settingsSearchStatus
+              ? `${settingsSearchStatus.prefs.enabled ? "on" : "off"} · ${settingsSearchStatus.merged.pages} pages / ${settingsSearchStatus.merged.rows} rows · learned ${settingsSearchStatus.live.pages} pages${settingsSearchStatus.live.newest ? ` (latest ${settingsSearchStatus.live.newest.slice(5, 16).replace("T", " ")})` : ""} · seed Paseo ${settingsSearchStatus.seed.paseoVersion} (${settingsSearchStatus.seed.generatedAt}) · field ${settingsSearchStatus.mounted ? "on screen" : "off screen"}`
+              : "-"}
+          </Text>
+          {settingsSearchStatus && settingsSearchStatus.merged.emptyPages.length > 0 ? (
+            <Text style={styles.detail}>
+              {t("settingsSearch.emptyPagesPrefix")} {settingsSearchStatus.merged.emptyPages.join(", ")}
+            </Text>
+          ) : null}
+          <View style={styles.row}>
+            <TextInput
+              value={settingsSearchQuery}
+              onChangeText={setSettingsSearchQuery}
+              onSubmitEditing={() =>
+                setSettingsSearchStatus(runSettingsSearchSelfTest(settingsSearchQuery.trim()))
+              }
+              placeholder={t("settingsSearch.testPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              style={styles.btn}
+              onPress={() =>
+                setSettingsSearchStatus(runSettingsSearchSelfTest(settingsSearchQuery.trim()))
+              }
+            >
+              <Text style={styles.btnText}>{t("settingsSearch.testBtn")}</Text>
+            </Pressable>
+          </View>
+          {settingsSearchStatus?.lastTest ? (
+            <View>
+              <Text style={styles.detail}>
+                "{settingsSearchStatus.lastTest.query}" → {settingsSearchStatus.lastTest.count}
+              </Text>
+              {settingsSearchStatus.lastTest.top.map((row) => (
+                <Text key={`${row.where}-${row.title}`} style={styles.detail}>
+                  • {row.where} › {row.title} [{row.field === 0 ? "title" : row.field === 1 ? "page" : "hint"} · {row.source}]
+                </Text>
+              ))}
+            </View>
+          ) : null}
+          <View style={styles.row}>
+            <Pressable
+              accessibilityRole="button"
+              style={styles.btn}
+              disabled={Boolean(settingsSearchStatus?.rebuilding)}
+              onPress={() => {
+                void rebuildSettingsIndex().then(setSettingsSearchStatus);
+              }}
+            >
+              <Text style={styles.btnText}>
+                {settingsSearchStatus?.rebuilding
+                  ? t("settingsSearch.rebuildingBtn")
+                      .replace("{done}", String(settingsSearchStatus.rebuilding.done))
+                      .replace("{total}", String(settingsSearchStatus.rebuilding.total))
+                  : t("settingsSearch.rebuildBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              style={styles.btn}
+              onPress={() => setSettingsSearchStatus(resetLearnedSettingsPages())}
+            >
+              <Text style={styles.btnText}>{t("settingsSearch.resetBtn")}</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.detail}>{t("settingsSearch.receiptsTitle")}</Text>
+          {settingsSearchStatus && settingsSearchStatus.receipts.length > 0 ? (
+            settingsSearchStatus.receipts.slice(0, 6).map((r) => (
+              <Text key={`${r.at}-${r.trigger}-${r.outcome}`} style={styles.detail}>
+                • {r.ok ? "✓" : "✕"} {r.at.slice(11, 19)} [{r.trigger}] {r.outcome}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settingsSearch.noReceipts")}</Text>
           )}
         </View>
       </SettingsSection>

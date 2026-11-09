@@ -42,6 +42,12 @@ import {
   handleRenameThread,
 } from "./server/handlers";
 import {
+  buildSettingsPath,
+  searchSettingsIndex,
+  settingsResultBreadcrumb,
+} from "./shared/settings-search";
+import { SETTINGS_SEARCH_SEED } from "./shared/settings-search-seed";
+import {
   handleInspectScheduleRuns,
   handleOpenScheduleRunSession,
 } from "./server/schedule-runs-handlers";
@@ -581,6 +587,47 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const settingsSearchTool = defineAgentTool({
+    name: "search_paseo_settings",
+    title: "Find a Paseo Setting",
+    description:
+      "Find where a Paseo setting lives (page, group, row title, hint and settings route) by keyword, e.g. 'keep daemon running', 'log file', 'send shortcut'. Same index and ranking as the search field in Paseo Settings. Host pages need the host's server id in the route.",
+    input: z.object({
+      query: z.string().min(1).describe("Words from the setting's name or description"),
+      limit: z.number().int().min(1).max(20).optional().describe("Max results (default 8)"),
+      serverId: z
+        .string()
+        .optional()
+        .describe("Host server id to fill into host routes (from `paseo daemon status`)"),
+    }),
+    async execute(input) {
+      const results = searchSettingsIndex(SETTINGS_SEARCH_SEED.pages, input.query, {
+        limit: input.limit ?? 8,
+      }).map((result) => ({
+        page: result.pageLabel,
+        where: settingsResultBreadcrumb(result) || result.pageLabel,
+        title: result.title,
+        hint: result.hint ?? null,
+        kind: result.kind,
+        matchedIn: result.field === 0 ? "title" : result.field === 1 ? "page or group" : "hint",
+        route:
+          buildSettingsPath(result.pageKey, input.serverId ?? "{serverId}") ??
+          `settings page ${result.pageKey}`,
+      }));
+      const payload = {
+        query: input.query,
+        count: results.length,
+        index: `seed from Paseo ${SETTINGS_SEARCH_SEED.paseoVersion} (${SETTINGS_SEARCH_SEED.generatedAt}); pages opened in the app are also learned there`,
+        results,
+      };
+      return {
+        text: JSON.stringify(payload, null, 2),
+        structuredContent: payload,
+        isError: false,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
@@ -597,6 +644,7 @@ export default function contribute(server: PluginServerContext) {
         slashSkillsTool,
         writebackHookTool,
         sessionLineageTool,
+        settingsSearchTool,
       ],
     };
   });

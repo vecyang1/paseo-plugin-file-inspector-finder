@@ -51,6 +51,7 @@ import {
 } from "./client/schedule-runs-web";
 import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
 import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
+import { installSettingsSearch, openSettingsSearch } from "./client/settings-search-web";
 import {
   copyCurrentSelectionOrMessageWithMode,
   installSmartClipboardCopy,
@@ -263,6 +264,17 @@ export default function contribute(client: PluginClientContext) {
     onSelect() {
       // Let the Command Center close and hand focus back to the composer first.
       setTimeout(() => openModelQuickSwitch(), 160);
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "search-settings",
+    title: pluginTranslations.message("commands.searchSettings"),
+    icon: "Search",
+    keywords: ["settings", "preferences", "options", "config", "find", "search"],
+    context: "global",
+    onSelect() {
+      setTimeout(() => openSettingsSearch(), 160);
     },
   });
 
@@ -1462,6 +1474,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupSidebarDefaultCollapse = installSidebarDefaultCollapse();
 
+  const cleanupSettingsSearch = installSettingsSearch({ getLocale: () => client.i18n.locale });
+
   const cleanupSmartClipboardCopy = installSmartClipboardCopy();
 
   const cleanupSubagentsTreeEnhancer = installDesktopSubagentsTreeEnhancer({
@@ -1485,6 +1499,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupVoiceSttEnhancer();
     cleanupModelQuickSwitch();
     cleanupSidebarDefaultCollapse();
+    cleanupSettingsSearch();
     cleanupSmartClipboardCopy();
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();
