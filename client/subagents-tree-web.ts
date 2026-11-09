@@ -208,19 +208,32 @@ export function installDesktopSubagentsTreeEnhancer(
     return { scopeKey, agentId: agId, workspaceId: wsId };
   };
 
-  const cacheTreeUnderAllKeys = (tree: SubagentAgentTree | null, requestedKey?: string | null) => {
+  const cacheTreeUnderAllKeys = (
+    tree: SubagentAgentTree | null,
+    requestedKey?: string | null,
+    scope?: { scopeKey: string | null; agentId: string | null; workspaceId: string | null },
+  ) => {
     const now = Date.now();
+    const validTree =
+      tree && tree.subagentSummary.total > 0 && tree.flatSubagents.length > 0 ? tree : null;
     if (requestedKey) {
-      treeCacheByKey.set(requestedKey, { tree, fetchedAtMs: now });
+      treeCacheByKey.set(requestedKey, { tree: validTree, fetchedAtMs: now });
     }
-    if (tree) {
-      if (tree.agentId) {
-        treeCacheByKey.set(`ag:${tree.agentId}`, { tree, fetchedAtMs: now });
-        treeCacheByKey.set(tree.agentId, { tree, fetchedAtMs: now });
+    if (scope?.agentId) {
+      treeCacheByKey.set(`ag:${scope.agentId}`, { tree: validTree, fetchedAtMs: now });
+      treeCacheByKey.set(scope.agentId, { tree: validTree, fetchedAtMs: now });
+    }
+    if (scope?.workspaceId) {
+      treeCacheByKey.set(`ws:${scope.workspaceId}`, { tree: validTree, fetchedAtMs: now });
+    }
+    if (validTree) {
+      if (validTree.agentId) {
+        treeCacheByKey.set(`ag:${validTree.agentId}`, { tree: validTree, fetchedAtMs: now });
+        treeCacheByKey.set(validTree.agentId, { tree: validTree, fetchedAtMs: now });
       }
-      const normWs = normalizeWorkspaceKey(tree.workspaceId);
+      const normWs = normalizeWorkspaceKey(validTree.workspaceId);
       if (normWs) {
-        treeCacheByKey.set(`ws:${normWs}`, { tree, fetchedAtMs: now });
+        treeCacheByKey.set(`ws:${normWs}`, { tree: validTree, fetchedAtMs: now });
       }
     }
   };
@@ -230,14 +243,16 @@ export function installDesktopSubagentsTreeEnhancer(
     agentId: string | null;
     workspaceId: string | null;
   }): SubagentAgentTree | null => {
-    if (scope.scopeKey && treeCacheByKey.get(scope.scopeKey)?.tree) {
-      return treeCacheByKey.get(scope.scopeKey)!.tree;
+    const pickValid = (tr?: SubagentAgentTree | null): SubagentAgentTree | null =>
+      tr && tr.subagentSummary.total > 0 && tr.flatSubagents.length > 0 ? tr : null;
+    if (scope.scopeKey && treeCacheByKey.has(scope.scopeKey)) {
+      return pickValid(treeCacheByKey.get(scope.scopeKey)?.tree);
     }
-    if (scope.agentId && treeCacheByKey.get(`ag:${scope.agentId}`)?.tree) {
-      return treeCacheByKey.get(`ag:${scope.agentId}`)!.tree;
+    if (scope.agentId && treeCacheByKey.has(`ag:${scope.agentId}`)) {
+      return pickValid(treeCacheByKey.get(`ag:${scope.agentId}`)?.tree);
     }
-    if (scope.workspaceId && treeCacheByKey.get(`ws:${scope.workspaceId}`)?.tree) {
-      return treeCacheByKey.get(`ws:${scope.workspaceId}`)!.tree;
+    if (scope.workspaceId && treeCacheByKey.has(`ws:${scope.workspaceId}`)) {
+      return pickValid(treeCacheByKey.get(`ws:${scope.workspaceId}`)?.tree);
     }
     return null;
   };
@@ -258,7 +273,11 @@ export function installDesktopSubagentsTreeEnhancer(
       now - cached.fetchedAtMs < ttlMs &&
       cached.tree !== undefined
     ) {
-      return cached.tree;
+      return cached.tree &&
+        cached.tree.subagentSummary.total > 0 &&
+        cached.tree.flatSubagents.length > 0
+        ? cached.tree
+        : null;
     }
     if (!force && !includeTimeline && cached?.inFlight) {
       return cached.inFlight;
@@ -277,18 +296,18 @@ export function installDesktopSubagentsTreeEnhancer(
         const matched =
           res.trees.find(
             (t) =>
-              (scope.agentId &&
+              t.subagentSummary.total > 0 &&
+              t.flatSubagents.length > 0 &&
+              ((scope.agentId &&
                 (t.agentId === scope.agentId || t.agentId.startsWith(scope.agentId))) ||
-              (scope.workspaceId && normalizeWorkspaceKey(t.workspaceId) === scope.workspaceId),
-          ) ??
-          res.trees[0] ??
-          null;
-        cacheTreeUnderAllKeys(matched, scope.scopeKey);
+                (scope.workspaceId && normalizeWorkspaceKey(t.workspaceId) === scope.workspaceId)),
+          ) ?? null;
+        cacheTreeUnderAllKeys(matched, scope.scopeKey, scope);
         return matched;
       })
       .catch(() => {
         const prev = getCachedTreeForScope(scope);
-        cacheTreeUnderAllKeys(prev, scope.scopeKey);
+        cacheTreeUnderAllKeys(prev, scope.scopeKey, scope);
         return prev;
       });
 
@@ -699,10 +718,17 @@ export function installDesktopSubagentsTreeEnhancer(
 
       const mergedMap = new Map<string, SubagentAgentTree>();
       for (const tr of focusedRes?.trees ?? []) {
-        if (tr.agentId) mergedMap.set(tr.agentId, tr);
+        if (tr.agentId && tr.subagentSummary.total > 0 && tr.flatSubagents.length > 0) {
+          mergedMap.set(tr.agentId, tr);
+        }
       }
       for (const tr of allTrees) {
-        if (tr.agentId && !mergedMap.has(tr.agentId)) {
+        if (
+          tr.agentId &&
+          tr.subagentSummary.total > 0 &&
+          tr.flatSubagents.length > 0 &&
+          !mergedMap.has(tr.agentId)
+        ) {
           mergedMap.set(tr.agentId, tr);
         }
       }
@@ -1763,25 +1789,30 @@ export function installDesktopSubagentsTreeEnhancer(
     const existingLeftTree = document.querySelector<HTMLElement>(
       '[data-testid="paseo-finder-left-sidebar-subagents"]',
     );
-    const totalTimers =
-      (tree?.rootTimersAndTasks?.length ?? 0) +
-      (tree?.flatSubagents ?? []).reduce((acc, s) => acc + (s.timersAndTasks?.length ?? 0), 0);
 
-    if (!scope.scopeKey || !tree || (tree.subagentSummary.total === 0 && totalTimers === 0)) {
+    if (
+      !scope.scopeKey ||
+      !tree ||
+      tree.subagentSummary.total <= 0 ||
+      tree.flatSubagents.length === 0
+    ) {
       existingLeftTree?.remove();
       return;
     }
 
+    const totalTimers =
+      (tree.rootTimersAndTasks?.length ?? 0) +
+      tree.flatSubagents.reduce((acc, s) => acc + (s.timersAndTasks?.length ?? 0), 0);
+
     const normWs = normalizeWorkspaceKey(tree.workspaceId) ?? scope.workspaceId;
-    const candidateSelectors = [
-      ...(normWs
-        ? [
-            `[data-testid="sidebar-workspace-row-local:${normWs}"]`,
-            `[data-testid="sidebar-workspace-row-${normWs}"]`,
-          ]
-        : []),
-      '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
-    ];
+    const candidateSelectors = normWs
+      ? [
+          `[data-testid="sidebar-workspace-row-${tree.workspaceId}"]`,
+          `[data-testid="sidebar-workspace-row-local:${normWs}"]`,
+          `[data-testid="sidebar-workspace-row-${normWs}"]`,
+          `[data-testid^="sidebar-workspace-row-"][data-testid$=":${normWs}"]`,
+        ]
+      : ['[data-testid^="sidebar-workspace-row-"][aria-selected="true"]'];
     let targetWsRow: HTMLElement | null = null;
     for (const sel of candidateSelectors) {
       targetWsRow = document.querySelector<HTMLElement>(sel);
@@ -1969,7 +2000,13 @@ export function installDesktopSubagentsTreeEnhancer(
     const existingBar = document.querySelector<HTMLElement>(
       '[data-testid="paseo-finder-subagents-bar"]',
     );
-    if (!scope.scopeKey || !tree || tree.subagentSummary.total === 0) {
+    const hasSubagents = Boolean(
+      scope.scopeKey &&
+        tree &&
+        tree.subagentSummary.total > 0 &&
+        tree.flatSubagents.length > 0,
+    );
+    if (!hasSubagents || !tree) {
       existingBar?.remove();
     } else {
       const composer = document.querySelector<HTMLElement>(
@@ -2118,6 +2155,13 @@ export function installDesktopSubagentsTreeEnhancer(
       if (!classified.kind) {
         continue;
       }
+      // When the session has no subagents, do not decorate generic timer/task/message badges
+      if (!hasSubagents && classified.kind !== "subagent") {
+        existingChip?.remove();
+        badge.removeAttribute("data-paseo-finder-subagent-kind");
+        badge.removeAttribute("data-paseo-finder-subagent-cid");
+        continue;
+      }
 
       let matchedSub: FlatSubagentNode | null = null;
       if (classified.kind === "subagent") {
@@ -2248,7 +2292,13 @@ export function installDesktopSubagentsTreeEnhancer(
         : rawFullText;
 
     const classified = classifyToolCallBadgeText(baseText, curTree);
+    const hasActiveSubagents = Boolean(
+      curTree && curTree.subagentSummary.total > 0 && curTree.flatSubagents.length > 0,
+    );
     if (!classified.kind && !badge.getAttribute("data-paseo-finder-subagent-kind")) {
+      return;
+    }
+    if (!hasActiveSubagents && classified.kind !== "subagent") {
       return;
     }
 
@@ -2290,9 +2340,7 @@ export function installDesktopSubagentsTreeEnhancer(
     const force = scope.scopeKey !== lastScopeKey;
     lastScopeKey = scope.scopeKey;
     const cached = getCachedTreeForScope(scope);
-    if (cached) {
-      decorateActiveAgentSubagentsDom(cached);
-    }
+    decorateActiveAgentSubagentsDom(cached);
     void fetchScopeTree(scope, force, false).then((tree) => {
       const latestScope = resolveActiveScope();
       if (latestScope.scopeKey === scope.scopeKey) {
