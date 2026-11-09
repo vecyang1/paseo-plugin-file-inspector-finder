@@ -3085,7 +3085,7 @@ test("29. Auto-jump cursor to first place (index 0, 0) on inline rename (default
   assert.equal(f2SidebarTarget.workspaceId, "wks_mao_2");
 });
 
-test("32. Antigravity inline /skill autocomplete JSON.parse bridge upgrades [skill]-tagged commands to kind=skill", () => {
+test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged commands across WS session envelopes, DaemonClient.listCommands, and QueryClient agentCommands cache", async () => {
   const sampleWire = JSON.stringify({
     type: "list_commands_response",
     payload: {
@@ -3096,6 +3096,24 @@ test("32. Antigravity inline /skill autocomplete JSON.parse bridge upgrades [ski
         { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
         { name: "computer-use", description: "Full desktop computer use", kind: "command", argumentHint: "[skill]" },
       ],
+    },
+  });
+
+  // Also test the real Paseo WSOutboundEnvelope: { type: "session", message: { type: "list_commands_response", payload: { ... } } }
+  const sampleSessionEnvelopeWire = JSON.stringify({
+    type: "session",
+    message: {
+      type: "list_commands_response",
+      payload: {
+        agentId: "d03fd8d3-b866-4abc-b028-b82e282ff08f",
+        requestId: "req-envelope-1",
+        error: null,
+        commands: [
+          { name: "plan", description: "Plan implementation", kind: "command", argumentHint: "[task]" },
+          { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
+          { name: "graphify", description: "Architecture graph", kind: "command", argumentHint: "[skill] <query>" },
+        ],
+      },
     },
   });
 
@@ -3113,23 +3131,109 @@ test("32. Antigravity inline /skill autocomplete JSON.parse bridge upgrades [ski
   assert.equal(directNorm.payload.commands[3].kind, "skill");
   assert.equal(directNorm.payload.commands[3].argumentHint, "");
 
+  // Mock QueryClient and HostRuntimeStore
+  const cachedPrePluginCommands = [
+    { name: "plan", description: "Plan implementation", kind: "command", argumentHint: "[task]" },
+    { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
+  ];
+  let currentCachedQueryData: unknown = cachedPrePluginCommands;
+  let cacheSubscriber: ((event?: { query?: unknown }) => void) | null = null;
+  const mockQueryObj = {
+    queryKey: ["agentCommands", "local", "agent", "d03fd8d3"],
+    state: {
+      get data() {
+        return currentCachedQueryData;
+      },
+    },
+  };
+  const mockQueryClient = {
+    getQueryCache: () => ({
+      getAll: () => [mockQueryObj],
+      subscribe: (fn: (event?: { query?: unknown }) => void) => {
+        cacheSubscriber = fn;
+        return () => {};
+      },
+    }),
+    setQueryData: (_key: unknown, nextData: unknown) => {
+      currentCachedQueryData = nextData;
+    },
+  };
+
+  const mockDaemonClient = {
+    listCommands: async () => ({
+      commands: [
+        { name: "1password", description: "1Password vault", kind: "command", argumentHint: "[skill]" },
+      ],
+    }),
+  };
+
   const mockJson = {
     parse: JSON.parse.bind(JSON),
     stringify: JSON.stringify.bind(JSON),
   };
-  const fakeWin = { JSON: mockJson } as unknown as MinimalWindow;
+  const fakeWin = {
+    JSON: mockJson,
+    __paseoHostRuntimeStore: {
+      controllers: new Map([["local", { getClient: () => mockDaemonClient }]]),
+      subscribeAll: () => () => {},
+    },
+    __c: () =>
+      new Map([
+        [961, { publicModule: { exports: { queryClient: mockQueryClient } } }],
+      ]),
+  } as unknown as MinimalWindow;
+
   ensureAntigravityInlineSkillAutocompleteBridge(fakeWin);
   // Idempotent second call
   ensureAntigravityInlineSkillAutocompleteBridge(fakeWin);
 
+  // 1) Direct list_commands_response via JSON.parse
   const parsedViaWin = mockJson.parse(sampleWire) as typeof directNorm;
   assert.equal(parsedViaWin.payload.commands[1].kind, "skill");
   assert.equal(typeof parsedViaWin.payload.commands[1].argumentHint, "string");
   assert.equal(parsedViaWin.payload.commands[2].kind, "skill");
-  assert.equal(typeof parsedViaWin.payload.commands[2].argumentHint, "string");
   assert.equal(parsedViaWin.payload.commands[2].argumentHint, "");
   assert.equal(parsedViaWin.payload.commands[3].kind, "skill");
-  assert.equal(typeof parsedViaWin.payload.commands[3].argumentHint, "string");
+
+  // 2) Wrapped { type: "session", message: { type: "list_commands_response", ... } } WS envelope via JSON.parse
+  const parsedEnvelope = mockJson.parse(sampleSessionEnvelopeWire) as {
+    type: string;
+    message: {
+      type: string;
+      payload: {
+        commands: Array<{ name: string; kind: string; argumentHint?: string }>;
+      };
+    };
+  };
+  assert.equal(parsedEnvelope.message.payload.commands[0].kind, "command");
+  assert.equal(parsedEnvelope.message.payload.commands[1].kind, "skill");
+  assert.equal(parsedEnvelope.message.payload.commands[1].argumentHint, "");
+  assert.equal(parsedEnvelope.message.payload.commands[2].kind, "skill");
+  assert.equal(parsedEnvelope.message.payload.commands[2].argumentHint, "<query>");
+
+  // 3) Pre-cached ["agentCommands", ...] in QueryClient is upgraded with a new array reference
+  assert.notEqual(currentCachedQueryData, cachedPrePluginCommands);
+  const upgradedCacheArr = currentCachedQueryData as Array<{ name: string; kind: string; argumentHint?: string }>;
+  assert.equal(upgradedCacheArr[0].kind, "command");
+  assert.equal(upgradedCacheArr[1].kind, "skill");
+  assert.equal(upgradedCacheArr[1].argumentHint, "");
+
+  // 4) Future cache writes via cacheSubscriber also get upgraded
+  assert.ok(cacheSubscriber);
+  currentCachedQueryData = [
+    { name: "ego-browser", description: "Browser automation", kind: "command", argumentHint: "[skill]" },
+  ];
+  (cacheSubscriber as (event?: { query?: unknown }) => void)({ query: mockQueryObj });
+  const upgradedSubArr = currentCachedQueryData as Array<{ name: string; kind: string; argumentHint?: string }>;
+  assert.equal(upgradedSubArr[0].kind, "skill");
+  assert.equal(upgradedSubArr[0].argumentHint, "");
+
+  // 5) DaemonClient.listCommands wrapper upgrades returned commands
+  const clientRes = (await mockDaemonClient.listCommands()) as {
+    commands: Array<{ name: string; kind: string; argumentHint?: string }>;
+  };
+  assert.equal(clientRes.commands[0].kind, "skill");
+  assert.equal(clientRes.commands[0].argumentHint, "");
 });
 
 test("33. Cursor-inspired Customize control plane RPC (handleManageSlashSkills) supports status, category/scope filtering, pin/unpin, disable/enable, and multi-skill dry-run resolution", async () => {
