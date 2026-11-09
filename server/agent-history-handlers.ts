@@ -280,6 +280,27 @@ export async function handleManageAgentHistory(
         }
       }
     }
+    if (!hasBrainTp && !hasShelfTp && hasDb) {
+      try {
+        await fs.mkdir(path.dirname(brainTp), { recursive: true });
+        const seedTitle = (item.record.title ?? "").trim();
+        const seedLine = seedTitle
+          ? `${JSON.stringify({
+              step_index: 0,
+              source: "USER_EXPLICIT",
+              type: "USER_INPUT",
+              status: "DONE",
+              created_at: item.record.updatedAt ?? new Date().toISOString(),
+              content: seedTitle,
+            })}\n`
+          : "";
+        await fs.writeFile(brainTp, seedLine, "utf8");
+        hasBrainTp = true;
+        actionsTaken.push(`Auto-seeded transcript.jsonl armor for ${cid.slice(0, 8)}`);
+      } catch {
+        // Ignore
+      }
+    }
     if (hasShelfTp) shelvedTranscriptCount += 1;
     if (!hasDb) {
       missingDbCount += 1;
@@ -1451,21 +1472,44 @@ export async function handleManageSessionLineage(
 
       let briefPath: string | null = intakeEntry?.brief ?? null;
       let reportPath: string | null = intakeEntry?.report ?? null;
+      const cwdDir = typeof rec.cwd === "string" && rec.cwd.trim() ? rec.cwd.trim() : "";
       if (!briefPath && briefStem) {
-        const candidateBrief = path.join(paseoDir, "vec-intake", "briefs", `${briefStem}.md`);
-        if (await fileExists(candidateBrief)) {
-          briefPath = candidateBrief;
+        const briefCandidates = [
+          path.join(paseoDir, "vec-intake", "briefs", `${briefStem}.md`),
+          ...(cwdDir
+            ? [
+                path.join(cwdDir, "docs", "strategy", `${briefStem}.md`),
+                path.join(cwdDir, "docs", `${briefStem}.md`),
+                path.join(cwdDir, "tasks", `${briefStem}.md`),
+                path.join(cwdDir, `${briefStem}.md`),
+              ]
+            : []),
+        ];
+        for (const cand of briefCandidates) {
+          if (await fileExists(cand)) {
+            briefPath = cand;
+            break;
+          }
         }
       }
       if (!reportPath && briefStem) {
-        const candidateReport = path.join(
-          paseoDir,
-          "vec-intake",
-          "reports",
-          `${briefStem}.report.md`,
-        );
-        if (await fileExists(candidateReport)) {
-          reportPath = candidateReport;
+        const reportCandidates = [
+          path.join(paseoDir, "vec-intake", "reports", `${briefStem}.report.md`),
+          ...(briefPath ? [briefPath.replace(/\.md$/i, ".report.md")] : []),
+          ...(cwdDir
+            ? [
+                path.join(cwdDir, "docs", "strategy", `${briefStem}.report.md`),
+                path.join(cwdDir, "docs", `${briefStem}.report.md`),
+                path.join(cwdDir, "tasks", `${briefStem}.report.md`),
+                path.join(cwdDir, `${briefStem}.report.md`),
+              ]
+            : []),
+        ];
+        for (const cand of reportCandidates) {
+          if (await fileExists(cand)) {
+            reportPath = cand;
+            break;
+          }
         }
       }
       const reportExists = reportPath ? await fileExists(reportPath) : false;
@@ -1501,11 +1545,17 @@ export async function handleManageSessionLineage(
       currentAgent = resolveAgentByIdOrPrefix(input.agentId.trim());
     }
     if (!currentAgent && input.workspaceId && input.workspaceId.trim()) {
-      const wsAgents = [...(agentsByWorkspaceId.get(input.workspaceId.trim()) ?? [])].sort((a, b) =>
+      const targetWs = input.workspaceId.trim();
+      const wsAgents = [...(agentsByWorkspaceId.get(targetWs) ?? [])].sort((a, b) =>
         String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
       );
       currentAgent =
-        wsAgents.find((a) => Boolean(resolveParentOfAgent(a))) ?? wsAgents[0] ?? null;
+        wsAgents.find((a) => {
+          const p = resolveParentOfAgent(a);
+          return Boolean(p && p.workspaceId && p.workspaceId !== targetWs);
+        }) ??
+        wsAgents[0] ??
+        null;
     }
 
     let currentNode: SessionLineageNode | null = null;

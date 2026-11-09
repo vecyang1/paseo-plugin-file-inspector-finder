@@ -2,6 +2,7 @@ import { Platform } from "react-native";
 import {
   type InlineRenameCaretPosition,
   type InlineRenameSource,
+  type LabelShortcutCombo,
   type OpenerTarget,
   type ProjectJumpCandidate,
   type QuickJumpAction,
@@ -277,6 +278,7 @@ export interface InlineRenamePreferences {
   autoJumpToFirstPlaceInput: boolean;
   inlineRenameCaretPosition: InlineRenameCaretPosition;
   enableQuickRenameAndLabelShortcuts: boolean;
+  labelShortcutCombo: LabelShortcutCombo;
   enableMarkDoneShortcut: boolean;
   markDonePrefix: string;
   enableDesktopContextMenuHelper: boolean;
@@ -320,6 +322,8 @@ export function syncInlineRenamePreferences(
       enableQuickRenameAndLabelShortcuts:
         prefs.enableQuickRenameAndLabelShortcuts ??
         existing.enableQuickRenameAndLabelShortcuts,
+      labelShortcutCombo:
+        prefs.labelShortcutCombo ?? existing.labelShortcutCombo ?? "both",
       enableMarkDoneShortcut:
         prefs.enableMarkDoneShortcut ?? existing.enableMarkDoneShortcut,
       markDonePrefix: prefs.markDonePrefix ?? existing.markDonePrefix ?? "d ",
@@ -346,6 +350,7 @@ export function readInlineRenamePreferences(
     autoJumpToFirstPlaceInput: true,
     inlineRenameCaretPosition: "start",
     enableQuickRenameAndLabelShortcuts: true,
+    labelShortcutCombo: "both",
     enableMarkDoneShortcut: true,
     markDonePrefix: "d ",
     enableDesktopContextMenuHelper: true,
@@ -388,12 +393,19 @@ export function readInlineRenamePreferences(
         ? target
         : "system-default";
 
+    const rawCombo = parsed.labelShortcutCombo;
+    const labelShortcutCombo: LabelShortcutCombo =
+      rawCombo === "cmd_l" || rawCombo === "cmd_shift_l" || rawCombo === "both"
+        ? rawCombo
+        : "both";
+
     return {
       enableInlineDoubleClickRename: parsed.enableInlineDoubleClickRename !== false,
       autoJumpToFirstPlaceInput: caretPosition === "start",
       inlineRenameCaretPosition: caretPosition,
       enableQuickRenameAndLabelShortcuts:
         parsed.enableQuickRenameAndLabelShortcuts !== false,
+      labelShortcutCombo,
       enableMarkDoneShortcut: parsed.enableMarkDoneShortcut !== false,
       markDonePrefix:
         typeof parsed.markDonePrefix === "string" && parsed.markDonePrefix.length > 0
@@ -623,6 +635,18 @@ export function resolveCurrentActiveWorkspaceId(
   win?: MinimalWindow | null,
   fallbackWorkspaceId?: string,
 ): string | undefined {
+  const menuLabelEl = doc.querySelector?.(
+    '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"]',
+  );
+  if (menuLabelEl) {
+    const tid = menuLabelEl.getAttribute?.("data-testid") ?? "";
+    const m = tid.match(/^sidebar-workspace-menu-(?:labels|rename)-(.+)$/);
+    if (m?.[1]) {
+      const parsedFromMenu = parseSidebarWorkspaceRowTestId(`sidebar-workspace-row-${m[1]}`);
+      return parsedFromMenu?.workspaceId ?? m[1];
+    }
+  }
+
   const pathname = win?.location?.pathname ?? "";
   const routeMatch = pathname.match(/\/workspace\/([^/?#]+)/);
   if (routeMatch?.[1]) {
@@ -2671,6 +2695,89 @@ export function injectIntoNativeTabMenus(
   return injectedCount;
 }
 
+export function annotateNativeWorkspaceMenusWithShortcuts(
+  doc: MinimalDocument,
+  prefs: InlineRenamePreferences,
+  win: MinimalWindow | null = null,
+): number {
+  if (!prefs.enableDesktopContextMenuHelper && !prefs.enableQuickRenameAndLabelShortcuts) {
+    return 0;
+  }
+  let annotatedCount = 0;
+
+  // 1. Labels trigger: [data-testid^="sidebar-workspace-menu-labels-"]
+  const labelItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-labels-"]');
+  if (labelItems) {
+    const labelShortcutText =
+      prefs.labelShortcutCombo === "cmd_l"
+        ? "⌘L"
+        : prefs.labelShortcutCombo === "cmd_shift_l"
+          ? "⇧⌘L"
+          : "⌘L";
+
+    for (let i = 0; i < labelItems.length; i += 1) {
+      const item = labelItems[i];
+      if (!item || item.getAttribute?.("data-paseo-shortcut-annotated") === "true") continue;
+      item.setAttribute?.("data-paseo-shortcut-annotated", "true");
+
+      const badge = doc.createElement("span");
+      badge.textContent = labelShortcutText;
+      badge.setAttribute?.("data-testid", "sidebar-workspace-menu-label-shortcut-hint");
+      if (badge.style) {
+        badge.style.marginLeft = "auto";
+        badge.style.marginRight = "6px";
+        badge.style.fontSize = "11px";
+        badge.style.opacity = "0.45";
+        badge.style.pointerEvents = "none";
+        badge.style.userSelect = "none";
+        badge.style.fontWeight = "400";
+        badge.style.letterSpacing = "0.02em";
+      }
+
+      const children = item.children;
+      if (children && children.length > 1) {
+        const lastChild = children[children.length - 1];
+        if (item.insertBefore && lastChild) {
+          item.insertBefore(badge, lastChild);
+        } else {
+          item.appendChild?.(badge);
+        }
+      } else {
+        item.appendChild?.(badge);
+      }
+      annotatedCount += 1;
+    }
+  }
+
+  // 2. Rename item: [data-testid^="sidebar-workspace-menu-rename-"]
+  const renameItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-rename-"]');
+  if (renameItems) {
+    for (let i = 0; i < renameItems.length; i += 1) {
+      const item = renameItems[i];
+      if (!item || item.getAttribute?.("data-paseo-shortcut-annotated") === "true") continue;
+      item.setAttribute?.("data-paseo-shortcut-annotated", "true");
+
+      const badge = doc.createElement("span");
+      badge.textContent = "F2";
+      badge.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-shortcut-hint");
+      if (badge.style) {
+        badge.style.marginLeft = "auto";
+        badge.style.marginRight = "4px";
+        badge.style.fontSize = "11px";
+        badge.style.opacity = "0.45";
+        badge.style.pointerEvents = "none";
+        badge.style.userSelect = "none";
+        badge.style.fontWeight = "400";
+        badge.style.letterSpacing = "0.02em";
+      }
+      item.appendChild?.(badge);
+      annotatedCount += 1;
+    }
+  }
+
+  return annotatedCount;
+}
+
 export interface OpenQuickWorkspaceSwitcherOptions {
   initialQuery?: string;
   locale?: string;
@@ -3296,15 +3403,9 @@ export async function openQuickWorkspaceSwitcherModal(
   return backdrop;
 }
 
-export function normalizeListCommandsResponsePayload(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== "object") return parsed;
-  const msg = parsed as Record<string, unknown>;
-  if (msg.type !== "list_commands_response") return parsed;
-  const payload = msg.payload as Record<string, unknown> | undefined;
-  if (!payload || typeof payload !== "object" || !Array.isArray(payload.commands)) {
-    return parsed;
-  }
-  for (const item of payload.commands) {
+function upgradeSkillCommandsArrayInPlace(commands: unknown[]): boolean {
+  let changed = false;
+  for (const item of commands) {
     if (!item || typeof item !== "object") continue;
     const cmd = item as Record<string, unknown>;
     const hint = typeof cmd.argumentHint === "string" ? cmd.argumentHint : "";
@@ -3312,9 +3413,173 @@ export function normalizeListCommandsResponsePayload(parsed: unknown): unknown {
       cmd.kind = "skill";
       const restHint = hint.slice(7).trim();
       cmd.argumentHint = restHint || "";
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+export function normalizeListCommandsResponsePayload(parsed: unknown): unknown {
+  if (Array.isArray(parsed)) {
+    upgradeSkillCommandsArrayInPlace(parsed);
+    return parsed;
+  }
+  if (!parsed || typeof parsed !== "object") return parsed;
+  const msg = parsed as Record<string, unknown>;
+  if (msg.type === "list_commands_response") {
+    const payload = msg.payload as Record<string, unknown> | undefined;
+    if (payload && typeof payload === "object" && Array.isArray(payload.commands)) {
+      upgradeSkillCommandsArrayInPlace(payload.commands);
+    }
+    return parsed;
+  }
+  if (msg.message && typeof msg.message === "object") {
+    normalizeListCommandsResponsePayload(msg.message);
+  }
+  if (Array.isArray(msg.commands)) {
+    upgradeSkillCommandsArrayInPlace(msg.commands);
+  }
+  if (msg.payload && typeof msg.payload === "object") {
+    const payload = msg.payload as Record<string, unknown>;
+    if (Array.isArray(payload.commands)) {
+      upgradeSkillCommandsArrayInPlace(payload.commands);
     }
   }
   return parsed;
+}
+
+function wrapDaemonClientListCommands(client: unknown): void {
+  if (!client || typeof client !== "object") return;
+  const target = client as {
+    listCommands?: (...args: unknown[]) => Promise<unknown>;
+    __paseoInlineSkillListCommandsWrapped?: boolean;
+  };
+  if (
+    typeof target.listCommands !== "function" ||
+    target.__paseoInlineSkillListCommandsWrapped
+  ) {
+    return;
+  }
+  const origListCommands = target.listCommands;
+  target.listCommands = async function patchedListCommands(
+    ...args: unknown[]
+  ): Promise<unknown> {
+    const res = await origListCommands.apply(this, args);
+    return normalizeListCommandsResponsePayload(res);
+  };
+  target.__paseoInlineSkillListCommandsWrapped = true;
+}
+
+function syncQueryClientAgentCommandsCache(queryClient: unknown): void {
+  if (!queryClient || typeof queryClient !== "object") return;
+  const qc = queryClient as {
+    getQueryCache?: () => {
+      getAll?: () => Array<{
+        queryKey?: unknown;
+        state?: { data?: unknown };
+      }>;
+      subscribe?: (listener: (event?: { query?: unknown }) => void) => () => void;
+    };
+    setQueryData?: (queryKey: unknown, updater: unknown) => void;
+    __paseoInlineSkillQueryCacheHooked?: boolean;
+  };
+  if (
+    typeof qc.getQueryCache !== "function" ||
+    typeof qc.setQueryData !== "function" ||
+    qc.__paseoInlineSkillQueryCacheHooked
+  ) {
+    return;
+  }
+  const cache = qc.getQueryCache();
+  if (!cache) return;
+
+  const upgradeQueryIfNeeded = (query: unknown): void => {
+    if (!query || typeof query !== "object") return;
+    const q = query as {
+      queryKey?: unknown;
+      state?: { data?: unknown };
+    };
+    if (!Array.isArray(q.queryKey) || q.queryKey[0] !== "agentCommands") return;
+    const data = q.state?.data;
+    if (!Array.isArray(data) || data.length === 0) return;
+    let needsUpgrade = false;
+    for (const item of data) {
+      if (!item || typeof item !== "object") continue;
+      const hint =
+        typeof (item as Record<string, unknown>).argumentHint === "string"
+          ? ((item as Record<string, unknown>).argumentHint as string)
+          : "";
+      if (hint === "[skill]" || hint.startsWith("[skill] ")) {
+        needsUpgrade = true;
+        break;
+      }
+    }
+    if (!needsUpgrade) return;
+    const cloned = data.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const cmd = { ...(item as Record<string, unknown>) };
+      const hint = typeof cmd.argumentHint === "string" ? cmd.argumentHint : "";
+      if (hint === "[skill]" || hint.startsWith("[skill] ")) {
+        cmd.kind = "skill";
+        const restHint = hint.slice(7).trim();
+        cmd.argumentHint = restHint || "";
+      }
+      return cmd;
+    });
+    qc.setQueryData?.(q.queryKey, cloned);
+  };
+
+  qc.__paseoInlineSkillQueryCacheHooked = true;
+  if (typeof cache.getAll === "function") {
+    for (const q of cache.getAll()) {
+      upgradeQueryIfNeeded(q);
+    }
+  }
+  if (typeof cache.subscribe === "function") {
+    cache.subscribe((event) => {
+      if (event?.query) {
+        upgradeQueryIfNeeded(event.query);
+      }
+    });
+  }
+}
+
+function findQueryClientsFromDom(doc?: MinimalDocument | null): unknown[] {
+  const found: unknown[] = [];
+  if (!doc || typeof doc.querySelector !== "function") return found;
+  const rootEl = doc.querySelector("#root") as unknown as Record<string, unknown> | null;
+  if (!rootEl || typeof rootEl !== "object") return found;
+  const fiberKey = Object.keys(rootEl).find(
+    (k) => k.startsWith("__reactContainer$") || k.startsWith("__reactFiber$"),
+  );
+  if (!fiberKey) return found;
+  const queue: unknown[] = [rootEl[fiberKey]];
+  const visited = new Set<unknown>();
+  let steps = 0;
+  while (queue.length > 0 && steps < 120) {
+    const node = queue.shift() as {
+      memoizedProps?: { client?: unknown; value?: unknown };
+      child?: unknown;
+      sibling?: unknown;
+    } | null;
+    if (!node || typeof node !== "object" || visited.has(node)) continue;
+    visited.add(node);
+    steps += 1;
+    const candidate = node.memoizedProps?.client ?? node.memoizedProps?.value;
+    if (
+      candidate &&
+      typeof candidate === "object" &&
+      typeof (candidate as { getQueryCache?: unknown }).getQueryCache === "function" &&
+      typeof (candidate as { setQueryData?: unknown }).setQueryData === "function"
+    ) {
+      if (!found.includes(candidate)) {
+        found.push(candidate);
+      }
+    }
+    if (node.child) queue.push(node.child);
+    if (node.sibling) queue.push(node.sibling);
+  }
+  return found;
 }
 
 export function ensureAntigravityInlineSkillAutocompleteBridge(
@@ -3322,28 +3587,112 @@ export function ensureAntigravityInlineSkillAutocompleteBridge(
 ): void {
   const targetObj = (win ?? globalThis) as unknown as {
     JSON?: typeof JSON;
+    document?: MinimalDocument | null;
     __paseoInlineSkillBridgeInstalled?: boolean;
+    __paseoHostRuntimeStore?: {
+      controllers?: Map<string, { getClient?: () => unknown }>;
+      subscribeAll?: (listener: () => void) => () => void;
+    };
+    __c?: () => Map<
+      unknown,
+      { publicModule?: { exports?: { queryClient?: unknown } } }
+    >;
   };
   const jsonObj = targetObj.JSON ?? JSON;
-  if (!jsonObj || typeof jsonObj.parse !== "function" || targetObj.__paseoInlineSkillBridgeInstalled) {
-    return;
+  if (jsonObj && typeof jsonObj.parse === "function" && !targetObj.__paseoInlineSkillBridgeInstalled) {
+    const origParse = jsonObj.parse;
+    jsonObj.parse = function patchedJsonParse(
+      text: string,
+      reviver?: (this: unknown, key: string, value: unknown) => unknown,
+    ): unknown {
+      const parsed = origParse.call(this, text, reviver);
+      if (
+        typeof text === "string" &&
+        text.includes('"[skill]') &&
+        (text.includes('"list_commands_response"') || text.includes('"commands"'))
+      ) {
+        return normalizeListCommandsResponsePayload(parsed);
+      }
+      return parsed;
+    };
+    targetObj.__paseoInlineSkillBridgeInstalled = true;
   }
-  const origParse = jsonObj.parse;
-  jsonObj.parse = function patchedJsonParse(
-    text: string,
-    reviver?: (this: unknown, key: string, value: unknown) => unknown,
-  ): unknown {
-    const parsed = origParse.call(this, text, reviver);
-    if (
-      typeof text === "string" &&
-      text.includes('"list_commands_response"') &&
-      text.includes('"[skill]')
-    ) {
-      return normalizeListCommandsResponsePayload(parsed);
+
+  // Hook active and future DaemonClient.listCommands instances
+  const runtimeStore =
+    targetObj.__paseoHostRuntimeStore ??
+    (globalThis as unknown as typeof targetObj).__paseoHostRuntimeStore;
+  if (runtimeStore && typeof runtimeStore === "object") {
+    const wrapAllClients = (): void => {
+      if (!runtimeStore.controllers || typeof runtimeStore.controllers.values !== "function") {
+        return;
+      }
+      for (const ctrl of runtimeStore.controllers.values()) {
+        wrapDaemonClientListCommands(ctrl?.getClient?.());
+      }
+    };
+    wrapAllClients();
+    const storeWithFlag = runtimeStore as { __paseoInlineSkillStoreSubscribed?: boolean };
+    if (!storeWithFlag.__paseoInlineSkillStoreSubscribed && typeof runtimeStore.subscribeAll === "function") {
+      storeWithFlag.__paseoInlineSkillStoreSubscribed = true;
+      runtimeStore.subscribeAll(wrapAllClients);
     }
-    return parsed;
+  }
+
+  // Upgrade any pre-cached ["agentCommands", ...] queries in TanStack QueryClient
+  // via React's #root Fiber tree (without ever invoking real Metro's `window.__c()`,
+  // which clears the Metro module registry Map and breaks lazy route loading).
+  const docCandidate =
+    targetObj.document ??
+    (globalThis as unknown as { document?: MinimalDocument | null }).document ??
+    null;
+  for (const qc of findQueryClientsFromDom(docCandidate)) {
+    syncQueryClientAgentCommandsCache(qc);
+  }
+
+  const metroRegistryFn = targetObj.__c;
+  if (
+    win &&
+    win !== (globalThis as unknown) &&
+    typeof metroRegistryFn === "function" &&
+    !Function.prototype.toString.call(metroRegistryFn).includes("=new Map")
+  ) {
+    try {
+      const modules = metroRegistryFn();
+      if (modules && typeof modules.values === "function") {
+        for (const mod of modules.values()) {
+          const qc = mod?.publicModule?.exports?.queryClient;
+          if (qc) {
+            syncQueryClientAgentCommandsCache(qc);
+          }
+        }
+      }
+    } catch {
+      // Ignore mock registry inspection errors
+    }
+  }
+}
+
+let activeShowQuickThreadMetadataBar:
+  | ((mode: "rename" | "labels") => Promise<boolean>)
+  | null = null;
+
+export async function triggerQuickThreadMetadataBar(
+  mode: "rename" | "labels" = "labels",
+): Promise<{ ok: boolean; message: string }> {
+  if (!activeShowQuickThreadMetadataBar) {
+    return {
+      ok: false,
+      message: "Quick thread metadata bar is not initialized or desktop helpers are disabled",
+    };
+  }
+  const opened = await activeShowQuickThreadMetadataBar(mode);
+  return {
+    ok: opened,
+    message: opened
+      ? `Quick thread metadata bar opened in ${mode} mode`
+      : "Unable to open quick thread metadata bar (no active workspace metadata)",
   };
-  targetObj.__paseoInlineSkillBridgeInstalled = true;
 }
 
 export function installDesktopRevealHelpers(
@@ -3526,9 +3875,9 @@ export function installDesktopRevealHelpers(
     activeMenuEl = container;
   };
 
-  const showQuickThreadMetadataBar = async (mode: "rename" | "labels") => {
+  const showQuickThreadMetadataBar = async (mode: "rename" | "labels"): Promise<boolean> => {
     removeMenu();
-    if (!doc.body || !callbacks.onFetchThreadMetadata) return;
+    if (!doc.body || !callbacks.onFetchThreadMetadata) return false;
 
     const tokens = syncPaseoThemeCssVariables(doc, win);
     const catalog = getCatalogForLocale(resolveLocale());
@@ -3538,7 +3887,7 @@ export function installDesktopRevealHelpers(
       callbacks.getFallbackWorkspaceId?.(),
     );
     const snap = await callbacks.onFetchThreadMetadata(activeWsId).catch(() => null);
-    if (!snap || !doc.body) return;
+    if (!snap || !doc.body) return false;
 
     const container = doc.createElement("div");
     container.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar");
@@ -3828,7 +4177,9 @@ export function installDesktopRevealHelpers(
         applyInlineInputCaret(titleInput, renamePrefs.inlineRenameCaretPosition);
       }
     }, 10);
+    return true;
   };
+  activeShowQuickThreadMetadataBar = showQuickThreadMetadataBar;
 
   const startInlineRename = (
     target: InlineRenameTarget,
@@ -4009,9 +4360,11 @@ export function installDesktopRevealHelpers(
 
   const runTabMenuInjectPass = () => {
     checkActiveWorkspaceRouteSync();
+    const renamePrefs = readInlineRenamePreferences(win.localStorage);
     const count =
       injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win) +
-      decorateTimelineSyncErrorBanner();
+      decorateTimelineSyncErrorBanner() +
+      annotateNativeWorkspaceMenusWithShortcuts(doc, renamePrefs, win);
     if (count > 0) {
       observer?.takeRecords?.();
     }
@@ -4391,16 +4744,36 @@ export function installDesktopRevealHelpers(
       });
       return;
     }
-    // Cmd+Shift+L opens Quick Workspace Rename & Labels Bar (focused on labels)
+    // Cmd+L or Cmd+Shift+L opens Quick Workspace Rename & Labels Bar (focused on labels)
+    const isCmdOrCtrl = ke.metaKey || ke.ctrlKey;
+    const isKeyL =
+      ke.key?.toLowerCase() === "l" ||
+      ke.code === "KeyL" ||
+      ke.keyCode === 76;
+
     if (
       prefs.enableQuickRenameAndLabelShortcuts &&
-      (ke.metaKey || ke.ctrlKey) &&
-      ke.shiftKey &&
-      ke.key.toLowerCase() === "l"
+      isCmdOrCtrl &&
+      !ke.altKey &&
+      isKeyL
     ) {
-      ke.preventDefault();
-      void showQuickThreadMetadataBar("labels");
-      return;
+      const combo = prefs.labelShortcutCombo ?? "both";
+      const matchesCombo =
+        (ke.shiftKey && (combo === "cmd_shift_l" || combo === "both")) ||
+        (!ke.shiftKey && (combo === "cmd_l" || combo === "both"));
+
+      if (matchesCombo) {
+        // If it's Cmd+L without shift, avoid triggering when actively typing inside an editable input (input, textarea, contenteditable)
+        // so that typing text or form fields is never interrupted.
+        if (!ke.shiftKey && isEditableInput(ke.target ?? null)) {
+          // Do not hijack typing inside textboxes
+        } else {
+          ke.preventDefault();
+          ke.stopPropagation?.();
+          void showQuickThreadMetadataBar("labels");
+          return;
+        }
+      }
     }
     // Cmd+J (Ctrl+J) or Cmd+Shift+O (Ctrl+Shift+O) opens Quick Project Workspace Switcher
     const jumpPrefs = readQuickJumpPreferences(win.localStorage);
@@ -4717,6 +5090,7 @@ export function installDesktopRevealHelpers(
   win.addEventListener("blur", hideSidebarDropOverlay, false);
 
   return () => {
+    activeShowQuickThreadMetadataBar = null;
     if (activeDesktopRevealCallbacks === callbacks) {
       activeDesktopRevealCallbacks = null;
     }

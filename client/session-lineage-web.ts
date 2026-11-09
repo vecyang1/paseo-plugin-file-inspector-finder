@@ -89,6 +89,12 @@ export function extractCurrentWorkspaceAndAgent(
   return { workspaceId, agentId };
 }
 
+function findReactFiber(el: Element | null): Record<string, any> | null {
+  if (!el) return null;
+  const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+  return key ? ((el as unknown as Record<string, any>)[key] ?? null) : null;
+}
+
 export function navigateToLineageNode(
   node: Pick<
     SessionLineageNode,
@@ -100,6 +106,17 @@ export function navigateToLineageNode(
   const d = doc ?? (typeof document !== "undefined" ? document : null);
   const w = win ?? (typeof window !== "undefined" ? window : null);
   if (!d || !w) return false;
+
+  // Fast path 1: If Paseo's native subagent track pill is mounted for this agentId, click it
+  if (node.agentId) {
+    const trackBtn = d.querySelector<HTMLElement>(
+      `[data-testid="subagent-track-${node.agentId}"]`,
+    );
+    if (trackBtn) {
+      trackBtn.click();
+      return true;
+    }
+  }
 
   const focused = focusWorkspaceInApp(
     node.workspaceId,
@@ -114,8 +131,17 @@ export function navigateToLineageNode(
     const tab = d.querySelector<HTMLElement>(
       `[data-testid="workspace-tab-agent_${node.agentId}"]`,
     );
-    if (tab && tab.getAttribute("aria-selected") !== "true") {
-      tab.click();
+    if (tab) {
+      if (tab.getAttribute("aria-selected") !== "true") {
+        tab.click();
+      }
+      return;
+    }
+    const nativeTrack = d.querySelector<HTMLElement>(
+      `[data-testid="subagent-track-${node.agentId}"]`,
+    );
+    if (nativeTrack) {
+      nativeTrack.click();
     }
   };
 
@@ -124,6 +150,113 @@ export function navigateToLineageNode(
     setTimeout(trySelectAgentTab, delay);
   }
   return focused;
+}
+
+export function enhanceTimelineSentByButtons(
+  data: RpcOutput<typeof manageSessionLineageRpc> | null,
+  doc?: Document | null,
+  win?: Window | null,
+): number {
+  const d = doc ?? (typeof document !== "undefined" ? document : null);
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  if (!d || !w || !data?.current) return 0;
+
+  const currentId = data.current.agentId;
+  const peerCandidates: SessionLineageNode[] = [
+    ...(data.children ?? []),
+    ...(data.parent ? [data.parent] : []),
+    ...(data.siblings ?? []),
+  ].filter((n) => n.agentId && n.agentId !== currentId);
+  if (peerCandidates.length === 0) return 0;
+
+  let healedCount = 0;
+  const buttons = Array.from(d.querySelectorAll<HTMLButtonElement>("button"));
+  for (const btn of buttons) {
+    const rawText = (btn.textContent ?? "").trim();
+    if (!rawText.startsWith("Sent by ") && !rawText.startsWith("发送自 ")) {
+      continue;
+    }
+
+    let cur = findReactFiber(btn);
+    let senderFiber: Record<string, any> | null = null;
+    for (let depth = 0; depth < 12 && cur; depth++, cur = cur.return) {
+      const p = cur.memoizedProps ?? cur.pendingProps;
+      if (p && typeof p === "object" && p.sender && typeof p.sender.id === "string") {
+        senderFiber = cur;
+        break;
+      }
+    }
+
+    const senderObj =
+      (senderFiber?.memoizedProps?.sender ?? senderFiber?.pendingProps?.sender) as
+        | { id?: string; title?: string }
+        | undefined;
+    const isSelfSender =
+      (senderObj?.id && senderObj.id === currentId) ||
+      rawText === `Sent by ${data.current.agentTitle}` ||
+      rawText === `发送自 ${data.current.agentTitle}`;
+
+    if (!isSelfSender) continue;
+
+    const msgContainer =
+      btn.closest('[data-testid^="user-message-"]') ??
+      btn.parentElement?.parentElement ??
+      btn.parentElement;
+    const msgText = (msgContainer?.textContent ?? "").toLowerCase();
+
+    let matchedPeer =
+      peerCandidates.find((cand) => {
+        const stem = cand.briefPath
+          ? cand.briefPath.split("/").pop()?.replace(/\.md$/i, "").toLowerCase()
+          : "";
+        if (stem && msgText.includes(stem)) return true;
+        const titleTail = cand.agentTitle.split(":").pop()?.trim().toLowerCase() ?? "";
+        if (titleTail.length >= 6 && msgText.includes(titleTail)) return true;
+        return false;
+      }) ??
+      (peerCandidates.length === 1 ? peerCandidates[0] : null);
+
+    if (!matchedPeer) continue;
+
+    if (senderFiber) {
+      for (const f of [senderFiber, senderFiber.alternate]) {
+        if (!f) continue;
+        for (const propBag of [f.memoizedProps, f.pendingProps]) {
+          if (propBag?.sender && typeof propBag.sender === "object") {
+            propBag.sender.id = matchedPeer.agentId;
+            propBag.sender.title = matchedPeer.agentTitle;
+          }
+        }
+      }
+    }
+
+    const prefix = rawText.startsWith("发送自 ") ? "发送自 " : "Sent by ";
+    for (const childNode of Array.from(btn.childNodes)) {
+      if (childNode.nodeType === 3 && (childNode.textContent ?? "").includes(prefix.trim())) {
+        childNode.textContent = `${prefix}${matchedPeer.agentTitle}`;
+      }
+    }
+    if ((btn.textContent ?? "").trim() === rawText) {
+      const spans = Array.from(btn.querySelectorAll("span"));
+      const targetSpan = spans[spans.length - 1];
+      if (targetSpan) {
+        targetSpan.textContent = `${prefix}${matchedPeer.agentTitle}`;
+      }
+    }
+
+    if (btn.getAttribute("data-vec-healed-sender") !== matchedPeer.agentId) {
+      btn.setAttribute("data-vec-healed-sender", matchedPeer.agentId);
+      const peerTarget = matchedPeer;
+      btn.addEventListener("click", () => {
+        setTimeout(() => {
+          navigateToLineageNode(peerTarget, d, w);
+        }, 30);
+      });
+    }
+    healedCount += 1;
+  }
+
+  return healedCount;
 }
 
 type LineageRpcResponse = RpcOutput<typeof manageSessionLineageRpc>;
@@ -254,6 +387,8 @@ export function installDesktopSessionLineageEnhancer(
   };
 
   const renderLineageBar = (data: LineageRpcResponse | null) => {
+    enhanceTimelineSentByButtons(data, document, window);
+
     const existing = document.querySelector<HTMLElement>(
       '[data-testid="paseo-finder-session-lineage-bar"]',
     );
@@ -265,17 +400,33 @@ export function installDesktopSessionLineageEnhancer(
       current?.briefPath || current?.reportPath || current?.notionUrl,
     );
 
-    if (!data || (!hasParent && children.length === 0 && !hasBriefOrReport)) {
+    const hasCrossWorkspaceLineage = Boolean(
+      (data?.parent && data.parent.workspaceId !== current?.workspaceId) ||
+        children.some((c) => c.workspaceId !== current?.workspaceId),
+    );
+
+    if (
+      !data ||
+      (!hasParent && children.length === 0 && !hasBriefOrReport) ||
+      (!hasCrossWorkspaceLineage && !hasBriefOrReport)
+    ) {
       existing?.remove();
       return;
     }
 
-    const composer = document.querySelector<HTMLElement>('[data-testid="agent-composer"]');
+    const composer = document.querySelector<HTMLElement>(
+      '[data-testid="agent-composer"], [data-testid="message-input-root"]',
+    );
     const hostParent = composer?.parentElement ?? null;
     if (!hostParent || !composer) {
       existing?.remove();
       return;
     }
+
+    const displayLabelFor = (node: SessionLineageNode): string =>
+      node.workspaceId && node.workspaceId === current?.workspaceId
+        ? node.agentTitle || node.workspaceTitle
+        : node.workspaceTitle || node.agentTitle;
 
     const zh = isZh();
     const tokens = syncPaseoThemeCssVariables(document as never, window as never);
@@ -291,9 +442,9 @@ export function installDesktopSessionLineageEnhancer(
     const sig = JSON.stringify({
       cur: current?.agentId,
       par: data.parent?.agentId,
-      parTitle: data.parent?.workspaceTitle,
+      parTitle: data.parent ? displayLabelFor(data.parent) : null,
       chCount: children.length,
-      chIds: children.slice(0, 6).map((c) => `${c.shortId}:${c.status}:${c.workspaceTitle}`),
+      chIds: children.slice(0, 6).map((c) => `${c.shortId}:${c.status}:${displayLabelFor(c)}`),
       sibCount: siblings.length,
       brief: current?.briefPath,
       report: current?.reportExists,
@@ -344,12 +495,13 @@ export function installDesktopSessionLineageEnhancer(
     // 1. Parent / Initiating Session 1-Click Jump Pill
     if (data.parent) {
       const parentNode = data.parent;
+      const parentDisplay = displayLabelFor(parentNode);
       const parentBtn = document.createElement("button");
       parentBtn.type = "button";
       parentBtn.setAttribute("data-testid", "paseo-finder-lineage-parent-btn");
       parentBtn.title = zh
-        ? `点击一键返回发起会话: ${parentNode.workspaceTitle} (#${parentNode.shortId})`
-        : `Click to jump back to initiating session: ${parentNode.workspaceTitle} (#${parentNode.shortId})`;
+        ? `点击一键返回发起会话: ${parentDisplay} (#${parentNode.shortId})`
+        : `Click to jump back to initiating session: ${parentDisplay} (#${parentNode.shortId})`;
 
       const dot = document.createElement("span");
       Object.assign(dot.style, {
@@ -362,9 +514,9 @@ export function installDesktopSessionLineageEnhancer(
 
       const textSpan = document.createElement("span");
       const truncatedParentTitle =
-        parentNode.workspaceTitle.length > 38
-          ? `${parentNode.workspaceTitle.slice(0, 38)}...`
-          : parentNode.workspaceTitle;
+        parentDisplay.length > 38
+          ? `${parentDisplay.slice(0, 38)}...`
+          : parentDisplay;
       textSpan.textContent = zh
         ? `↖ 发起会话: ${truncatedParentTitle} (#${parentNode.shortId})`
         : `↖ Initiated by: ${truncatedParentTitle} (#${parentNode.shortId})`;
@@ -434,6 +586,7 @@ export function installDesktopSessionLineageEnhancer(
       // Show up to 3 direct quick-jump child chips inline when collapsed
       if (!childrenPopoverOpen) {
         for (const child of children.slice(0, 3)) {
+          const childDisplay = displayLabelFor(child);
           const chip = document.createElement("button");
           chip.type = "button";
           chip.setAttribute(
@@ -441,11 +594,11 @@ export function installDesktopSessionLineageEnhancer(
             `paseo-finder-lineage-child-chip-${child.shortId}`,
           );
           const shortTitle =
-            child.workspaceTitle.length > 24
-              ? `${child.workspaceTitle.slice(0, 24)}...`
-              : child.workspaceTitle;
+            childDisplay.length > 24
+              ? `${childDisplay.slice(0, 24)}...`
+              : childDisplay;
           chip.textContent = `${shortTitle} (#${child.shortId}) ↗`;
-          chip.title = `${child.workspaceTitle} (#${child.shortId})`;
+          chip.title = `${childDisplay} (#${child.shortId})`;
           Object.assign(chip.style, {
             display: "inline-flex",
             alignItems: "center",
@@ -623,7 +776,7 @@ export function installDesktopSessionLineageEnhancer(
         });
 
         const titleSpan = document.createElement("span");
-        titleSpan.textContent = child.workspaceTitle;
+        titleSpan.textContent = displayLabelFor(child);
         Object.assign(titleSpan.style, {
           overflow: "hidden",
           textOverflow: "ellipsis",
