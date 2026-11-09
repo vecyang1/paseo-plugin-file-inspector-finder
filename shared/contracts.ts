@@ -20,6 +20,7 @@ export const OpenerTargetSchema = z.enum([
   "finder-reveal",
   "finder-folder",
   "system-preview",
+  "system-default",
   "quicklook",
   "antigravity",
   "cursor",
@@ -95,6 +96,15 @@ export type InlineRenameCaretPosition = z.infer<
   typeof InlineRenameCaretPositionSchema
 >;
 
+export const SmartCopyModeSchema = z.enum(["smart", "markdown", "plain"]);
+export type SmartCopyMode = z.infer<typeof SmartCopyModeSchema>;
+
+export const SmartCopyBulletMarkerSchema = z.enum(["bullet", "dash"]);
+export type SmartCopyBulletMarker = z.infer<typeof SmartCopyBulletMarkerSchema>;
+
+export const SmartCopyLinkFormatSchema = z.enum(["label-only", "label-with-url", "markdown"]);
+export type SmartCopyLinkFormat = z.infer<typeof SmartCopyLinkFormatSchema>;
+
 export const pluginSettings = defineSettings({
   id: "finder-settings",
   scope: "host",
@@ -105,12 +115,19 @@ export const pluginSettings = defineSettings({
     maxRecentFiles: z.number().int().min(5).max(100).default(24),
     autoAssociateImagePanels: z.boolean().default(true),
     enableDesktopContextMenuHelper: z.boolean().default(true),
+    enableCmdClickOpenSystemDefault: z.boolean().default(true),
+    cmdClickDefaultTarget: OpenerTargetSchema.default("system-default"),
+    enableSidebarCmdClickFinder: z.boolean().default(true),
     enableInlineDoubleClickRename: z.boolean().default(true),
     autoJumpToFirstPlaceInput: z.boolean().default(true),
     inlineRenameCaretPosition: InlineRenameCaretPositionSchema.default("start"),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
     enableMarkDoneShortcut: z.boolean().default(true),
     markDonePrefix: z.string().default("d "),
+    enableSmartClipboardCopy: z.boolean().default(true),
+    defaultClipboardCopyMode: SmartCopyModeSchema.default("smart"),
+    smartCopyBulletMarker: SmartCopyBulletMarkerSchema.default("bullet"),
+    smartCopyLinkFormat: SmartCopyLinkFormatSchema.default("label-only"),
     enableSidebarFolderDrop: z.boolean().default(true),
     sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),
     enableWorkspaceQuickJump: z.boolean().default(true),
@@ -840,6 +857,106 @@ export const manageWritebackHookRpc = defineRpc({
   }),
 });
 
+export const SubagentTimelineItemSchema = z.object({
+  id: z.string(),
+  stepIndex: z.number(),
+  type: z.enum(["user_message", "assistant_message", "tool_call"]),
+  name: z.string().optional(),
+  summary: z.string().optional(),
+  text: z.string().optional(),
+  sender: z.string().optional(),
+  childConversationId: z.string().nullable().optional(),
+  subAgentType: z.string().nullable().optional(),
+  timestamp: z.string().nullable().optional(),
+});
+
+export type SubagentTimelineItem = z.infer<typeof SubagentTimelineItemSchema>;
+
+export const FlatSubagentNodeSchema = z.object({
+  conversationId: z.string(),
+  parentConversationId: z.string(),
+  depth: z.number(),
+  toolCallId: z.string().nullable().optional(),
+  stepIndex: z.number().nullable().optional(),
+  subAgentType: z.string(),
+  role: z.string(),
+  promptPreview: z.string(),
+  status: z.enum(["running", "completed", "failed"]),
+  badge: z.string(),
+  stepCount: z.number(),
+  toolCallCount: z.number(),
+  lastToolName: z.string(),
+  lastMessagePreview: z.string(),
+  lastErrorText: z.string(),
+  updatedAt: z.string(),
+  mtimeAgeSeconds: z.number(),
+  transcriptPath: z.string(),
+  nestedSubagentCount: z.number(),
+  nestedRunningCount: z.number(),
+  timeline: z.array(SubagentTimelineItemSchema).optional(),
+});
+
+export type FlatSubagentNode = z.infer<typeof FlatSubagentNodeSchema>;
+
+export const SubagentAgentTreeSchema = z.object({
+  agentId: z.string(),
+  workspaceId: z.string(),
+  workspaceName: z.string(),
+  title: z.string(),
+  cwd: z.string(),
+  model: z.string(),
+  agentStatus: z.string(),
+  archived: z.boolean(),
+  rootConversationId: z.string(),
+  rootStepCount: z.number(),
+  rootToolCallCount: z.number(),
+  rootLastMessagePreview: z.string(),
+  updatedAt: z.string(),
+  subagentSummary: z.object({
+    total: z.number(),
+    running: z.number(),
+    completed: z.number(),
+    failed: z.number(),
+    maxDepth: z.number(),
+    totalSubagentSteps: z.number(),
+  }),
+  flatSubagents: z.array(FlatSubagentNodeSchema),
+  rootTimeline: z.array(SubagentTimelineItemSchema),
+});
+
+export type SubagentAgentTree = z.infer<typeof SubagentAgentTreeSchema>;
+
+export const manageSubagentsRpc = defineRpc({
+  name: "finder.manage_subagents",
+  input: z.object({
+    action: z.enum(["status", "tree", "inspect", "timeline"]).default("status"),
+    agentId: z.string().optional(),
+    conversationId: z.string().optional(),
+    includeTimeline: z.boolean().optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+    source: z
+      .enum(["timeline-inline", "subagents-bar", "drawer", "settings-ui", "command-center", "agent-tool"])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.string(),
+    targetAgentId: z.string().nullable(),
+    targetConversationId: z.string().nullable(),
+    summary: z.object({
+      agentsWithSubagents: z.number(),
+      totalSubagents: z.number(),
+      runningSubagents: z.number(),
+      completedSubagents: z.number(),
+      failedSubagents: z.number(),
+    }),
+    trees: z.array(SubagentAgentTreeSchema),
+    singleConversation: FlatSubagentNodeSchema.nullable(),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+
 export function stripLeadingDatePrefix(name: string): string {
   return name
     .trim()
@@ -960,6 +1077,65 @@ export function scoreProjectJumpQuery(
 
   return totalScore;
 }
+
+export const SessionLineageNodeSchema = z.object({
+  agentId: z.string(),
+  shortId: z.string(),
+  agentTitle: z.string(),
+  workspaceId: z.string(),
+  workspaceTitle: z.string(),
+  projectId: z.string().nullable(),
+  projectName: z.string().nullable(),
+  status: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  createdAt: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  briefPath: z.string().nullable(),
+  reportPath: z.string().nullable(),
+  reportExists: z.boolean(),
+  notionUrl: z.string().nullable(),
+  notionTaskId: z.string().nullable(),
+});
+
+export type SessionLineageNode = z.infer<typeof SessionLineageNodeSchema>;
+
+export const manageSessionLineageRpc = defineRpc({
+  name: "finder.manage_session_lineage",
+  input: z.object({
+    action: z.enum(["inspect", "reconcile"]).default("inspect"),
+    workspaceId: z.string().optional(),
+    agentId: z.string().optional(),
+    autoFixTitles: z.boolean().optional(),
+    source: z
+      .enum(["lineage-bar", "settings-ui", "slash-command", "command-center", "agent-tool"])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.string(),
+    current: SessionLineageNodeSchema.nullable(),
+    parent: SessionLineageNodeSchema.nullable(),
+    siblings: z.array(SessionLineageNodeSchema),
+    children: z.array(SessionLineageNodeSchema),
+    reconcileSummary: z.object({
+      untitledFound: z.number(),
+      renamedCount: z.number(),
+      unlinkedFound: z.number(),
+      linkedCount: z.number(),
+      renamedWorkspaces: z.array(
+        z.object({
+          workspaceId: z.string(),
+          oldDisplayName: z.string(),
+          newTitle: z.string(),
+          agentId: z.string(),
+        }),
+      ),
+    }),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
 
 export * from "./schedule-runs-contracts";
 

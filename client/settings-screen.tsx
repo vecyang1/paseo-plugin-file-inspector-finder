@@ -78,6 +78,16 @@ import {
   syncSidebarDefaultCollapsePrefs,
 } from "./sidebar-default-collapse-web";
 import {
+  DEFAULT_SMART_COPY_SAMPLE,
+  SMART_COPY_EVENT,
+  type SmartCopyMode,
+  type SmartCopySelfTestResult,
+  type SmartCopyStatus,
+  getSmartCopyStatus,
+  runSmartCopySelfTest,
+  syncSmartCopyPreferences,
+} from "./smart-copy-web";
+import {
   applyInlineInputCaret,
   computeDoneToggledTitle,
   findF2InlineRenameTarget,
@@ -165,6 +175,18 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     window.addEventListener(SIDEBAR_DEFAULT_COLLAPSE_EVENT, onReceipt);
     return () => window.removeEventListener(SIDEBAR_DEFAULT_COLLAPSE_EVENT, onReceipt);
   }, []);
+  const [smartCopyStatus, setSmartCopyStatus] = useState<SmartCopyStatus | null>(null);
+  const [smartCopySampleInput, setSmartCopySampleInput] = useState(
+    DEFAULT_SMART_COPY_SAMPLE.slice(0, 220),
+  );
+  const [smartCopySelfTest, setSmartCopySelfTest] = useState<SmartCopySelfTestResult | null>(null);
+  useEffect(() => {
+    setSmartCopyStatus(getSmartCopyStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setSmartCopyStatus(getSmartCopyStatus());
+    window.addEventListener(SMART_COPY_EVENT, onReceipt);
+    return () => window.removeEventListener(SMART_COPY_EVENT, onReceipt);
+  }, []);
   const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
   const [agentHistorySnapData, setAgentHistorySnapData] = useState<
     Awaited<ReturnType<typeof manageAgentHistory>> | null
@@ -224,6 +246,12 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         digitMode: settings.values.modelQuickSwitchDigits,
       });
       syncSidebarDefaultCollapsePrefs({ enabled: settings.values.startNewProjectsCollapsed });
+      syncSmartCopyPreferences({
+        enabled: settings.values.enableSmartClipboardCopy ?? true,
+        defaultMode: settings.values.defaultClipboardCopyMode ?? "smart",
+        bulletMarker: settings.values.smartCopyBulletMarker ?? "bullet",
+        linkFormat: settings.values.smartCopyLinkFormat ?? "label-only",
+      });
     }
   }, [settings]);
 
@@ -709,6 +737,58 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                     : "No active workspace located (select or open a workspace first)",
                 );
               }
+            }}
+          />
+
+          <SettingsSwitch
+            label={
+              isZh
+                ? "智能剪贴板复制（Beeper/微信/网页无 ** 星号 + Notion 富文本保留）"
+                : "Smart Clipboard Copy (Clean Plain Text + Rich HTML for Notion)"
+            }
+            hint={
+              isZh
+                ? "开启后：Cmd+C 及点击回复下方复制按钮时，text/plain 自动清除 ** 与 ### 符号（粘贴到 Beeper、LinkedIn、微信或普通输入框无星号干扰），同时 text/html 保留完整粗体与列表排版（粘贴到 Notion、飞书、Google Docs 保持原样）。按 Cmd+Shift+C 强制仅复制纯文本，按 Option+Cmd+C（或 Option+点击复制按钮）复制原始 Markdown。"
+                : "When enabled, Cmd+C and message Copy buttons put clean plain text (no ** or ###) into text/plain for Beeper/LinkedIn/WeChat/browser inputs, while keeping rich HTML in text/html for Notion/Google Docs. Press Cmd+Shift+C for Plain Only, or Option+Cmd+C (or Option+Click Copy) for Raw Markdown."
+            }
+            value={values.enableSmartClipboardCopy ?? true}
+            onValueChange={(next) => {
+              syncSmartCopyPreferences({ enabled: next });
+              void save({ ...values, enableSmartClipboardCopy: next }, revision);
+            }}
+          />
+
+          <SettingsSelect
+            label={isZh ? "默认复制模式 (Cmd+C / 复制按钮)" : "Default Copy Mode (Cmd+C / Copy Button)"}
+            hint={
+              isZh
+                ? "智能双格式（推荐）：Beeper/网页得纯文本、Notion 得富文本 · 原始 Markdown：保留 ** 星号 · 仅纯文本：连 Notion 也只粘贴纯文本"
+                : "Smart Dual-Format (Recommended): Beeper/web inputs get clean text while Notion gets rich HTML · Raw Markdown: keeps ** · Plain Text Only: strips HTML too"
+            }
+            value={(values.defaultClipboardCopyMode ?? "smart") as SmartCopyMode}
+            options={[
+              {
+                label: isZh
+                  ? "智能双格式：纯文本无 ** + Notion 富文本（推荐）"
+                  : "Smart: Clean Plain Text + Rich HTML (Recommended)",
+                value: "smart",
+              },
+              {
+                label: isZh
+                  ? "原始 Markdown（保留 ** 与 ### 符号）"
+                  : "Raw Markdown (Keep ** and ### syntax)",
+                value: "markdown",
+              },
+              {
+                label: isZh
+                  ? "仅干净纯文本（不写富文本 HTML）"
+                  : "Clean Plain Text Only (No HTML)",
+                value: "plain",
+              },
+            ]}
+            onValueChange={(next) => {
+              syncSmartCopyPreferences({ defaultMode: next });
+              void save({ ...values, defaultClipboardCopyMode: next }, revision);
             }}
           />
 
@@ -2632,6 +2712,117 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                     ))}
                 </View>
               ) : null}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "智能剪贴板与 Markdown 净化对账器 (Smart Clipboard Copy & Markdown Stripper Reconciler)"
+            : "Smart Clipboard Copy & Markdown Stripper Reconciler (⌘C / ⌘⇧C / ⌥⌘C)"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {isZh
+              ? "根治复制回复粘贴到 Beeper / LinkedIn / 微信出现满屏 `**` 星号的问题（能读 / 能试 / 能调）：默认 `⌘C` 同时写入干净纯文本（`text/plain` 供 Beeper/微信/网页）与富文本 HTML（`text/html` 供 Notion/Docs），按 `⌘⇧C` 强制纯文本，按 `⌥⌘C` 或 `Option+点击复制` 获取原始 Markdown："
+              : "Eliminate unwanted `**` asterisks when pasting into Beeper, LinkedIn, WeChat, or browser inputs while keeping rich formatting in Notion (`text/plain` = Clean Text, `text/html` = Rich HTML):"}
+          </Text>
+
+          <Text style={styles.detail}>
+            • Active Status: {smartCopyStatus?.installed ? "✓ INSTALLED" : "○ IDLE"} · Enabled:{" "}
+            {smartCopyStatus?.preferences.enabled !== false ? "✓ true" : "✕ false"} · Default Mode:{" "}
+            {smartCopyStatus?.preferences.defaultMode ?? "smart"} · Bullet:{" "}
+            {smartCopyStatus?.preferences.bulletMarker === "dash" ? "- " : "• "} · Link:{" "}
+            {smartCopyStatus?.preferences.linkFormat ?? "label-only"} · Shortcuts: ⌘C (Smart) / ⌘⇧C
+            (Clean Plain) / ⌥⌘C (Raw Markdown) / ⌥+Click Copy Icon
+          </Text>
+
+          <View style={styles.row}>
+            <TextInput
+              value={smartCopySampleInput}
+              onChangeText={setSmartCopySampleInput}
+              placeholder={
+                isZh
+                  ? "输入包含 **粗体**、### 标题或列表的样本进行实时净化验算..."
+                  : "Enter sample text with **bold**, ### headings, or bullets to test..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const res = runSmartCopySelfTest(smartCopySampleInput);
+                setSmartCopySelfTest(res);
+                setSmartCopyStatus(getSmartCopyStatus());
+                toast.show(res.summary);
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "验算转换结果 (能试)" : "Run Self-Test"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                syncSmartCopyPreferences({
+                  enabled: true,
+                  defaultMode: "smart",
+                  bulletMarker: "bullet",
+                  linkFormat: "label-only",
+                });
+                void save(
+                  {
+                    ...values,
+                    enableSmartClipboardCopy: true,
+                    defaultClipboardCopyMode: "smart",
+                    smartCopyBulletMarker: "bullet",
+                    smartCopyLinkFormat: "label-only",
+                  },
+                  revision,
+                );
+                setSmartCopyStatus(getSmartCopyStatus());
+                toast.show(isZh ? "已恢复智能复制默认配置" : "Restored Smart Copy defaults");
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "恢复默认 (能调)" : "Restore Defaults"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {smartCopySelfTest ? (
+            <View style={{ gap: 4, marginTop: 6 }}>
+              <Text style={styles.label}>• {smartCopySelfTest.summary}</Text>
+              <Text style={styles.detail}>
+                • Beeper / LinkedIn / WeChat (`text/plain`): {smartCopySelfTest.smartPlainOutput.slice(0, 180)}
+              </Text>
+              <Text style={styles.detail}>
+                • Notion / Docs (`text/html`): {smartCopySelfTest.smartHtmlOutput.slice(0, 180)}
+              </Text>
+              <Text style={styles.detail}>
+                • Code Block Guard (`**kwargs`, `# comment`):{" "}
+                {smartCopySelfTest.codeBlockPreserved ? "✓ Preserved verbatim" : "✕ Failed"}
+              </Text>
+            </View>
+          ) : null}
+
+          {smartCopyStatus && smartCopyStatus.receipts.length > 0 ? (
+            <View style={{ gap: 3, marginTop: 4 }}>
+              <Text style={styles.label}>
+                {isZh ? "最近复制对账记录：" : "Recent Copy Receipts:"}
+              </Text>
+              {smartCopyStatus.receipts.slice(0, 4).map((rc, idx) => (
+                <Text key={`${rc.at}_${idx}`} style={styles.detail} numberOfLines={1}>
+                  • [{rc.trigger}] mode={rc.modeUsed} · stripped={rc.strippedTokens} · plain=
+                  {rc.plainChars}c / html={rc.htmlChars}c · "{rc.preview}"
+                </Text>
+              ))}
             </View>
           ) : null}
         </View>

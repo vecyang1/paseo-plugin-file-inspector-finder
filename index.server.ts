@@ -18,7 +18,9 @@ import {
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
+  manageSessionLineageRpc,
   manageSlashSkillsRpc,
+  manageSubagentsRpc,
   manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
 } from "./shared/contracts";
@@ -28,7 +30,9 @@ import {
   handleInspectFile,
   handleListWorkspaceMedia,
   handleManageAgentHistory,
+  handleManageSessionLineage,
   handleManageSlashSkills,
+  handleManageSubagents,
   handleManageVoiceStt,
   handleManageWorkspaceLabels,
   handleManageWritebackHook,
@@ -65,7 +69,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(openScheduleRunSessionRpc, handleOpenScheduleRunSession);
   server.handle(manageVoiceSttRpc, handleManageVoiceStt);
   server.handle(manageAgentHistoryRpc, handleManageAgentHistory);
+  server.handle(manageSessionLineageRpc, handleManageSessionLineage);
   server.handle(manageSlashSkillsRpc, handleManageSlashSkills);
+  server.handle(manageSubagentsRpc, handleManageSubagents);
   server.handle(manageWritebackHookRpc, handleManageWritebackHook);
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
 
@@ -543,6 +549,38 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const sessionLineageTool = defineAgentTool({
+    name: "manage_session_lineage",
+    title: "Inspect or Reconcile Session Lineage & Sidebar Workspace Titles",
+    description:
+      "Inspect parent/initiating session, spawned child sessions, sibling sessions, Intake brief/report/Notion links, or reconcile untitled 'main' sidebar workspaces from their agent title.",
+    input: z.object({
+      action: z
+        .enum(["inspect", "reconcile"])
+        .optional()
+        .describe("inspect (default) or reconcile (fix untitled 'main' workspaces and missing parent labels)"),
+      workspaceId: z.string().optional().describe("Target workspace ID (defaults to active workspace)"),
+      agentId: z.string().optional().describe("Target agent ID or prefix (defaults to active agent)"),
+    }),
+    async execute(input, { agent, paseo }) {
+      const result = await handleManageSessionLineage(
+        {
+          action: input.action ?? "inspect",
+          workspaceId: input.workspaceId ?? agent.workspaceId ?? undefined,
+          agentId: input.agentId ?? agent.id,
+          autoFixTitles: true,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
@@ -558,6 +596,7 @@ export default function contribute(server: PluginServerContext) {
         paseoRecoveryTool,
         slashSkillsTool,
         writebackHookTool,
+        sessionLineageTool,
       ],
     };
   });

@@ -3121,6 +3121,8 @@ test("35. Mark session as done shortcut (Option+D / ⌥D) & slash command: toggl
         remove: () => {},
       } as unknown as MinimalElement;
     },
+    addEventListener: () => {},
+    removeEventListener: () => {},
   };
 
   const mockWin: MinimalWindow = {
@@ -3132,6 +3134,8 @@ test("35. Mark session as done shortcut (Option+D / ⌥D) & slash command: toggl
     navigator: {
       language: "zh-CN",
     },
+    addEventListener: () => {},
+    removeEventListener: () => {},
   };
 
   const mockCallbacks = {
@@ -3193,6 +3197,33 @@ test("35. Mark session as done shortcut (Option+D / ⌥D) & slash command: toggl
   assert.equal(renameCalls.length, 2);
   assert.equal(renameCalls[1].newTitle, "Fix Paseo auto-launch not triggering");
 });
+
+test("extractCurrentRouteAgentId parses /ag/<agentId> routes for subagent tree inspector", async () => {
+  const { extractCurrentRouteAgentId } = await import("../client/subagents-tree-web");
+  assert.equal(
+    extractCurrentRouteAgentId("/ag/e2210f4d-9cc5-4900-b795-6584950532c9"),
+    "e2210f4d-9cc5-4900-b795-6584950532c9",
+  );
+  assert.equal(extractCurrentRouteAgentId("/workspace/wks_0232c71f8e4bdda8"), null);
+  assert.equal(extractCurrentRouteAgentId(""), null);
+});
+
+test("extractCurrentWorkspaceAndAgent parses workspace and agent routes for session lineage bar", async () => {
+  const { extractCurrentWorkspaceAndAgent } = await import("../client/session-lineage-web");
+  const parsed = extractCurrentWorkspaceAndAgent(
+    null,
+    { location: { pathname: "/workspace/wks_72682062d02ff5d9" } } as unknown as Window,
+  );
+  assert.equal(parsed.workspaceId, "wks_72682062d02ff5d9");
+  assert.equal(parsed.agentId, null);
+
+  const parsedAg = extractCurrentWorkspaceAndAgent(
+    null,
+    { location: { pathname: "/ag/c32f05ca-a8bf-425f-ac1e-dc0e3c7853b3" } } as unknown as Window,
+  );
+  assert.equal(parsedAg.agentId, "c32f05ca-a8bf-425f-ac1e-dc0e3c7853b3");
+});
+
 
 
 

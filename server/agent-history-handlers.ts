@@ -6,11 +6,17 @@ import * as path from "node:path";
 import type {
   AgentHistoryTargetReceipt,
   CustomizeItem,
+  FlatSubagentNode,
   PaseoRecoveryAgentItem,
+  SessionLineageNode,
   SlashDryRunResolution,
+  SubagentAgentTree,
+  SubagentTimelineItem,
   WritebackReplayEvent,
   manageAgentHistoryRpc,
+  manageSessionLineageRpc,
   manageSlashSkillsRpc,
+  manageSubagentsRpc,
   manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
 } from "../shared/contracts";
@@ -962,6 +968,612 @@ export async function handleManageWritebackHook(
       auditByReason: {},
       replay: null,
       message: `Writeback hook reconciler error: ${errMsg}`,
+      durationMs,
+    };
+  }
+}
+
+function normalizeTimelineItems(rawItems: unknown): SubagentTimelineItem[] {
+  if (!Array.isArray(rawItems)) return [];
+  const out: SubagentTimelineItem[] = [];
+  for (const r of rawItems) {
+    if (!r || typeof r !== "object") continue;
+    const obj = r as Record<string, unknown>;
+    const rawType = String(obj.type ?? "assistant_message");
+    const type: "user_message" | "assistant_message" | "tool_call" =
+      rawType === "user_message" || rawType === "tool_call" ? rawType : "assistant_message";
+    out.push({
+      id: String(obj.id ?? ""),
+      stepIndex: Number(obj.stepIndex ?? 0),
+      type,
+      name: typeof obj.name === "string" ? obj.name : undefined,
+      summary: typeof obj.summary === "string" ? obj.summary : undefined,
+      text: typeof obj.text === "string" ? obj.text : undefined,
+      sender: typeof obj.sender === "string" ? obj.sender : undefined,
+      childConversationId:
+        typeof obj.childConversationId === "string" ? obj.childConversationId : null,
+      subAgentType: typeof obj.subAgentType === "string" ? obj.subAgentType : null,
+      timestamp: typeof obj.timestamp === "string" ? obj.timestamp : null,
+    });
+  }
+  return out;
+}
+
+function normalizeFlatSubagentNode(raw: unknown): FlatSubagentNode | null {
+  if (!raw || typeof raw !== "object") return null;
+  const n = raw as Record<string, unknown>;
+  const rawStatus = String(n.status ?? "completed");
+  const status: "running" | "completed" | "failed" =
+    rawStatus === "running" || rawStatus === "failed" ? rawStatus : "completed";
+  return {
+    conversationId: String(n.conversationId ?? ""),
+    parentConversationId: String(n.parentConversationId ?? ""),
+    depth: Number(n.depth ?? 1),
+    toolCallId: typeof n.toolCallId === "string" ? n.toolCallId : null,
+    stepIndex: typeof n.stepIndex === "number" ? n.stepIndex : null,
+    subAgentType: String(n.subAgentType ?? "subagent"),
+    role: String(n.role ?? ""),
+    promptPreview: String(n.promptPreview ?? n.firstPromptPreview ?? ""),
+    status,
+    badge: String(n.badge ?? `[${status === "running" ? "Running" : status === "failed" ? "Failed" : "Done"}]`),
+    stepCount: Number(n.stepCount ?? 0),
+    toolCallCount: Number(n.toolCallCount ?? 0),
+    lastToolName: String(n.lastToolName ?? ""),
+    lastMessagePreview: String(n.lastMessagePreview ?? ""),
+    lastErrorText: String(n.lastErrorText ?? ""),
+    updatedAt: String(n.updatedAt ?? ""),
+    mtimeAgeSeconds: Number(n.mtimeAgeSeconds ?? 0),
+    transcriptPath: String(n.transcriptPath ?? ""),
+    nestedSubagentCount: Number(n.nestedSubagentCount ?? 0),
+    nestedRunningCount: Number(n.nestedRunningCount ?? 0),
+    timeline: normalizeTimelineItems(n.timeline),
+  };
+}
+
+export async function handleManageSubagents(
+  input: RpcInput<typeof manageSubagentsRpc>,
+  _context: PluginHandlerContext,
+) {
+  const startMs = Date.now();
+  const action = input.action ?? "status";
+  try {
+    const cliArgs = ["subagents", action, "--json"];
+    if (input.agentId && input.agentId.trim()) {
+      cliArgs.push("--agent", input.agentId.trim());
+    }
+    if (input.conversationId && input.conversationId.trim()) {
+      cliArgs.push("--cid", input.conversationId.trim());
+    }
+    if (input.includeTimeline || action === "inspect" || action === "timeline") {
+      cliArgs.push("--timeline");
+    }
+    if (typeof input.limit === "number") {
+      cliArgs.push("--limit", String(input.limit));
+    }
+
+    const res = await execCommand(ANTIGRAVITY_OPS_BIN, cliArgs, { timeout: 20_000 });
+    const parsed = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
+    const summaryRaw = (parsed.summary ?? {}) as Record<string, unknown>;
+    const rawTrees = Array.isArray(parsed.trees) ? parsed.trees : [];
+    const trees: SubagentAgentTree[] = rawTrees.map((t) => {
+      const tr = (t ?? {}) as Record<string, unknown>;
+      const subSum = (tr.subagentSummary ?? {}) as Record<string, unknown>;
+      const rawFlat = Array.isArray(tr.flatSubagents) ? tr.flatSubagents : [];
+      const flatSubagents: FlatSubagentNode[] = [];
+      for (const item of rawFlat) {
+        const norm = normalizeFlatSubagentNode(item);
+        if (norm) flatSubagents.push(norm);
+      }
+      return {
+        agentId: String(tr.agentId ?? ""),
+        workspaceId: String(tr.workspaceId ?? ""),
+        workspaceName: String(tr.workspaceName ?? ""),
+        title: String(tr.title ?? ""),
+        cwd: String(tr.cwd ?? ""),
+        model: String(tr.model ?? "default"),
+        agentStatus: String(tr.agentStatus ?? "idle"),
+        archived: Boolean(tr.archived ?? false),
+        rootConversationId: String(tr.rootConversationId ?? ""),
+        rootStepCount: Number(tr.rootStepCount ?? 0),
+        rootToolCallCount: Number(tr.rootToolCallCount ?? 0),
+        rootLastMessagePreview: String(tr.rootLastMessagePreview ?? ""),
+        updatedAt: String(tr.updatedAt ?? ""),
+        subagentSummary: {
+          total: Number(subSum.total ?? flatSubagents.length),
+          running: Number(subSum.running ?? 0),
+          completed: Number(subSum.completed ?? 0),
+          failed: Number(subSum.failed ?? 0),
+          maxDepth: Number(subSum.maxDepth ?? 0),
+          totalSubagentSteps: Number(subSum.totalSubagentSteps ?? 0),
+        },
+        flatSubagents,
+        rootTimeline: normalizeTimelineItems(tr.rootTimeline),
+      };
+    });
+
+    const singleConversation = normalizeFlatSubagentNode(parsed.singleConversation);
+    const totalSubagents = Number(summaryRaw.totalSubagents ?? 0);
+    const runningSubagents = Number(summaryRaw.runningSubagents ?? 0);
+    const completedSubagents = Number(summaryRaw.completedSubagents ?? 0);
+    const failedSubagents = Number(summaryRaw.failedSubagents ?? 0);
+    const durationMs = Date.now() - startMs;
+
+    return {
+      ok: Boolean(parsed.ok ?? true),
+      action,
+      targetAgentId: typeof parsed.targetAgentId === "string" ? parsed.targetAgentId : null,
+      targetConversationId:
+        typeof parsed.targetConversationId === "string" ? parsed.targetConversationId : null,
+      summary: {
+        agentsWithSubagents: Number(summaryRaw.agentsWithSubagents ?? trees.length),
+        totalSubagents,
+        runningSubagents,
+        completedSubagents,
+        failedSubagents,
+      },
+      trees,
+      singleConversation,
+      message: `Subagent Tree: ${trees.length} session(s) · ${totalSubagents} subagents (Running=${runningSubagents}, Done=${completedSubagents}, Failed=${failedSubagents})`,
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      action,
+      targetAgentId: input.agentId ?? null,
+      targetConversationId: input.conversationId ?? null,
+      summary: {
+        agentsWithSubagents: 0,
+        totalSubagents: 0,
+        runningSubagents: 0,
+        completedSubagents: 0,
+        failedSubagents: 0,
+      },
+      trees: [],
+      singleConversation: null,
+      message: `Subagent inspector error: ${errMsg}`,
+      durationMs,
+    };
+  }
+}
+
+interface FullRawWorkspaceRecord {
+  workspaceId?: string;
+  id?: string;
+  projectId?: string;
+  title?: string | null;
+  displayName?: string | null;
+  cwd?: string;
+  archivedAt?: string | null;
+  background?: boolean;
+}
+
+interface FullRawProjectRecord {
+  projectId?: string;
+  displayName?: string;
+  customName?: string | null;
+  rootPath?: string;
+  archivedAt?: string | null;
+}
+
+interface FullRawAgentRecord {
+  id?: string;
+  workspaceId?: string;
+  provider?: string;
+  title?: string | null;
+  cwd?: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  archivedAt?: string | null;
+  lastStatus?: string | null;
+  labels?: Record<string, string>;
+  config?: {
+    model?: string;
+    systemPrompt?: string;
+  };
+}
+
+interface IntakeTaskStateEntry {
+  page_id?: string;
+  title?: string;
+  brief?: string;
+  report?: string;
+  agent_id?: string;
+  state?: string;
+}
+
+export async function handleManageSessionLineage(
+  input: RpcInput<typeof manageSessionLineageRpc>,
+  context: PluginHandlerContext,
+) {
+  const startMs = Date.now();
+  const action = input.action ?? "inspect";
+  const autoFixTitles = input.autoFixTitles ?? true;
+  const home = os.homedir();
+  const paseoDir = path.join(home, ".paseo");
+
+  try {
+    // If explicit reconcile requested, run CLI reconciler first so labels + titles are synced
+    let cliReconcileRaw: Record<string, unknown> | null = null;
+    if (action === "reconcile") {
+      try {
+        const res = await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "reconcile", "--json"], {
+          timeout: 25_000,
+        });
+        cliReconcileRaw = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
+      } catch {
+        // Continue with in-process inspection & title reconciliation
+      }
+    }
+
+    // 1. Load projects.json & workspaces.json
+    const projectsById = new Map<string, FullRawProjectRecord>();
+    try {
+      const projRaw = JSON.parse(
+        await fs.readFile(path.join(paseoDir, "projects", "projects.json"), "utf8"),
+      ) as unknown;
+      if (Array.isArray(projRaw)) {
+        for (const p of projRaw as FullRawProjectRecord[]) {
+          if (p.projectId) projectsById.set(p.projectId, p);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    const workspacesById = new Map<string, FullRawWorkspaceRecord>();
+    try {
+      const wsRaw = JSON.parse(
+        await fs.readFile(path.join(paseoDir, "projects", "workspaces.json"), "utf8"),
+      ) as unknown;
+      if (Array.isArray(wsRaw)) {
+        for (const w of wsRaw as FullRawWorkspaceRecord[]) {
+          const wsId = (w.workspaceId ?? w.id ?? "").trim();
+          if (wsId) workspacesById.set(wsId, w);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    // 2. Load Intake state.json for brief/report/Notion links
+    const intakeByAgentId = new Map<string, IntakeTaskStateEntry>();
+    const intakeByBriefStem = new Map<string, IntakeTaskStateEntry>();
+    try {
+      const stateRaw = JSON.parse(
+        await fs.readFile(path.join(paseoDir, "vec-intake", "state.json"), "utf8"),
+      ) as { tasks?: Record<string, IntakeTaskStateEntry> };
+      for (const [pageId, entry] of Object.entries(stateRaw.tasks ?? {})) {
+        const enriched: IntakeTaskStateEntry = { ...entry, page_id: entry.page_id ?? pageId };
+        if (entry.agent_id) {
+          intakeByAgentId.set(entry.agent_id, enriched);
+          intakeByAgentId.set(entry.agent_id.slice(0, 8), enriched);
+        }
+        if (entry.brief) {
+          const stem = path.basename(entry.brief, path.extname(entry.brief));
+          intakeByBriefStem.set(stem, enriched);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    // 3. Scan ~/.paseo/agents/*/*.json
+    const agentsRoot = path.join(paseoDir, "agents");
+    const agentsById = new Map<string, FullRawAgentRecord>();
+    const agentsByShortId = new Map<string, FullRawAgentRecord[]>();
+    const agentsByWorkspaceId = new Map<string, FullRawAgentRecord[]>();
+
+    try {
+      const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
+      for (const bucket of buckets) {
+        if (!bucket.isDirectory()) continue;
+        const bPath = path.join(agentsRoot, bucket.name);
+        const files = await fs.readdir(bPath);
+        for (const f of files) {
+          if (!f.endsWith(".json")) continue;
+          try {
+            const rec = JSON.parse(
+              await fs.readFile(path.join(bPath, f), "utf8"),
+            ) as FullRawAgentRecord;
+            const aid = (rec.id ?? "").trim();
+            if (!aid) continue;
+            if (rec.labels?.["paseo.internal"] === "true") continue;
+            const sysPrompt = rec.config?.systemPrompt ?? "";
+            if (sysPrompt.includes("Generates a short title for a coding workspace")) continue;
+            agentsById.set(aid, rec);
+            const sid = aid.slice(0, 8);
+            const shortList = agentsByShortId.get(sid) ?? [];
+            shortList.push(rec);
+            agentsByShortId.set(sid, shortList);
+            if (!rec.archivedAt && rec.workspaceId) {
+              const wsList = agentsByWorkspaceId.get(rec.workspaceId) ?? [];
+              wsList.push(rec);
+              agentsByWorkspaceId.set(rec.workspaceId, wsList);
+            }
+          } catch {
+            // Ignore malformed agent json
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    // 4. Auto-reconcile any active workspace whose title is null/empty ('main') using its primary agent's title
+    const renamedWorkspaces: Array<{
+      workspaceId: string;
+      oldDisplayName: string;
+      newTitle: string;
+      agentId: string;
+    }> = [];
+    let untitledFound = 0;
+
+    for (const [wsId, ws] of workspacesById.entries()) {
+      if (ws.archivedAt) continue;
+      const curTitle = (ws.title ?? "").trim();
+      if (curTitle) continue;
+      const wsAgents = [...(agentsByWorkspaceId.get(wsId) ?? [])].sort((a, b) =>
+        String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
+      );
+      const titledAgent = wsAgents.find((a) => Boolean((a.title ?? "").trim()));
+      if (!titledAgent || !titledAgent.id) continue;
+      untitledFound += 1;
+      const nextTitle = String(titledAgent.title ?? "").trim().slice(0, 80);
+      if (autoFixTitles || action === "reconcile") {
+        try {
+          await context.paseo.workspaces.ref(wsId).setTitle(nextTitle);
+          ws.title = nextTitle;
+          ws.displayName = nextTitle;
+          renamedWorkspaces.push({
+            workspaceId: wsId,
+            oldDisplayName: String(ws.displayName ?? "main"),
+            newTitle: nextTitle,
+            agentId: titledAgent.id,
+          });
+        } catch {
+          // Ignore if workspace ref fails
+        }
+      }
+    }
+
+    if (cliReconcileRaw && Array.isArray(cliReconcileRaw.renamed_workspaces)) {
+      for (const item of cliReconcileRaw.renamed_workspaces as Array<Record<string, unknown>>) {
+        const wsId = String(item.workspace_id ?? "");
+        if (wsId && !renamedWorkspaces.some((r) => r.workspaceId === wsId)) {
+          renamedWorkspaces.push({
+            workspaceId: wsId,
+            oldDisplayName: String(item.old_display_name ?? "main"),
+            newTitle: String(item.new_title ?? ""),
+            agentId: String(item.agent_id ?? ""),
+          });
+        }
+      }
+    }
+
+    const resolveAgentByIdOrPrefix = (idOrPrefix?: string | null): FullRawAgentRecord | null => {
+      const needle = (idOrPrefix ?? "").trim();
+      if (!needle) return null;
+      const exact = agentsById.get(needle);
+      if (exact) return exact;
+      const byShort = agentsByShortId.get(needle.slice(0, 8));
+      if (byShort && byShort.length === 1) return byShort[0];
+      for (const [id, rec] of agentsById.entries()) {
+        if (id.startsWith(needle)) return rec;
+      }
+      return null;
+    };
+
+    const resolveParentOfAgent = (rec: FullRawAgentRecord): FullRawAgentRecord | null => {
+      const labels = rec.labels ?? {};
+      const parentLabel = (labels["paseo.parent-agent-id"] ?? "").trim();
+      if (parentLabel) {
+        const found = resolveAgentByIdOrPrefix(parentLabel);
+        if (found && found.id !== rec.id) return found;
+      }
+      const spawnedBy = (labels["spawned-by"] ?? "").trim();
+      if (spawnedBy && spawnedBy !== "outside-paseo") {
+        const found = resolveAgentByIdOrPrefix(spawnedBy);
+        if (found && found.id !== rec.id) return found;
+      }
+      const parentWsId = (labels["parent-workspace"] ?? "").trim();
+      if (parentWsId && parentWsId !== rec.workspaceId) {
+        const parentWsAgents = [...(agentsByWorkspaceId.get(parentWsId) ?? [])].sort((a, b) =>
+          String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
+        );
+        if (parentWsAgents[0] && parentWsAgents[0].id !== rec.id) {
+          return parentWsAgents[0];
+        }
+      }
+      return null;
+    };
+
+    const toLineageNode = async (rec: FullRawAgentRecord): Promise<SessionLineageNode> => {
+      const aid = String(rec.id ?? "");
+      const wsId = String(rec.workspaceId ?? "");
+      const ws = workspacesById.get(wsId);
+      const proj = ws?.projectId ? projectsById.get(ws.projectId) : undefined;
+      const agentTitle = String(rec.title ?? "").trim() || aid.slice(0, 8);
+      const workspaceTitle =
+        String(ws?.title ?? "").trim() ||
+        (ws?.displayName && ws.displayName !== "main" ? String(ws.displayName) : agentTitle);
+      const projectName = proj
+        ? String(proj.customName ?? proj.displayName ?? "").trim() || null
+        : null;
+
+      const labels = rec.labels ?? {};
+      const briefStem = (labels.brief ?? "").trim();
+      const intakeEntry =
+        intakeByAgentId.get(aid) ??
+        intakeByAgentId.get(aid.slice(0, 8)) ??
+        (briefStem ? intakeByBriefStem.get(briefStem) : undefined);
+
+      let briefPath: string | null = intakeEntry?.brief ?? null;
+      let reportPath: string | null = intakeEntry?.report ?? null;
+      if (!briefPath && briefStem) {
+        const candidateBrief = path.join(paseoDir, "vec-intake", "briefs", `${briefStem}.md`);
+        if (await fileExists(candidateBrief)) {
+          briefPath = candidateBrief;
+        }
+      }
+      if (!reportPath && briefStem) {
+        const candidateReport = path.join(
+          paseoDir,
+          "vec-intake",
+          "reports",
+          `${briefStem}.report.md`,
+        );
+        if (await fileExists(candidateReport)) {
+          reportPath = candidateReport;
+        }
+      }
+      const reportExists = reportPath ? await fileExists(reportPath) : false;
+      const notionTaskId = intakeEntry?.page_id ?? null;
+      const notionUrl = notionTaskId
+        ? `https://www.notion.so/${notionTaskId.replace(/-/g, "")}`
+        : null;
+
+      return {
+        agentId: aid,
+        shortId: aid.slice(0, 8),
+        agentTitle,
+        workspaceId: wsId,
+        workspaceTitle,
+        projectId: ws?.projectId ?? null,
+        projectName,
+        status: String(rec.lastStatus ?? "idle"),
+        provider: String(rec.provider ?? "antigravity"),
+        model: String(rec.config?.model ?? "default"),
+        createdAt: rec.createdAt ?? null,
+        updatedAt: rec.updatedAt ?? null,
+        briefPath,
+        reportPath,
+        reportExists,
+        notionUrl,
+        notionTaskId,
+      };
+    };
+
+    // 5. Resolve target current agent
+    let currentAgent: FullRawAgentRecord | null = null;
+    if (input.agentId && input.agentId.trim()) {
+      currentAgent = resolveAgentByIdOrPrefix(input.agentId.trim());
+    }
+    if (!currentAgent && input.workspaceId && input.workspaceId.trim()) {
+      const wsAgents = [...(agentsByWorkspaceId.get(input.workspaceId.trim()) ?? [])].sort((a, b) =>
+        String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
+      );
+      currentAgent =
+        wsAgents.find((a) => Boolean(resolveParentOfAgent(a))) ?? wsAgents[0] ?? null;
+    }
+
+    let currentNode: SessionLineageNode | null = null;
+    let parentNode: SessionLineageNode | null = null;
+    const childNodes: SessionLineageNode[] = [];
+    const siblingNodes: SessionLineageNode[] = [];
+
+    if (currentAgent && currentAgent.id) {
+      currentNode = await toLineageNode(currentAgent);
+      const parentRec = resolveParentOfAgent(currentAgent);
+      if (parentRec) {
+        parentNode = await toLineageNode(parentRec);
+      }
+
+      const curId = currentAgent.id;
+      const curWsId = currentAgent.workspaceId ?? "";
+      const rawChildren: FullRawAgentRecord[] = [];
+      const rawSiblings: FullRawAgentRecord[] = [];
+
+      for (const candidate of agentsById.values()) {
+        if (!candidate.id || candidate.archivedAt) continue;
+        const candWs = candidate.workspaceId ? workspacesById.get(candidate.workspaceId) : undefined;
+        if (candWs?.archivedAt) continue;
+
+        const candParent = resolveParentOfAgent(candidate);
+        const candParentWs = (candidate.labels?.["parent-workspace"] ?? "").trim();
+        const isChildOfCurrent =
+          (candParent &&
+            (candParent.id === curId ||
+              (curWsId && candParent.workspaceId === curWsId && candidate.workspaceId !== curWsId))) ||
+          (curWsId && candParentWs === curWsId && candidate.workspaceId !== curWsId);
+
+        if (isChildOfCurrent && candidate.id !== curId) {
+          rawChildren.push(candidate);
+        } else if (
+          parentRec &&
+          candParent &&
+          candParent.id === parentRec.id &&
+          candidate.id !== curId
+        ) {
+          rawSiblings.push(candidate);
+        }
+      }
+
+      rawChildren.sort((a, b) =>
+        String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+          String(a.updatedAt ?? a.createdAt ?? ""),
+        ),
+      );
+      rawSiblings.sort((a, b) =>
+        String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+          String(a.updatedAt ?? a.createdAt ?? ""),
+        ),
+      );
+
+      for (const ch of rawChildren.slice(0, 24)) {
+        childNodes.push(await toLineageNode(ch));
+      }
+      for (const sb of rawSiblings.slice(0, 12)) {
+        siblingNodes.push(await toLineageNode(sb));
+      }
+    }
+
+    const durationMs = Date.now() - startMs;
+    const unlinkedFound = Number(cliReconcileRaw?.unlinked_found ?? 0);
+    const linkedCount = Number(cliReconcileRaw?.linked_count ?? 0);
+
+    return {
+      ok: true,
+      action,
+      current: currentNode,
+      parent: parentNode,
+      siblings: siblingNodes,
+      children: childNodes,
+      reconcileSummary: {
+        untitledFound: Math.max(untitledFound, renamedWorkspaces.length),
+        renamedCount: renamedWorkspaces.length,
+        unlinkedFound,
+        linkedCount,
+        renamedWorkspaces,
+      },
+      message:
+        renamedWorkspaces.length > 0 || linkedCount > 0
+          ? `已同步 ${renamedWorkspaces.length} 个侧边栏工作区标题，关联 ${linkedCount} 个派生会话链路`
+          : currentNode
+            ? `会话血缘: 父会话=${parentNode ? parentNode.workspaceTitle : "无"} · 派生子会话=${childNodes.length}`
+            : "会话血缘检查完成",
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      action,
+      current: null,
+      parent: null,
+      siblings: [],
+      children: [],
+      reconcileSummary: {
+        untitledFound: 0,
+        renamedCount: 0,
+        unlinkedFound: 0,
+        linkedCount: 0,
+        renamedWorkspaces: [],
+      },
+      message: `Session lineage error: ${errMsg}`,
       durationMs,
     };
   }

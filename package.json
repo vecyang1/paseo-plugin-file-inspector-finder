@@ -2,7 +2,7 @@
   "name": "file-inspector-finder",
   "type": "module",
   "private": false,
-  "version": "1.6.7",
+  "version": "1.6.8",
   "description": "Paseo plugin for Custom Voice & STT Models (SiliconFlow Free SenseVoiceSmall / OpenWhispr Qwen3-ASR / Gemini 6-Key Pool), Schedule Runs History & 1-Click Session Drill-Down (⌘⇧H & inline Runs pills), Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O), zero-popup double-click & F2 inline rename, sidebar folder drag-and-drop workspace import, colored thread labels, Finder/Explorer reveal, macOS Preview/Editor launch, and image metadata inspection.",
   "license": "MIT",
   "repository": {
@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --import ./test/register-ts.mjs --test test/plugin.test.ts test/dictation-guard.test.ts test/model-quick-switch.test.ts test/sidebar-default-collapse.test.ts test/command-center-reveal-loop.test.ts"
+    "test": "node --experimental-strip-types --import ./test/register-ts.mjs --test test/plugin.test.ts test/dictation-guard.test.ts test/model-quick-switch.test.ts test/sidebar-default-collapse.test.ts test/command-center-reveal-loop.test.ts test/smart-copy.test.ts"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.15.3",

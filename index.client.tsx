@@ -13,6 +13,7 @@ import {
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
   manageAgentHistoryRpc,
+  manageSessionLineageRpc,
   manageSlashSkillsRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
@@ -47,6 +48,22 @@ import {
 } from "./client/schedule-runs-web";
 import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
 import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
+import {
+  copyCurrentSelectionOrMessageWithMode,
+  installSmartClipboardCopy,
+  syncSmartCopyPreferences,
+} from "./client/smart-copy-web";
+import {
+  extractCurrentRouteAgentId,
+  installDesktopSubagentsTreeEnhancer,
+  triggerSubagentsTreeDrawer,
+} from "./client/subagents-tree-web";
+import {
+  installDesktopSessionLineageEnhancer,
+  navigateToLineageNode,
+  triggerJumpToParentSession,
+  triggerReconcileSidebarWorkspaceTitles,
+} from "./client/session-lineage-web";
 
 export default function contribute(client: PluginClientContext) {
   // 1. Pre-associate image extensions with our Image Inspector file panel & materialize default inline rename prefs
@@ -247,6 +264,46 @@ export default function contribute(client: PluginClientContext) {
   });
 
   client.addCommandCenterItem({
+    id: "copy-clean-plain-text",
+    title: pluginTranslations.message("commands.copyCleanText"),
+    icon: "Copy",
+    keywords: [
+      "copy",
+      "plain",
+      "clean",
+      "text",
+      "asterisk",
+      "strip",
+      "markdown",
+      "beeper",
+      "wechat",
+      "linkedin",
+      "复制",
+      "纯文本",
+      "星号",
+    ],
+    context: "workspace",
+    onSelect() {
+      setTimeout(() => {
+        void copyCurrentSelectionOrMessageWithMode("plain", "command-center");
+      }, 60);
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "copy-raw-markdown",
+    title: pluginTranslations.message("commands.copyRawMarkdown"),
+    icon: "FileText",
+    keywords: ["copy", "markdown", "raw", "md", "obsidian", "notion", "复制", "源码"],
+    context: "workspace",
+    onSelect() {
+      setTimeout(() => {
+        void copyCurrentSelectionOrMessageWithMode("markdown", "command-center");
+      }, 60);
+    },
+  });
+
+  client.addCommandCenterItem({
     id: "import-folder-workspace",
     title: pluginTranslations.message("commands.importFolderWorkspace"),
     icon: "FolderPlus",
@@ -356,6 +413,139 @@ export default function contribute(client: PluginClientContext) {
       }, 30);
     },
   });
+
+  client.addCommandCenterItem({
+    id: "inspect-subagents-tree",
+    title: "Antigravity: Inspect Subagent Tree & Connected Sessions (⌘⇧B)",
+    icon: "Cpu",
+    keywords: [
+      "subagent",
+      "subagents",
+      "boost",
+      "deepcoder",
+      "tree",
+      "connected",
+      "session",
+      "timeline",
+      "子智能体",
+      "对话树",
+    ],
+    context: "global",
+    onSelect() {
+      const g = globalThis as { window?: { location?: { pathname?: string } } };
+      const agId = extractCurrentRouteAgentId(g.window?.location?.pathname);
+      setTimeout(() => {
+        triggerSubagentsTreeDrawer({ agentId: agId });
+      }, 30);
+    },
+  });
+
+  client.addSlashCommand({
+    name: "subagents-tree",
+    description:
+      "Open Antigravity Subagent Tree & Connected Sessions Inspector (/boost multi-level L1/L2 timelines)",
+    argumentHint: "[conversation-id]",
+    context: "workspace",
+    async onSubmit({ args }) {
+      const cid = args.trim() || null;
+      const g = globalThis as { window?: { location?: { pathname?: string } } };
+      const agId = extractCurrentRouteAgentId(g.window?.location?.pathname);
+      setTimeout(() => {
+        triggerSubagentsTreeDrawer({ agentId: agId, conversationId: cid });
+      }, 30);
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "jump-to-parent-session",
+    title: "Session Lineage: Jump Back to Initiating / Parent Session (⌘⇧↑)",
+    icon: "CornerUpLeft",
+    keywords: [
+      "parent",
+      "lineage",
+      "origin",
+      "spawn",
+      "back",
+      "initiating",
+      "父会话",
+      "发起会话",
+      "返回",
+    ],
+    context: "workspace",
+    async onSelect({ workspace, rpc }) {
+      const jumped = await triggerJumpToParentSession();
+      if (jumped) return;
+      const res = await rpc(manageSessionLineageRpc, {
+        action: "inspect",
+        workspaceId: workspace.id,
+        source: "command-center",
+      });
+      if (res.parent) {
+        navigateToLineageNode(res.parent);
+      }
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "reconcile-sidebar-workspace-titles",
+    title: "Session Lineage: Reconcile Untitled 'main' Sidebar Workspaces & Parent Links",
+    icon: "RefreshCw",
+    keywords: [
+      "reconcile",
+      "main",
+      "untitled",
+      "sidebar",
+      "title",
+      "lineage",
+      "intake",
+      "spawn",
+      "侧边栏",
+      "标题",
+    ],
+    context: "global",
+    async onSelect({ rpc }) {
+      const viaEnhancer = await triggerReconcileSidebarWorkspaceTitles();
+      if (viaEnhancer) return;
+      await rpc(manageSessionLineageRpc, {
+        action: "reconcile",
+        workspaceId: lastKnownWorkspaceId,
+        autoFixTitles: true,
+        source: "command-center",
+      });
+    },
+  });
+
+  for (const cmdName of ["lineage", "parent"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description:
+        "Jump to the initiating parent session or reconcile untitled 'main' sidebar workspaces (/lineage [reconcile|parent])",
+      argumentHint: "[reconcile | parent]",
+      context: "workspace",
+      async onSubmit({ args, workspace, rpc }) {
+        const arg = args.trim().toLowerCase();
+        if (arg === "reconcile" || arg === "fix" || arg === "sync") {
+          await rpc(manageSessionLineageRpc, {
+            action: "reconcile",
+            workspaceId: workspace.id,
+            autoFixTitles: true,
+            source: "slash-command",
+          });
+          await triggerReconcileSidebarWorkspaceTitles();
+          return;
+        }
+        const res = await rpc(manageSessionLineageRpc, {
+          action: "inspect",
+          workspaceId: workspace.id,
+          autoFixTitles: true,
+          source: "slash-command",
+        });
+        if (res.parent) {
+          navigateToLineageNode(res.parent);
+        }
+      },
+    });
+  }
 
   client.addCommandCenterItem({
     id: "configure-custom-voice-stt",
@@ -696,6 +886,37 @@ export default function contribute(client: PluginClientContext) {
           doc,
           win,
         );
+      },
+    });
+  }
+
+  for (const cmdName of ["copy-clean", "copy-text"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.copyCleanSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.copyCleanSlashHint"),
+      context: "workspace",
+      async onSubmit({ args }) {
+        const arg = args.trim().toLowerCase();
+        if (arg === "smart" || arg === "plain" || arg === "markdown") {
+          syncSmartCopyPreferences({ defaultMode: arg });
+        }
+        await copyCurrentSelectionOrMessageWithMode(
+          arg === "markdown" ? "markdown" : arg === "smart" ? "smart" : "plain",
+          "slash-command",
+        );
+      },
+    });
+  }
+
+  for (const cmdName of ["copy-md", "copy-markdown"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.copyMdSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.copyMdSlashHint"),
+      context: "workspace",
+      async onSubmit() {
+        await copyCurrentSelectionOrMessageWithMode("markdown", "slash-command");
       },
     });
   }
@@ -1218,6 +1439,18 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupSidebarDefaultCollapse = installSidebarDefaultCollapse();
 
+  const cleanupSmartClipboardCopy = installSmartClipboardCopy();
+
+  const cleanupSubagentsTreeEnhancer = installDesktopSubagentsTreeEnhancer({
+    call: (def, input) => client.rpc(def as never, input as never) as never,
+    getLocale: () => client.i18n.locale,
+  });
+
+  const cleanupSessionLineageEnhancer = installDesktopSessionLineageEnhancer({
+    call: (def, input) => client.rpc(def as never, input as never) as never,
+    getLocale: () => client.i18n.locale,
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -1229,6 +1462,9 @@ export default function contribute(client: PluginClientContext) {
     cleanupVoiceSttEnhancer();
     cleanupModelQuickSwitch();
     cleanupSidebarDefaultCollapse();
+    cleanupSmartClipboardCopy();
+    cleanupSubagentsTreeEnhancer();
+    cleanupSessionLineageEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
   };

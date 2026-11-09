@@ -39,6 +39,14 @@ export const enMessages = {
     doneSlashDescription:
       "Toggle the completed 'd ' prefix on the current session and reveal in sidebar",
     doneSlashHint: "[prefix, defaults to 'd ']",
+    copyCleanText: "Copy Clean Plain Text (No Markdown **) (⌘⇧C)",
+    copyRawMarkdown: "Copy Raw Markdown (⌥⌘C)",
+    copyCleanSlashDescription:
+      "Copy selection or latest assistant reply as clean plain text without ** or ### syntax",
+    copyCleanSlashHint: "[smart | plain | markdown]",
+    copyMdSlashDescription:
+      "Copy selection or latest assistant reply as raw Markdown with ** and ### syntax",
+    copyMdSlashHint: "[optional mode]",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -343,6 +351,12 @@ export const zhMessages: PluginMessageCatalog = {
     toggleSessionDone: "Finder：标记或取消当前会话完成 (Option+D / ⌥D)",
     doneSlashDescription: "为当前会话切换「d 」已完成标记前缀，并自动展开左侧边栏定位",
     doneSlashHint: "[前缀，默认 d ]",
+    copyCleanText: "复制纯文本（去除 ** 等 Markdown 符号）(⌘⇧C)",
+    copyRawMarkdown: "复制原始 Markdown (⌥⌘C)",
+    copyCleanSlashDescription: "将当前选中内容或最新回复复制为无 ** 星号的干净纯文本（或切换默认复制模式）",
+    copyCleanSlashHint: "[smart | plain | markdown]",
+    copyMdSlashDescription: "将当前选中内容或最新回复复制为保留 ** 与 ### 的原始 Markdown",
+    copyMdSlashHint: "[可选模式]",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
