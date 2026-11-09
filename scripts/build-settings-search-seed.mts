@@ -20,14 +20,15 @@
  *
  * `--check` compares a fresh crawl with the committed seed and exits 1 when they differ.
  */
-import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { harvestSettingsDetailPane } from "../client/settings-search-harvest.ts";
+import {
+  harvestSettingsDetailPane,
+  type HarvestedSettingsPage,
+} from "../client/settings-search-harvest.ts";
+import { ensureHarness, resolveHarnessSetup, sleep } from "./paseo-harness.mts";
 import {
   cleanSettingsEntries,
   normalizeSettingsText,
@@ -37,7 +38,6 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
-const HOME = os.homedir();
 const APP_DIST = "/Applications/Paseo.app/Contents/Resources/app-dist";
 const SEED_PATH = path.join(ROOT, "shared/settings-search-seed.ts");
 const args = process.argv.slice(2);
@@ -68,48 +68,6 @@ const PAGE_ONLY = new Set(["host:projects"]);
 const PLUGIN_SCREENS = ["file-inspector-finder/finder-settings"];
 const LOAD_MS = 9000;
 const SETTLE_MS = 1800;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const portOpen = (port: number) =>
-  new Promise<boolean>((resolve) => {
-    const socket = net.connect(port, "127.0.0.1", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.on("error", () => resolve(false));
-  });
-
-function findPlaywrightCore(): string | null {
-  if (process.env.PLAYWRIGHT_CORE) return process.env.PLAYWRIGHT_CORE;
-  const base = path.join(HOME, "Documents/A-coding");
-  const hits: Array<{ dir: string; version: string }> = [];
-  for (const dir of fs.existsSync(base) ? fs.readdirSync(base) : []) {
-    const pkg = path.join(base, dir, "node_modules/playwright-core/package.json");
-    if (fs.existsSync(pkg)) {
-      hits.push({ dir: path.dirname(pkg), version: JSON.parse(fs.readFileSync(pkg, "utf8")).version });
-    }
-  }
-  hits.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
-  return hits[0]?.dir ?? null;
-}
-
-function findChrome(): string | null {
-  if (process.env.PASEO_PROBE_CHROME) return process.env.PASEO_PROBE_CHROME;
-  const cache = path.join(HOME, "Library/Caches/ms-playwright");
-  const dirs = fs.existsSync(cache)
-    ? fs.readdirSync(cache).filter((dir) => /^chromium-\d+$/.test(dir))
-    : [];
-  dirs.sort((a, b) => Number(b.split("-")[1]) - Number(a.split("-")[1]));
-  for (const dir of dirs) {
-    const exe = path.join(
-      cache,
-      dir,
-      "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    );
-    if (fs.existsSync(exe)) return exe;
-  }
-  return null;
-}
 
 function readTree(dir: string, test: (file: string) => boolean): string {
   if (!fs.existsSync(dir)) return "";
@@ -156,17 +114,8 @@ function inCorpus(corpus: string, text: string | undefined): boolean {
 }
 
 async function main(): Promise<number> {
-  const pwPath = findPlaywrightCore();
-  const chrome = findChrome();
-  const harnessScript =
-    process.env.PASEO_WEB_HARNESS ??
-    path.join(HOME, ".gemini/antigravity/skills/paseo/scripts/paseo_web_harness.mjs");
-  if (!pwPath || !chrome || !fs.existsSync(harnessScript)) {
-    console.error(
-      `setup: playwright-core=${pwPath ?? "missing (PLAYWRIGHT_CORE)"} chrome=${chrome ?? "missing (PASEO_PROBE_CHROME)"} harness=${fs.existsSync(harnessScript) ? "ok" : `missing (${harnessScript})`}`,
-    );
-    return 3;
-  }
+  const setup = resolveHarnessSetup();
+  if (!setup) return 3;
   const paseoVersion = JSON.parse(
     fs.readFileSync(path.join(ROOT, "node_modules/@getpaseo/plugin/package.json"), "utf8"),
   ).version as string;
@@ -176,14 +125,10 @@ async function main(): Promise<number> {
     return 3;
   }
 
-  let harness: ChildProcess | null = null;
-  if (!(await portOpen(PORT))) {
-    harness = spawn(process.execPath, [harnessScript, String(PORT)], { stdio: "ignore" });
-    for (let i = 0; i < 20 && !(await portOpen(PORT)); i += 1) await sleep(250);
-  }
+  const harness = await ensureHarness(PORT);
   const require = createRequire(import.meta.url);
-  const { chromium } = require(pwPath);
-  const browser = await chromium.launch({ executablePath: chrome, headless: true });
+  const { chromium } = require(setup.playwrightCore);
+  const browser = await chromium.launch({ executablePath: setup.chrome, headless: true });
   const pages: SettingsSearchPage[] = [];
   let dropped = 0;
   try {
@@ -223,7 +168,7 @@ async function main(): Promise<number> {
         dispatchEvent(new PopStateEvent("popstate"));
       }, target.url);
       await sleep(SETTLE_MS);
-      const harvested = await page.evaluate(harvestSettingsDetailPane, await page.$('[data-testid="settings-detail-pane"]'));
+      const harvested: HarvestedSettingsPage | null = await page.evaluate(harvestSettingsDetailPane, await page.$('[data-testid="settings-detail-pane"]'));
       if (!harvested) {
         console.log(`  ${target.key.padEnd(44)} no page title rendered, skipped`);
         continue;
