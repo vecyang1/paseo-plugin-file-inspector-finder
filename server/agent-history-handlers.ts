@@ -28,7 +28,7 @@ const CLI_SESSION_TS =
   "/opt/homebrew/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server/dist/server/builtin-plugins/antigravity-provider/server/internal/session.ts";
 const ANTIGRAVITY_OPS_BIN = path.join(os.homedir(), ".local", "bin", "antigravity-ops");
 const WEBHOOK_HUB_BIN =
-  "/Users/vecsatfoxmailcom/Documents/A-coding/26.09.08-antigravity-webhook-hub/bin/webhook-hub";
+  process.env.WEBHOOK_HUB_BIN || path.join(os.homedir(), ".local", "bin", "webhook-hub");
 
 interface RawWorkspaceRecord {
   workspaceId?: string;

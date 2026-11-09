@@ -12,7 +12,7 @@ import {
   transformClipboardPayload,
 } from "../client/smart-copy-web";
 
-test("Smart Copy 1: strips all ** asterisks from Vec's Alex Zoboli Beeper message while preserving • bullets and paragraph breaks", () => {
+test("Smart Copy 1: strips all ** asterisks from multi-paragraph Markdown prose while preserving • bullets and paragraph breaks", () => {
   const res = markdownToCleanPlainText(DEFAULT_SMART_COPY_SAMPLE, {
     bulletMarker: "bullet",
     linkFormat: "label-only",
@@ -20,17 +20,17 @@ test("Smart Copy 1: strips all ** asterisks from Vec's Alex Zoboli Beeper messag
 
   assert.equal(res.plainText.includes("**"), false, "Should not contain any ** asterisks");
   assert.ok(res.strippedTokens >= 8, `Expected >= 8 stripped tokens, got ${res.strippedTokens}`);
-  assert.ok(res.plainText.startsWith('"Sure, Alex! Great to connect with you.'));
+  assert.ok(res.plainText.startsWith('"Thanks for reaching out! Great to connect with you.'));
   assert.ok(
     res.plainText.includes(
-      "intersection of DTC unit-economics growth, large-scale enterprise media governance, and AI engineering.",
+      "real-time session streaming, deterministic UI observability, and zero-popout background automation.",
     ),
   );
-  assert.ok(res.plainText.includes("• First, on the DTC growth side: At Bokksu—"));
+  assert.ok(res.plainText.includes("• First, on the runtime side: At Acme Cloud—"));
   assert.ok(
-    res.plainText.includes("• Second, on the enterprise & brand side: At WPP / EssenceMediacom"),
+    res.plainText.includes("• Second, on the client UX side: We unified keyboard-first navigation"),
   );
-  assert.ok(res.plainText.includes("• Recently: I've been building autonomous growth pipelines"));
+  assert.ok(res.plainText.includes("• Recently: We've been shipping update-safe local plugins"));
 });
 
 test("Smart Copy 2: preserves *, #, and **kwargs inside fenced code blocks and inline code spans", () => {
@@ -45,7 +45,7 @@ test("Smart Copy 2: preserves *, #, and **kwargs inside fenced code blocks and i
     "    return 4 * 5",
     "```",
     "",
-    "- **Step 1**: Check [Vector's CV](https://vectoryang.com/go/cv)",
+    "- **Step 1**: Check [Documentation](https://example.com/docs)",
   ].join("\n");
 
   const res = markdownToCleanPlainText(markdownWithCode, {
@@ -59,19 +59,19 @@ test("Smart Copy 2: preserves *, #, and **kwargs inside fenced code blocks and i
   assert.ok(res.plainText.includes("def run_query(*args, **kwargs):"));
   assert.ok(res.plainText.includes("    return 4 * 5"));
   assert.equal(res.plainText.includes("```"), false);
-  assert.ok(res.plainText.includes("• Step 1: Check Vector's CV"));
+  assert.ok(res.plainText.includes("• Step 1: Check Documentation"));
 });
 
 test("Smart Copy 3: linkFormat 'label-with-url' keeps URL in parentheses unless label already matches URL", () => {
   const md =
-    "Check [my portfolio](https://vectoryang.com) or [vectoryang.com/go/cv](https://vectoryang.com/go/cv).";
+    "Check [project docs](https://example.com) or [example.com/docs](https://example.com/docs).";
   const withUrl = markdownToCleanPlainText(md, {
     bulletMarker: "bullet",
     linkFormat: "label-with-url",
   });
   assert.equal(
     withUrl.plainText,
-    "Check my portfolio (https://vectoryang.com) or vectoryang.com/go/cv.",
+    "Check project docs (https://example.com) or example.com/docs.",
   );
 });
 
@@ -157,10 +157,10 @@ test("Smart Copy 6: window bubble copy listener cleans Paseo selection copy in-p
   try {
     syncSmartCopyPreferences({ enabled: true, defaultMode: "smart" });
     const dataMap = new Map<string, string>([
-      ["text/plain", '**"Sure, Alex!**\n\n• **First**: At **Bokksu**'],
+      ["text/plain", '**"Thanks for reaching out!**\n\n• **First**: At **Acme Cloud**'],
       [
         "text/html",
-        '<meta charset="utf-8"><p><strong>"Sure, Alex!</strong></p><p>• <strong>First</strong>: At <strong>Bokksu</strong></p>',
+        '<meta charset="utf-8"><p><strong>"Thanks for reaching out!</strong></p><p>• <strong>First</strong>: At <strong>Acme Cloud</strong></p>',
       ],
     ]);
 
@@ -187,8 +187,8 @@ test("Smart Copy 6: window bubble copy listener cleans Paseo selection copy in-p
     }
 
     assert.equal(copyEvent.prevented, true);
-    assert.equal(dataMap.get("text/plain"), '"Sure, Alex!\n\n• First: At Bokksu');
-    assert.ok(dataMap.get("text/html")?.includes("<strong>Bokksu</strong>"));
+    assert.equal(dataMap.get("text/plain"), '"Thanks for reaching out!\n\n• First: At Acme Cloud');
+    assert.ok(dataMap.get("text/html")?.includes("<strong>Acme Cloud</strong>"));
   } finally {
     cleanup();
   }

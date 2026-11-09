@@ -82,15 +82,15 @@ const RECEIPTS_STORAGE_KEY = "paseo:finder-plugin:smart-copy-receipts";
 const MAX_RECEIPTS = 15;
 export const SMART_COPY_EVENT = "paseo-finder:smart-copy";
 
-export const DEFAULT_SMART_COPY_SAMPLE = `**"Sure, Alex! Great to connect with you.**
+export const DEFAULT_SMART_COPY_SAMPLE = `**"Thanks for reaching out! Great to connect with you.**
 
-To summarize my profile: I'm a bilingual Growth Marketing Leader and AI Systems Architect with over 6 years of full-funnel experience, managing more than $30M in multi-market paid media. My career sits at the intersection of **DTC unit-economics growth**, **large-scale enterprise media governance**, and **AI engineering**.
+To summarize the architecture: we built a multi-agent workspace orchestrator with **real-time session streaming**, **deterministic UI observability**, and **zero-popout background automation**.
 
-• **First, on the DTC growth side**: At **Bokksu**—a $30M/year US multi-brand DTC group—I led full-funnel performance marketing across 4 brands and 10+ global markets. We cut flagship retail CAC by 40%, doubled ROAS to ~4.0x, scaled Australia from scratch into our #3 profitable market, and delivered a ~700% revenue surge during BFCM while keeping tight MER controls.
-• **Second, on the enterprise & brand side**: At **WPP / EssenceMediacom** in Tokyo, I managed $20M+ in annual media planning and performance governance for the **Google Android and Pixel** ecosystem in Japan.
-• **Recently**: I've been building autonomous growth pipelines, AI marketing workflows, and full-stack software—including iOS/macOS apps and Chrome extensions that streamline attribution and ad ops.
+• **First, on the runtime side**: At **Acme Cloud**—a distributed developer platform—we scaled concurrent agent workers across 4 regions, cut cold-start latency by 40%, and maintained ~99.95% uptime under heavy CI workloads.
+• **Second, on the client UX side**: We unified **keyboard-first navigation**, **inline metadata editing**, and **dual-MIME clipboard formatting** across macOS and web surfaces.
+• **Recently**: We've been shipping update-safe local plugins and automated verification gates that keep developer workflows fast and reliable.
 
-What I'm looking for next is an **in-house growth marketing leadership role** where I can drive high-impact international or APAC expansion with a strong degree of location and operational autonomy. Excited to hear what opportunities you have on your radar!"`;
+Excited to share how these patterns can streamline your engineering workflows!"`;
 
 let currentPrefs: SmartCopyPreferences = {
   enabled: true,
@@ -849,7 +849,7 @@ export async function copyCurrentSelectionOrMessageWithMode(
 
 export function runSmartCopySelfTest(customSample?: string): SmartCopySelfTestResult {
   const sample = (customSample && customSample.trim()) || DEFAULT_SMART_COPY_SAMPLE;
-  const sampleHtml = `<meta charset="utf-8"><p><strong>"Sure, Alex! Great to connect with you.</strong></p><p>My career sits at the intersection of <strong>DTC unit-economics growth</strong>, <strong>large-scale enterprise media governance</strong>, and <strong>AI engineering</strong>.</p><p>• <strong>First, on the DTC growth side</strong>: At <strong>Bokksu</strong></p><p>**体量与角色：**管理 4 个品牌</p>`;
+  const sampleHtml = `<meta charset="utf-8"><p><strong>"Thanks for reaching out! Great to connect with you.</strong></p><p>We built a multi-agent orchestrator with <strong>real-time session streaming</strong>, <strong>deterministic UI observability</strong>, and <strong>zero-popout background automation</strong>.</p><p>• <strong>First, on the runtime side</strong>: At <strong>Acme Cloud</strong></p><p>**体量与角色：**管理 4 个核心模块</p>`;
 
   const smartRes = transformClipboardPayload(
     { plainText: sample, html: sampleHtml },
