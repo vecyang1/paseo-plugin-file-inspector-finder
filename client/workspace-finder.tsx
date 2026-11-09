@@ -404,7 +404,7 @@ function FinderBrowserView({
                 defaultJumpMode:
                   settingsState.status === "ready"
                     ? settingsState.values.quickJumpDefaultAction
-                    : "open-latest",
+                    : "new-workspace",
                 onListJumpProjects: async (q) => {
                   const r = await quickJump({
                     action: "list",

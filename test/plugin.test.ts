@@ -89,6 +89,7 @@ import {
   locateProjectInSidebar,
   mountInlineTitleInput,
   normalizeListCommandsResponsePayload,
+  openNewWorkspaceInApp,
   openQuickWorkspaceSwitcherModal,
   parseSidebarWorkspaceRowTestId,
   readInlineRenamePreferences,
@@ -1032,10 +1033,15 @@ function createInteractiveDomNode(
     querySelector: (selector: string) => {
       const matchAttr = selector.match(/^\[data-testid="([^"]+)"\]$/);
       const matchPrefix = selector.match(/^\[data-testid\^="([^"]+)"\]$/);
+      const isTag = /^[a-z0-9_-]+$/i.test(selector.trim());
+      const hasTextarea = selector.includes("textarea");
       const walk = (el: MinimalElement): MinimalElement | null => {
         const tid = el.getAttribute?.("data-testid") ?? "";
+        const tag = (el.tagName ?? "").toLowerCase();
         if (matchAttr && tid === matchAttr[1]) return el;
         if (matchPrefix && tid.startsWith(matchPrefix[1])) return el;
+        if (isTag && tag === selector.trim().toLowerCase()) return el;
+        if (hasTextarea && tag === "textarea") return el;
         for (const ch of (el.children as MinimalElement[]) ?? []) {
           const found = walk(ch);
           if (found) return found;
@@ -1051,11 +1057,16 @@ function createInteractiveDomNode(
     querySelectorAll: (selector: string) => {
       const matchAttr = selector.match(/^\[data-testid="([^"]+)"\]$/);
       const matchPrefix = selector.match(/^\[data-testid\^="([^"]+)"\]$/);
+      const isTag = /^[a-z0-9_-]+$/i.test(selector.trim());
+      const hasTextarea = selector.includes("textarea");
       const out: MinimalElement[] = [];
       const walk = (el: MinimalElement) => {
         const tid = el.getAttribute?.("data-testid") ?? "";
+        const tag = (el.tagName ?? "").toLowerCase();
         if (matchAttr && tid === matchAttr[1]) out.push(el);
         else if (matchPrefix && tid.startsWith(matchPrefix[1])) out.push(el);
+        else if (isTag && tag === selector.trim().toLowerCase()) out.push(el);
+        else if (hasTextarea && tag === "textarea") out.push(el);
         for (const ch of (el.children as MinimalElement[]) ?? []) {
           walk(ch);
         }
@@ -1653,7 +1664,19 @@ test("16. Project Workspace Quick Jump SSOT ranking, sub-thread deduplication, a
     assert.equal(locateDss.targetProjectKey, "key_dss");
     assert.equal(locateDss.targetWorkspaceId, null);
 
-    // 4) Create-new mode -> creates a fresh workspace thread inside Design System Studio
+    // 4) New-workspace mode (Default) -> targets project context without creating thread in daemon
+    const newWsDss = await handleQuickJumpWorkspace(
+      { action: "jump", projectId: "prj_dss", jumpMode: "new-workspace" },
+      mockCtx,
+    );
+    assert.equal(newWsDss.ok, true);
+    assert.equal(newWsDss.jumpMode, "new-workspace");
+    assert.equal(newWsDss.targetProjectId, "prj_dss");
+    assert.equal(newWsDss.targetProjectKey, "key_dss");
+    assert.equal(newWsDss.targetWorkspaceId, null);
+    assert.equal(newWsDss.targetDirectory, dssDir);
+
+    // 5) Create-new mode -> creates a fresh workspace thread inside Design System Studio
     const createNewDss = await handleQuickJumpWorkspace(
       { action: "jump", projectId: "prj_dss", jumpMode: "create-new" },
       mockCtx,
@@ -1704,10 +1727,34 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
     removeEventListener: () => {},
   };
 
+  let pushedRoute = "";
+  let popstateDispatched = false;
+  let focusedComposer = false;
+
+  const composerTextarea = createInteractiveDomNode("textarea", {
+    "data-testid": "composer-textarea",
+  });
+  composerTextarea.focus = () => {
+    focusedComposer = true;
+  };
+  body.appendChild?.(composerTextarea);
+
   const mockWin: MinimalWindow = {
     document: mockDoc,
     innerWidth: 1280,
     innerHeight: 800,
+    location: { pathname: "/workspace/old_ws", search: "" },
+    history: {
+      pushState: (_data: unknown, _title: string, url: string) => {
+        pushedRoute = url;
+      },
+    },
+    dispatchEvent: (ev: unknown) => {
+      if (ev && typeof ev === "object" && (ev as { type?: string }).type === "popstate") {
+        popstateDispatched = true;
+      }
+      return true;
+    },
     addEventListener: () => {},
     removeEventListener: () => {},
   };
@@ -1768,7 +1815,10 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
         },
       ],
       onExecuteQuickJump: async (input) => {
-        executedJumps.push({ projectId: input.projectId, jumpMode: input.jumpMode });
+        executedJumps.push({
+          projectId: input.projectId ?? "",
+          jumpMode: input.jumpMode ?? "",
+        });
         return {
           ok: true,
           jumpMode: input.jumpMode ?? "open-latest",
@@ -1814,6 +1864,140 @@ test("17. Sidebar project row auto-scroll/expand (locateProjectInSidebar) and Cm
     null,
     "Modal must close after executing jump",
   );
+
+  // 3) Default Enter action in Quick Workspace Switcher must be 'new-workspace' (opens compose view, not thread!)
+  executedJumps.length = 0;
+  await openQuickWorkspaceSwitcherModal(
+    {
+      locale: "en-US",
+      onListJumpProjects: async () => [
+        {
+          projectId: "prj_dss",
+          projectKey: "key_dss",
+          projectName: "2026-11-08 Design System Studio",
+          projectRootPath: "/Users/test/workspaces/2026-11-08 Design System Studio",
+          shortPath: "~/workspaces/2026-11-08 Design System Studio",
+          projectKind: "directory",
+          activeWorkspaceCount: 10,
+          primaryWorkspaceId: "wks_dss_latest",
+          primaryWorkspaceTitle: "Design Main",
+          hasRunningAgent: false,
+          lastActivityIso: "2026-11-08T10:00:00.000Z",
+          lastActivityRelative: "2m ago",
+          score: 100,
+        },
+      ],
+      onExecuteQuickJump: async (input) => {
+        executedJumps.push({
+          projectId: input.projectId ?? "",
+          jumpMode: input.jumpMode ?? "",
+        });
+        return {
+          ok: true,
+          jumpMode: input.jumpMode ?? "new-workspace",
+          targetWorkspaceId: null,
+          targetProjectId: "prj_dss",
+          targetProjectKey: "key_dss",
+          targetProjectName: "2026-11-08 Design System Studio",
+          targetDirectory: "/Users/test/workspaces/2026-11-08 Design System Studio",
+          message: "Opened New Workspace for Design System Studio",
+        };
+      },
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  const defaultSearchInput = body.querySelector?.(
+    '[data-testid="paseo-finder-quick-jump-input"]',
+  ) as ReturnType<typeof createInteractiveDomNode>;
+  assert.ok(defaultSearchInput, "Input must exist on re-open");
+
+  // Press bare Enter -> executes new-workspace by default!
+  defaultSearchInput.dispatch("keydown", { key: "Enter" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(executedJumps, [
+    { projectId: "prj_dss", jumpMode: "new-workspace" },
+  ]);
+
+  // 4) Option+Enter executes open-latest (switches to latest existing thread)
+  executedJumps.length = 0;
+  await openQuickWorkspaceSwitcherModal(
+    {
+      locale: "en-US",
+      onListJumpProjects: async () => [
+        {
+          projectId: "prj_dss",
+          projectKey: "key_dss",
+          projectName: "2026-11-08 Design System Studio",
+          projectRootPath: "/Users/test/workspaces/2026-11-08 Design System Studio",
+          shortPath: "~/workspaces/2026-11-08 Design System Studio",
+          projectKind: "directory",
+          activeWorkspaceCount: 10,
+          primaryWorkspaceId: "wks_dss_latest",
+          primaryWorkspaceTitle: "Design Main",
+          hasRunningAgent: false,
+          lastActivityIso: "2026-11-08T10:00:00.000Z",
+          lastActivityRelative: "2m ago",
+          score: 100,
+        },
+      ],
+      onExecuteQuickJump: async (input) => {
+        executedJumps.push({
+          projectId: input.projectId ?? "",
+          jumpMode: input.jumpMode ?? "",
+        });
+        return {
+          ok: true,
+          jumpMode: input.jumpMode ?? "open-latest",
+          targetWorkspaceId: "wks_dss_latest",
+          targetProjectId: "prj_dss",
+          targetProjectKey: "key_dss",
+          targetProjectName: "2026-11-08 Design System Studio",
+          message: "Switched to latest thread",
+        };
+      },
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  const optSearchInput = body.querySelector?.(
+    '[data-testid="paseo-finder-quick-jump-input"]',
+  ) as ReturnType<typeof createInteractiveDomNode>;
+  optSearchInput.dispatch("keydown", { key: "Enter", altKey: true });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(executedJumps, [
+    { projectId: "prj_dss", jumpMode: "open-latest" },
+  ]);
+
+  // 5) openNewWorkspaceInApp navigates to /new with preselected project and focuses composer
+  let newWorktreeBtnClicked = false;
+  const newWorktreeBtn = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-project-new-worktree-key_dss",
+  });
+  newWorktreeBtn.click = () => {
+    newWorktreeBtnClicked = true;
+  };
+  dssProjectRow.appendChild?.(newWorktreeBtn);
+
+  const opened = openNewWorkspaceInApp(
+    {
+      projectId: "prj_dss",
+      projectKey: "key_dss",
+      projectName: "2026-11-08 Design System Studio",
+      projectDirectory: "/Users/test/workspaces/2026-11-08 Design System Studio",
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  assert.equal(opened, true);
+  assert.equal(newWorktreeBtnClicked, true, "Must click project's native New Workspace button in sidebar");
+  assert.ok(pushedRoute.startsWith("/new?"), `Pushed route should target /new: ${pushedRoute}`);
+  assert.ok(pushedRoute.includes("projectId=prj_dss"), "Must carry projectId");
+  assert.ok(pushedRoute.includes("dir="), "Must carry project directory");
+  assert.equal(focusedComposer, true, "Must focus composer input for immediate typing");
 });
 
 test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspectScheduleRuns & handleOpenScheduleRunSession)", async () => {

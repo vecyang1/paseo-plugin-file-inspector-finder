@@ -147,7 +147,7 @@ export interface MinimalWindow {
   localStorage?: MinimalStorage;
   document?: MinimalDocument;
   navigator?: { language?: string };
-  location?: { pathname?: string };
+  location?: { pathname?: string; search?: string };
   history?: {
     pushState?(data: unknown, unused: string, url?: string | null): void;
   };
@@ -249,7 +249,7 @@ export function readQuickJumpPreferences(
     enableWorkspaceQuickJump: true,
     enableCommandCenterProjectItems: true,
     autoRevealActiveWorkspaceInSidebar: true,
-    quickJumpDefaultAction: "open-latest",
+    quickJumpDefaultAction: "new-workspace",
   };
   if (!storage) return defaults;
   try {
@@ -263,7 +263,9 @@ export function readQuickJumpPreferences(
       autoRevealActiveWorkspaceInSidebar:
         parsed.autoRevealActiveWorkspaceInSidebar !== false,
       quickJumpDefaultAction:
-        action === "locate-sidebar" || action === "create-new" ? action : "open-latest",
+        action === "open-latest" || action === "locate-sidebar" || action === "create-new"
+          ? action
+          : "new-workspace",
     };
   } catch {
     return defaults;
@@ -1329,6 +1331,7 @@ export interface QuickJumpExecutionSummary {
   targetProjectId: string | null;
   targetProjectKey: string | null;
   targetProjectName: string | null;
+  targetDirectory?: string | null;
   message: string;
 }
 
@@ -2371,6 +2374,149 @@ export function focusWorkspaceInApp(
   return false;
 }
 
+export function openNewWorkspaceInApp(
+  options: {
+    projectId?: string | null;
+    projectKey?: string | null;
+    projectName?: string | null;
+    projectDirectory?: string | null;
+    serverId?: string | null;
+  },
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): boolean {
+  const win = winOverride ?? getWebWindow();
+  const doc = docOverride ?? win?.document ?? null;
+  if (!doc) return false;
+
+  const cleanProjectId = (options.projectId ?? "").trim();
+  const cleanProjectKey = (options.projectKey ?? "").trim();
+  const cleanProjectName = (options.projectName ?? "").trim();
+  const cleanDirectory = (options.projectDirectory ?? "").trim();
+
+  if (cleanProjectId || cleanProjectKey || cleanProjectName) {
+    locateProjectInSidebar(
+      {
+        projectId: cleanProjectId || undefined,
+        projectKey: cleanProjectKey || undefined,
+        projectName: cleanProjectName || undefined,
+        expandIfCollapsed: true,
+        highlightFlash: true,
+      },
+      doc,
+      win,
+    );
+  }
+
+  let triggeredNativePress = false;
+  const findAndClickNewBtn = (): boolean => {
+    if (cleanProjectKey || cleanProjectId) {
+      const directSelectors = [
+        cleanProjectKey ? `[data-testid="sidebar-project-new-worktree-${cleanProjectKey}"]` : null,
+        cleanProjectKey ? `[data-testid$=":${cleanProjectKey}"] [data-testid^="sidebar-project-new-worktree-"]` : null,
+        cleanProjectId ? `[data-testid="sidebar-project-new-worktree-${cleanProjectId}"]` : null,
+        cleanProjectId ? `[data-testid$=":${cleanProjectId}"] [data-testid^="sidebar-project-new-worktree-"]` : null,
+        cleanProjectKey ? `[data-testid="sidebar-project-new-workspace-row-${cleanProjectKey}"]` : null,
+        cleanProjectId ? `[data-testid="sidebar-project-new-workspace-row-${cleanProjectId}"]` : null,
+      ].filter(Boolean) as string[];
+
+      for (const sel of directSelectors) {
+        const btn = doc.querySelector(sel);
+        if (btn && typeof btn.click === "function") {
+          btn.click();
+          return true;
+        }
+      }
+    }
+
+    const projRows = doc.querySelectorAll('[data-testid^="sidebar-project-row-"]');
+    for (let i = 0; i < projRows.length; i += 1) {
+      const prow = projRows[i];
+      if (!prow) continue;
+      const ptid = prow.getAttribute?.("data-testid") ?? "";
+      const text = (prow.textContent ?? "").trim().toLowerCase();
+      const isMatch =
+        (cleanProjectKey && (ptid.endsWith(`:${cleanProjectKey}`) || ptid.replace(/^sidebar-project-row-/, "") === cleanProjectKey)) ||
+        (cleanProjectId && (ptid.endsWith(`:${cleanProjectId}`) || ptid.replace(/^sidebar-project-row-/, "") === cleanProjectId)) ||
+        (cleanProjectName && text === cleanProjectName.toLowerCase());
+      if (isMatch) {
+        const trailingBtn = prow.querySelector?.('[data-testid^="sidebar-project-new-worktree-"]');
+        if (trailingBtn && typeof trailingBtn.click === "function") {
+          trailingBtn.click();
+          return true;
+        }
+        const viewKey = ptid.replace(/^sidebar-project-row-/, "");
+        const ghostRow = doc.querySelector(`[data-testid="sidebar-project-new-workspace-row-${viewKey}"]`);
+        if (ghostRow && typeof ghostRow.click === "function") {
+          ghostRow.click();
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  triggeredNativePress = findAndClickNewBtn();
+
+  const serverId = options.serverId || inferActiveServerId(doc, win) || "local";
+  const params: string[] = [];
+  if (serverId) params.push(`serverId=${encodeURIComponent(serverId)}`);
+  if (cleanDirectory) params.push(`dir=${encodeURIComponent(cleanDirectory)}`);
+  if (cleanProjectName) params.push(`name=${encodeURIComponent(cleanProjectName)}`);
+  if (cleanProjectId) params.push(`projectId=${encodeURIComponent(cleanProjectId)}`);
+  const targetRoute = `/new${params.length > 0 ? `?${params.join("&")}` : ""}`;
+
+  const currentPath = win?.location?.pathname ?? "";
+  const currentSearch = win?.location?.search ?? "";
+  const fullCurrent = `${currentPath}${currentSearch}`;
+
+  if (!triggeredNativePress || fullCurrent !== targetRoute) {
+    try {
+      if (win?.history?.pushState) {
+        win.history.pushState({}, "", targetRoute);
+        if (win.PopStateEvent) {
+          win.dispatchEvent?.(new win.PopStateEvent("popstate"));
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  const focusComposer = (): boolean => {
+    const textarea = doc.querySelector(
+      '[data-testid="message-input-root"] textarea, textarea',
+    );
+    if (textarea && typeof textarea.focus === "function") {
+      try {
+        textarea.focus();
+        return true;
+      } catch {}
+    }
+    const input = doc.querySelector(
+      '[data-testid="message-input-root"] input, [data-testid="composer-input"], [contenteditable="true"]',
+    );
+    if (input && typeof input.focus === "function") {
+      try {
+        input.focus();
+        return true;
+      } catch {}
+    }
+    return false;
+  };
+
+  if (!focusComposer()) {
+    const delays = [40, 100, 220, 450, 750];
+    for (const d of delays) {
+      setTimeout(() => {
+        focusComposer();
+      }, d);
+    }
+  }
+
+  return true;
+}
+
 function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): void {
   try {
     if (win?.KeyboardEvent) {
@@ -2754,6 +2900,17 @@ export async function openQuickWorkspaceSwitcherModal(
         doc,
         win,
       );
+    } else if (jumpMode === "new-workspace") {
+      openNewWorkspaceInApp(
+        {
+          projectId: candidate.projectId,
+          projectKey: candidate.projectKey,
+          projectName: candidate.projectName,
+          projectDirectory: candidate.projectRootPath,
+        },
+        doc,
+        win,
+      );
     }
     const summary = await options
       .onExecuteQuickJump({
@@ -2773,6 +2930,17 @@ export async function openQuickWorkspaceSwitcherModal(
             projectName: summary.targetProjectName ?? candidate.projectName,
             expandIfCollapsed: true,
             highlightFlash: true,
+          },
+          doc,
+          win,
+        );
+      } else if (summary.jumpMode === "new-workspace") {
+        openNewWorkspaceInApp(
+          {
+            projectId: summary.targetProjectId ?? candidate.projectId,
+            projectKey: summary.targetProjectKey ?? candidate.projectKey,
+            projectName: summary.targetProjectName ?? candidate.projectName,
+            projectDirectory: summary.targetDirectory ?? candidate.projectRootPath,
           },
           doc,
           win,
@@ -3015,10 +3183,10 @@ export async function openQuickWorkspaceSwitcherModal(
 
       actionsCol.appendChild?.(
         makeBtn(
-          "open",
-          catalog.actions.quickJumpBtnOpen,
-          "open-latest",
-          defaultAction === "open-latest",
+          "new",
+          catalog.actions.quickJumpBtnNew,
+          "new-workspace",
+          defaultAction === "new-workspace",
         ),
       );
       actionsCol.appendChild?.(
@@ -3031,10 +3199,10 @@ export async function openQuickWorkspaceSwitcherModal(
       );
       actionsCol.appendChild?.(
         makeBtn(
-          "new",
-          catalog.actions.quickJumpBtnNew,
-          "create-new",
-          defaultAction === "create-new",
+          "thread",
+          catalog.actions.quickJumpBtnThread,
+          "open-latest",
+          defaultAction === "open-latest",
         ),
       );
 
@@ -3053,7 +3221,7 @@ export async function openQuickWorkspaceSwitcherModal(
         me.preventDefault?.();
         me.stopPropagation?.();
         const mode: QuickJumpAction = me.altKey
-          ? "create-new"
+          ? "open-latest"
           : me.shiftKey
             ? "locate-sidebar"
             : defaultAction;
@@ -3107,7 +3275,7 @@ export async function openQuickWorkspaceSwitcherModal(
       ke.stopPropagation?.();
       const targetCandidate = filtered[selectedIndex] ?? filtered[0];
       const mode: QuickJumpAction = ke.altKey
-        ? "create-new"
+        ? "open-latest"
         : ke.shiftKey
           ? "locate-sidebar"
           : defaultAction;

@@ -965,6 +965,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             hint={t("settings.quickJumpModeHint")}
             value={values.quickJumpDefaultAction}
             options={[
+              { label: t("settings.optJumpNewWorkspace"), value: "new-workspace" },
               { label: t("settings.optJumpOpenLatest"), value: "open-latest" },
               { label: t("settings.optJumpLocateSidebar"), value: "locate-sidebar" },
               { label: t("settings.optJumpCreateNew"), value: "create-new" },

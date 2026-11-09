@@ -33,6 +33,7 @@ import {
   installDesktopRevealHelpers,
   locateProjectInSidebar,
   mountInlineTitleInput,
+  openNewWorkspaceInApp,
   openQuickWorkspaceSwitcherModal,
   readQuickJumpPreferences,
   resolveCurrentActiveWorkspaceId,
@@ -1153,6 +1154,13 @@ export default function contribute(client: PluginClientContext) {
               projectName: jumpRes.targetProjectName ?? candidate.projectName,
               expandIfCollapsed: true,
               highlightFlash: true,
+            });
+          } else if (jumpRes.jumpMode === "new-workspace") {
+            openNewWorkspaceInApp({
+              projectId: jumpRes.targetProjectId ?? candidate.projectId,
+              projectKey: jumpRes.targetProjectKey ?? candidate.projectKey,
+              projectName: jumpRes.targetProjectName ?? candidate.projectName,
+              projectDirectory: jumpRes.targetDirectory ?? candidate.projectRootPath,
             });
           } else if (jumpRes.targetWorkspaceId) {
             lastKnownWorkspaceId = jumpRes.targetWorkspaceId;

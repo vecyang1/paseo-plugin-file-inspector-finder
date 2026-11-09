@@ -219,7 +219,7 @@ export default function contribute(server: PluginServerContext) {
         .describe("Search query by project name, stripped date name, acronym, or path segment"),
       projectId: z.string().optional().describe("Optional explicit projectId to jump to"),
       jumpMode: QuickJumpActionSchema.optional().describe(
-        "open-latest (default), locate-sidebar, or create-new",
+        "new-workspace (default), open-latest, locate-sidebar, or create-new",
       ),
       dryRun: z.boolean().optional().describe("Set true to preview resolution without creating"),
     }),

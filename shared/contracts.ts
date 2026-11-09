@@ -34,7 +34,12 @@ export const SidebarDropBehaviorSchema = z.enum(["open-or-create", "always-creat
 
 export type SidebarDropBehavior = z.infer<typeof SidebarDropBehaviorSchema>;
 
-export const QuickJumpActionSchema = z.enum(["open-latest", "locate-sidebar", "create-new"]);
+export const QuickJumpActionSchema = z.enum([
+  "new-workspace",
+  "open-latest",
+  "locate-sidebar",
+  "create-new",
+]);
 
 export type QuickJumpAction = z.infer<typeof QuickJumpActionSchema>;
 
@@ -134,7 +139,7 @@ export const pluginSettings = defineSettings({
     enableCommandCenterProjectItems: z.boolean().default(true),
     autoRevealActiveWorkspaceInSidebar: z.boolean().default(true),
     startNewProjectsCollapsed: z.boolean().default(true),
-    quickJumpDefaultAction: QuickJumpActionSchema.default("open-latest"),
+    quickJumpDefaultAction: QuickJumpActionSchema.default("new-workspace"),
     enableScheduleRunsInspector: z.boolean().default(true),
     enableVoiceCustomModelHelper: z.boolean().default(true),
     dictationSendBehavior: z.enum(["insert-only", "native"]).default("insert-only"),

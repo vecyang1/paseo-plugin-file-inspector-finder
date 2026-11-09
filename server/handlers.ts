@@ -1425,7 +1425,7 @@ export async function handleQuickJumpWorkspace(
   const dryRun = Boolean(input.dryRun);
   const limit = input.limit ?? 50;
 
-  let defaultJumpMode: QuickJumpAction = "open-latest";
+  let defaultJumpMode: QuickJumpAction = "new-workspace";
   if (options?.readSettings) {
     try {
       const st = await options.readSettings();
@@ -1720,6 +1720,11 @@ export async function handleQuickJumpWorkspace(
       message = dryRun
         ? `Dry-run: will expand and scroll sidebar to "${targetCandidate.projectName}" (${targetCandidate.activeWorkspaceCount} threads)`
         : `Located "${targetCandidate.projectName}" in sidebar (${targetCandidate.activeWorkspaceCount} threads)`;
+    } else if (jumpMode === "new-workspace") {
+      targetWorkspaceId = null;
+      message = dryRun
+        ? `Dry-run: will open New Workspace composer for "${targetCandidate.projectName}" (${targetCandidate.shortPath})`
+        : `Opened New Workspace in "${targetCandidate.projectName}"`;
     } else if (jumpMode === "create-new") {
       if (dryRun) {
         message = `Dry-run: will create a fresh workspace inside "${targetCandidate.projectName}" (${targetCandidate.shortPath})`;
@@ -1771,7 +1776,10 @@ export async function handleQuickJumpWorkspace(
   }
 
   const durationMs = Date.now() - startMs;
-  const ok = jumpMode === "locate-sidebar" ? true : Boolean(targetWorkspaceId) || dryRun;
+  const ok =
+    jumpMode === "locate-sidebar" || jumpMode === "new-workspace"
+      ? true
+      : Boolean(targetWorkspaceId) || dryRun;
 
   recordActionLog({
     target: "workspace-jump",
