@@ -12,7 +12,7 @@ import {
   scoreProjectJumpQuery,
 } from "../shared/contracts";
 import { PASEO_IDENTITY_BG_HEX } from "../shared/paseo-theme";
-import { getCatalogForLocale } from "./i18n";
+import { getCatalogForLocale, isChineseLocale } from "./i18n";
 import {
   resolveSidebarProjectVisual,
   syncPaseoThemeCssVariables,
@@ -118,6 +118,7 @@ export interface MinimalMouseEvent {
 
 export interface MinimalKeyboardEvent {
   key: string;
+  code?: string;
   keyCode?: number;
   isComposing?: boolean;
   metaKey?: boolean;
@@ -274,6 +275,8 @@ export interface InlineRenamePreferences {
   autoJumpToFirstPlaceInput: boolean;
   inlineRenameCaretPosition: InlineRenameCaretPosition;
   enableQuickRenameAndLabelShortcuts: boolean;
+  enableMarkDoneShortcut: boolean;
+  markDonePrefix: string;
   enableDesktopContextMenuHelper: boolean;
 }
 
@@ -312,6 +315,9 @@ export function syncInlineRenamePreferences(
       enableQuickRenameAndLabelShortcuts:
         prefs.enableQuickRenameAndLabelShortcuts ??
         existing.enableQuickRenameAndLabelShortcuts,
+      enableMarkDoneShortcut:
+        prefs.enableMarkDoneShortcut ?? existing.enableMarkDoneShortcut,
+      markDonePrefix: prefs.markDonePrefix ?? existing.markDonePrefix ?? "d ",
       enableDesktopContextMenuHelper:
         prefs.enableDesktopContextMenuHelper ?? existing.enableDesktopContextMenuHelper,
     };
@@ -329,6 +335,8 @@ export function readInlineRenamePreferences(
     autoJumpToFirstPlaceInput: true,
     inlineRenameCaretPosition: "start",
     enableQuickRenameAndLabelShortcuts: true,
+    enableMarkDoneShortcut: true,
+    markDonePrefix: "d ",
     enableDesktopContextMenuHelper: true,
   };
   if (!storage) return defaults;
@@ -358,6 +366,11 @@ export function readInlineRenamePreferences(
       inlineRenameCaretPosition: caretPosition,
       enableQuickRenameAndLabelShortcuts:
         parsed.enableQuickRenameAndLabelShortcuts !== false,
+      enableMarkDoneShortcut: parsed.enableMarkDoneShortcut !== false,
+      markDonePrefix:
+        typeof parsed.markDonePrefix === "string" && parsed.markDonePrefix.length > 0
+          ? parsed.markDonePrefix
+          : "d ",
       enableDesktopContextMenuHelper: parsed.enableDesktopContextMenuHelper !== false,
     };
   } catch {
@@ -1978,6 +1991,219 @@ export function revealWorkspaceInSidebar(
   return projectExpanded;
 }
 
+export function computeDoneToggledTitle(
+  currentTitle: string,
+  prefix = "d ",
+): {
+  newTitle: string;
+  action: "marked" | "unmarked";
+} {
+  const trimmed = (currentTitle ?? "").trim();
+  if (/^d\s+/i.test(trimmed)) {
+    return {
+      newTitle: trimmed.replace(/^d\s+/i, ""),
+      action: "unmarked",
+    };
+  }
+  if (/^d[-_:]\s*/i.test(trimmed)) {
+    return {
+      newTitle: trimmed.replace(/^d[-_:]\s*/i, ""),
+      action: "unmarked",
+    };
+  }
+  if (trimmed.toLowerCase() === "d") {
+    return {
+      newTitle: "",
+      action: "unmarked",
+    };
+  }
+  return {
+    newTitle: `${prefix}${trimmed}`,
+    action: "marked",
+  };
+}
+
+export function isMarkDoneKeyboardEvent(ke: MinimalKeyboardEvent): boolean {
+  if (ke.metaKey || ke.ctrlKey) return false;
+  if (!ke.altKey) return false;
+  const key = (ke.key ?? "").toLowerCase();
+  const code = ke.code ?? "";
+  // On macOS Chromium, Option+D produces '∂' (and Option+Shift+D produces 'Î')
+  return code === "KeyD" || key === "d" || ke.key === "∂" || ke.key === "Î";
+}
+
+let activeNoticeToastTimer: ReturnType<typeof setTimeout> | null = null;
+let activeNoticeToastEl: MinimalElement | null = null;
+
+export function showFinderNoticeToast(
+  doc: MinimalDocument,
+  win: MinimalWindow | null,
+  text: string,
+  isError = false,
+): void {
+  if (!doc.body) return;
+  if (activeNoticeToastTimer) {
+    clearTimeout(activeNoticeToastTimer);
+    activeNoticeToastTimer = null;
+  }
+  if (activeNoticeToastEl) {
+    activeNoticeToastEl.remove?.();
+    activeNoticeToastEl = null;
+  }
+  const tokens = syncPaseoThemeCssVariables(doc, win);
+  const toastEl = doc.createElement("div");
+  toastEl.setAttribute?.("data-testid", "paseo-finder-notice-toast");
+  toastEl.textContent = text;
+  if (toastEl.style) {
+    toastEl.style.position = "fixed";
+    toastEl.style.left = "16px";
+    toastEl.style.bottom = "16px";
+    toastEl.style.zIndex = "10000";
+    toastEl.style.maxWidth = "420px";
+    toastEl.style.padding = "8px 14px";
+    toastEl.style.borderRadius = "8px";
+    toastEl.style.backgroundColor = tokens.surface0;
+    toastEl.style.border = `1px solid ${isError ? tokens.destructive : tokens.border}`;
+    toastEl.style.color = isError ? tokens.destructive : tokens.foreground;
+    toastEl.style.fontSize = "12.5px";
+    toastEl.style.fontWeight = "500";
+    toastEl.style.boxShadow = tokens.shadowLg;
+    toastEl.style.pointerEvents = "none";
+    toastEl.style.fontFamily =
+      "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, sans-serif";
+  }
+  doc.body.appendChild?.(toastEl);
+  activeNoticeToastEl = toastEl;
+  activeNoticeToastTimer = setTimeout(() => {
+    toastEl.remove?.();
+    if (activeNoticeToastEl === toastEl) {
+      activeNoticeToastEl = null;
+    }
+  }, 3200);
+}
+
+let activeDesktopRevealCallbacks: DesktopRevealHelperCallbacks | null = null;
+
+export interface ToggleSessionDoneResult {
+  ok: boolean;
+  workspaceId: string;
+  previousTitle: string;
+  newTitle: string;
+  action: "marked" | "unmarked";
+  message: string;
+}
+
+export async function toggleCurrentSessionDone(
+  options?: {
+    workspaceId?: string;
+    doc?: MinimalDocument | null;
+    win?: MinimalWindow | null;
+    callbacks?: Partial<DesktopRevealHelperCallbacks>;
+    prefix?: string;
+  },
+  docOverride?: MinimalDocument | null,
+  winOverride?: MinimalWindow | null,
+): Promise<ToggleSessionDoneResult | null> {
+  const win = winOverride ?? options?.win ?? getWebWindow();
+  const doc = docOverride ?? options?.doc ?? win?.document ?? null;
+  if (!doc) return null;
+
+  const callbacks = options?.callbacks ?? activeDesktopRevealCallbacks;
+  const fallbackId = callbacks?.getFallbackWorkspaceId?.();
+  const targetWsId = (
+    options?.workspaceId ??
+    resolveCurrentActiveWorkspaceId(doc, win, fallbackId) ??
+    ""
+  ).trim();
+
+  const f2Target = findF2InlineRenameTarget(doc, win, targetWsId || undefined);
+  const effectiveWsId = targetWsId || f2Target?.workspaceId || "";
+  if (!effectiveWsId && !f2Target) {
+    return null;
+  }
+
+  const sidebarRow = effectiveWsId ? findSidebarWorkspaceRow(doc, effectiveWsId) : null;
+  const sidebarTitleEl = sidebarRow
+    ? findSidebarRowTitleElement(sidebarRow, effectiveWsId)
+    : null;
+  const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]') ?? null;
+
+  let currentTitle = (
+    f2Target?.initialTitle ||
+    sidebarTitleEl?.textContent ||
+    headerTitleEl?.textContent ||
+    ""
+  ).trim();
+
+  if (!currentTitle && callbacks?.onFetchThreadMetadata && effectiveWsId) {
+    try {
+      const snap = await callbacks.onFetchThreadMetadata(effectiveWsId);
+      if (snap?.workspaceTitle) {
+        currentTitle = snap.workspaceTitle.trim();
+      }
+    } catch {
+      // Fallback to empty
+    }
+  }
+
+  if (!currentTitle && effectiveWsId) {
+    currentTitle = effectiveWsId;
+  }
+
+  const prefix = options?.prefix ?? "d ";
+  const { newTitle, action } = computeDoneToggledTitle(currentTitle, prefix);
+
+  // Immediate optimistic DOM updates
+  if (f2Target?.titleEl) {
+    f2Target.titleEl.textContent = newTitle;
+  }
+  if (sidebarTitleEl && sidebarTitleEl !== f2Target?.titleEl) {
+    sidebarTitleEl.textContent = newTitle;
+  }
+  if (headerTitleEl && headerTitleEl !== f2Target?.titleEl) {
+    headerTitleEl.textContent = newTitle;
+  }
+
+  // Left sidebar jump & flash highlight (the core user requirement!)
+  if (effectiveWsId) {
+    revealWorkspaceInSidebar({ workspaceId: effectiveWsId, highlightFlash: true }, doc, win);
+  }
+
+  // Server persistence
+  if (callbacks?.onRenameThread) {
+    try {
+      await callbacks.onRenameThread(newTitle, {
+        workspaceId: effectiveWsId,
+        agentId: f2Target?.surface === "agent-tab" ? f2Target.agentId : undefined,
+        source: "mark-done-shortcut",
+      });
+    } catch {
+      // Ignore background RPC error
+    }
+  }
+
+  const locale = callbacks?.getLocale?.() ?? (win?.navigator?.language ?? "en");
+  const isZh = isChineseLocale(locale);
+  const msg = isZh
+    ? action === "marked"
+      ? `已标记会话为完成: "${newTitle}"`
+      : `已取消会话完成标记: "${newTitle}"`
+    : action === "marked"
+      ? `Marked session as done: "${newTitle}"`
+      : `Unmarked session: "${newTitle}"`;
+
+  showFinderNoticeToast(doc, win, msg, false);
+
+  return {
+    ok: true,
+    workspaceId: effectiveWsId,
+    previousTitle: currentTitle,
+    newTitle,
+    action,
+    message: msg,
+  };
+}
+
 export function focusWorkspaceInApp(
   workspaceId: string,
   projectId?: string | null,
@@ -2848,6 +3074,56 @@ export async function openQuickWorkspaceSwitcherModal(
   return backdrop;
 }
 
+export function normalizeListCommandsResponsePayload(parsed: unknown): unknown {
+  if (!parsed || typeof parsed !== "object") return parsed;
+  const msg = parsed as Record<string, unknown>;
+  if (msg.type !== "list_commands_response") return parsed;
+  const payload = msg.payload as Record<string, unknown> | undefined;
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.commands)) {
+    return parsed;
+  }
+  for (const item of payload.commands) {
+    if (!item || typeof item !== "object") continue;
+    const cmd = item as Record<string, unknown>;
+    const hint = typeof cmd.argumentHint === "string" ? cmd.argumentHint : "";
+    if (hint === "[skill]" || hint.startsWith("[skill] ")) {
+      cmd.kind = "skill";
+      const restHint = hint.slice(7).trim();
+      cmd.argumentHint = restHint || "";
+    }
+  }
+  return parsed;
+}
+
+export function ensureAntigravityInlineSkillAutocompleteBridge(
+  win?: MinimalWindow | null,
+): void {
+  const targetObj = (win ?? globalThis) as unknown as {
+    JSON?: typeof JSON;
+    __paseoInlineSkillBridgeInstalled?: boolean;
+  };
+  const jsonObj = targetObj.JSON ?? JSON;
+  if (!jsonObj || typeof jsonObj.parse !== "function" || targetObj.__paseoInlineSkillBridgeInstalled) {
+    return;
+  }
+  const origParse = jsonObj.parse;
+  jsonObj.parse = function patchedJsonParse(
+    text: string,
+    reviver?: (this: unknown, key: string, value: unknown) => unknown,
+  ): unknown {
+    const parsed = origParse.call(this, text, reviver);
+    if (
+      typeof text === "string" &&
+      text.includes('"list_commands_response"') &&
+      text.includes('"[skill]')
+    ) {
+      return normalizeListCommandsResponsePayload(parsed);
+    }
+    return parsed;
+  };
+  targetObj.__paseoInlineSkillBridgeInstalled = true;
+}
+
 export function installDesktopRevealHelpers(
   callbacks: DesktopRevealHelperCallbacks,
   docOverride?: MinimalDocument | null,
@@ -2857,6 +3133,8 @@ export function installDesktopRevealHelpers(
   const win = winOverride ?? getWebWindow();
   const doc = docOverride ?? win?.document ?? null;
   if (!win || !doc) return () => {};
+
+  activeDesktopRevealCallbacks = callbacks;
 
   let activeMenuEl: MinimalElement | null = null;
   let activeQuickJumpModalEl: MinimalElement | null = null;
@@ -3359,8 +3637,9 @@ export function installDesktopRevealHelpers(
     atMs: number;
   } | null = null;
 
-  // Ensure CSS variables and arrival-pulse styles are active, and clean up any lingering inline flash styles
+  // Ensure CSS variables, inline /skill autocomplete bridge, and arrival-pulse styles are active
   ensureInlineRenameStyleTag(doc, win);
+  ensureAntigravityInlineSkillAutocompleteBridge(win);
   clearSidebarJumpFlashes(doc);
 
   const triggerAutoRevealForWorkspace = (
@@ -3823,6 +4102,23 @@ export function installDesktopRevealHelpers(
       void showQuickThreadMetadataBar("rename");
       return;
     }
+    // Option+D (Alt+D) or Option+Shift+D: Mark/unmark current session as done ("d " prefix)
+    // and automatically jump/scroll left sidebar to its position with highlight flash
+    if (
+      prefs.enableMarkDoneShortcut &&
+      isMarkDoneKeyboardEvent(ke) &&
+      !activeInlineSession
+    ) {
+      ke.preventDefault();
+      ke.stopPropagation?.();
+      void toggleCurrentSessionDone({
+        doc,
+        win,
+        callbacks,
+        prefix: prefs.markDonePrefix ?? "d ",
+      });
+      return;
+    }
     // Cmd+Shift+L opens Quick Workspace Rename & Labels Bar (focused on labels)
     if (
       prefs.enableQuickRenameAndLabelShortcuts &&
@@ -4149,6 +4445,9 @@ export function installDesktopRevealHelpers(
   win.addEventListener("blur", hideSidebarDropOverlay, false);
 
   return () => {
+    if (activeDesktopRevealCallbacks === callbacks) {
+      activeDesktopRevealCallbacks = null;
+    }
     activeInlineSession?.cancel();
     removeMenu();
     hideSidebarDropOverlay();

@@ -1,9 +1,12 @@
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import {
   type ScheduleRunEntry,
   type ScheduleRunStatus,
@@ -558,6 +561,154 @@ export async function handleOpenScheduleRunSession(
       durationMs,
       message: `Set archiveOnFinish=${desiredArchive} for schedule "${scheduleName}" (${scheduleId})`,
     };
+  }
+
+  if (action === "recover-due") {
+    const scriptPath = path.join(
+      os.homedir(),
+      ".agents",
+      "skills",
+      "scheduled-task-rescheduler",
+      "scripts",
+      "paseo_cadence.py",
+    );
+    const args = ["-B", scriptPath, "recover", "--json"];
+    if (!input.dryRun) {
+      args.push("--execute");
+    }
+    if (scheduleId) {
+      args.push(scheduleId);
+    }
+    try {
+      const { stdout } = await execFileAsync("python3", args, {
+        timeout: 45_000,
+      }).catch((err: { stdout?: string; stderr?: string; message?: string }) => {
+        if (err.stdout) return { stdout: err.stdout, stderr: err.stderr ?? "" };
+        throw err;
+      });
+      const parsed = JSON.parse(stdout) as {
+        graded?: number;
+        counts?: Record<string, number>;
+        due?: Array<{ schedule_id?: string; name?: string; slot?: string; detail?: string }>;
+        fired?: Array<{ schedule_id?: string; name?: string; fired?: { run_id?: string } }>;
+        fire_errors?: Array<{ detail?: string }>;
+      };
+      const dueCount = (parsed.due ?? []).length;
+      const firedCount = (parsed.fired ?? []).length;
+      const durationMs = Date.now() - startMs;
+      return {
+        ok: (parsed.fire_errors ?? []).length === 0,
+        action,
+        scheduleId: scheduleId || "all",
+        scheduleName: scheduleId ? scheduleName : "All Active Paseo Schedules",
+        runId: parsed.fired?.[0]?.fired?.run_id ?? null,
+        workspaceId: null,
+        workspaceName: null,
+        agentId: null,
+        unarchived: false,
+        archiveOnFinish: null,
+        timelineEntries: [],
+        output: stdout,
+        error: parsed.fire_errors?.[0]?.detail ?? null,
+        durationMs,
+        message: input.dryRun
+          ? `[dry-run] Graded ${parsed.graded ?? 0} active schedules · ${dueCount} due for recovery`
+          : `Recovered ${firedCount}/${dueCount} due schedule slot(s) across ${parsed.graded ?? 0} active schedules`,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const durationMs = Date.now() - startMs;
+      return {
+        ok: false,
+        action,
+        scheduleId: scheduleId || "all",
+        scheduleName: scheduleId ? scheduleName : "All Active Paseo Schedules",
+        runId: null,
+        workspaceId: null,
+        workspaceName: null,
+        agentId: null,
+        unarchived: false,
+        archiveOnFinish: null,
+        timelineEntries: [],
+        output: "",
+        error: errMsg,
+        durationMs,
+        message: `Failed running paseo_cadence.py recover: ${errMsg}`,
+      };
+    }
+  }
+
+  if (action === "auto-evolve") {
+    const scriptPath = path.join(
+      os.homedir(),
+      ".agents",
+      "skills",
+      "scheduled-task-rescheduler",
+      "scripts",
+      "cadence_ctl.py",
+    );
+    const args = ["-B", scriptPath, "evolve-sidecars"];
+    if (input.dryRun) {
+      args.push("--dry-run");
+    }
+    if (scheduleId) {
+      const slug = sched?.prompt
+        ? STANDBY_MARKER_RE.exec(sched.prompt)?.groups?.slug
+        : undefined;
+      args.push("--slug", slug || scheduleId);
+    }
+    try {
+      const { stdout, stderr } = await execFileAsync("python3", args, {
+        timeout: 90_000,
+      }).catch((err: { stdout?: string; stderr?: string; message?: string }) => {
+        if (err.stdout) return { stdout: err.stdout, stderr: err.stderr ?? "" };
+        throw err;
+      });
+      const evolvedMatch = /Evolved:\s+(\d+)/.exec(stdout);
+      const scannedMatch = /Total Scanned:\s+(\d+)/.exec(stdout);
+      const evolvedCount = evolvedMatch ? Number(evolvedMatch[1]) : 0;
+      const scannedCount = scannedMatch ? Number(scannedMatch[1]) : 0;
+      const durationMs = Date.now() - startMs;
+      return {
+        ok: true,
+        action,
+        scheduleId: scheduleId || "all",
+        scheduleName: scheduleId ? scheduleName : "All Cadences & Paseo Twins",
+        runId: null,
+        workspaceId: null,
+        workspaceName: null,
+        agentId: null,
+        unarchived: false,
+        archiveOnFinish: null,
+        timelineEntries: [],
+        output: stdout || stderr,
+        error: null,
+        durationMs,
+        message: input.dryRun
+          ? `[dry-run] Scanned ${scannedCount} cadence(s) · ${evolvedCount} would auto-evolve`
+          : `Auto-evolved ${evolvedCount}/${scannedCount} cadence(s) & synchronized Paseo twins`,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const durationMs = Date.now() - startMs;
+      return {
+        ok: false,
+        action,
+        scheduleId: scheduleId || "all",
+        scheduleName: scheduleId ? scheduleName : "All Cadences & Paseo Twins",
+        runId: null,
+        workspaceId: null,
+        workspaceName: null,
+        agentId: null,
+        unarchived: false,
+        archiveOnFinish: null,
+        timelineEntries: [],
+        output: "",
+        error: errMsg,
+        durationMs,
+        message: `Failed running cadence auto-evolve: ${errMsg}`,
+      };
+    }
   }
 
   if (action === "run-now") {

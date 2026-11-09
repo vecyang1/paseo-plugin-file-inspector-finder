@@ -23,6 +23,8 @@ import {
   VOICE_STT_PRESETS,
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
+  manageSlashSkillsRpc,
+  manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
 } from "../shared/contracts";
 import { enMessages, getCatalogForLocale, zhMessages } from "../client/i18n";
@@ -53,6 +55,8 @@ import {
   handleOpenScheduleRunSession,
   handleManageVoiceStt,
   handleManageAgentHistory,
+  handleManageSlashSkills,
+  handleManageWritebackHook,
   handleReconcilePaseoRecovery,
   resolveVoicePresetOrShorthand,
   inferSttSourceBadge,
@@ -67,6 +71,7 @@ import {
   type MinimalElement,
   type MinimalWindow,
   decodeTabCloseTestId,
+  ensureAntigravityInlineSkillAutocompleteBridge,
   extractDroppedFilePaths,
   extractFilePathFromCopyMenuItem,
   extractFilePathFromElement,
@@ -83,6 +88,7 @@ import {
   isInsideWorkspaceTab,
   locateProjectInSidebar,
   mountInlineTitleInput,
+  normalizeListCommandsResponsePayload,
   openQuickWorkspaceSwitcherModal,
   parseSidebarWorkspaceRowTestId,
   readInlineRenamePreferences,
@@ -90,6 +96,9 @@ import {
   resolveInlineRenameTarget,
   revealWorkspaceInSidebar,
   clearSidebarJumpFlashes,
+  computeDoneToggledTitle,
+  isMarkDoneKeyboardEvent,
+  toggleCurrentSessionDone,
   extractActiveWorkspaceHeaderProjectName,
   extractCommandCenterSelectionHint,
   syncImagePanelAssociations,
@@ -1964,6 +1973,20 @@ test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspec
     );
     assert.equal(triggered.ok, true);
     assert.deepEqual(spawnedRunOnce, ["2a8a43f9"]);
+
+    // 5) Trigger auto-evolve dry-run (能试)
+    const evolvedDry = await handleOpenScheduleRunSession(
+      {
+        action: "auto-evolve",
+        scheduleId: "2a8a43f9",
+        dryRun: true,
+      },
+      mockContext,
+      { schedulesDir: tmpDir, bridge: mockBridge },
+    );
+    assert.equal(evolvedDry.ok, true);
+    assert.equal(evolvedDry.action, "auto-evolve");
+    assert.ok(evolvedDry.message.includes("[dry-run]"));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
@@ -2825,6 +2848,354 @@ test("29. Auto-jump cursor to first place (index 0, 0) on inline rename (default
   assert.equal(f2SidebarTarget.surface, "sidebar-row");
   assert.equal(f2SidebarTarget.workspaceId, "wks_mao_2");
 });
+
+test("32. Antigravity inline /skill autocomplete JSON.parse bridge upgrades [skill]-tagged commands to kind=skill", () => {
+  const sampleWire = JSON.stringify({
+    type: "list_commands_response",
+    payload: {
+      requestId: "req-1",
+      commands: [
+        { name: "plan", description: "Plan implementation", kind: "command", argumentHint: "[task]" },
+        { name: "boost", description: "Multi-agent boost", kind: "command", argumentHint: "[skill] <task>" },
+        { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
+        { name: "computer-use", description: "Full desktop computer use", kind: "command", argumentHint: "[skill]" },
+      ],
+    },
+  });
+
+  const directNorm = normalizeListCommandsResponsePayload(JSON.parse(sampleWire)) as {
+    payload: {
+      commands: Array<{ name: string; kind: string; argumentHint?: string }>;
+    };
+  };
+  assert.equal(directNorm.payload.commands[0].kind, "command");
+  assert.equal(directNorm.payload.commands[0].argumentHint, "[task]");
+  assert.equal(directNorm.payload.commands[1].kind, "skill");
+  assert.equal(directNorm.payload.commands[1].argumentHint, "<task>");
+  assert.equal(directNorm.payload.commands[2].kind, "skill");
+  assert.equal(directNorm.payload.commands[2].argumentHint, "");
+  assert.equal(directNorm.payload.commands[3].kind, "skill");
+  assert.equal(directNorm.payload.commands[3].argumentHint, "");
+
+  const mockJson = {
+    parse: JSON.parse.bind(JSON),
+    stringify: JSON.stringify.bind(JSON),
+  };
+  const fakeWin = { JSON: mockJson } as unknown as MinimalWindow;
+  ensureAntigravityInlineSkillAutocompleteBridge(fakeWin);
+  // Idempotent second call
+  ensureAntigravityInlineSkillAutocompleteBridge(fakeWin);
+
+  const parsedViaWin = mockJson.parse(sampleWire) as typeof directNorm;
+  assert.equal(parsedViaWin.payload.commands[1].kind, "skill");
+  assert.equal(typeof parsedViaWin.payload.commands[1].argumentHint, "string");
+  assert.equal(parsedViaWin.payload.commands[2].kind, "skill");
+  assert.equal(typeof parsedViaWin.payload.commands[2].argumentHint, "string");
+  assert.equal(parsedViaWin.payload.commands[2].argumentHint, "");
+  assert.equal(parsedViaWin.payload.commands[3].kind, "skill");
+  assert.equal(typeof parsedViaWin.payload.commands[3].argumentHint, "string");
+});
+
+test("33. Cursor-inspired Customize control plane RPC (handleManageSlashSkills) supports status, category/scope filtering, pin/unpin, disable/enable, and multi-skill dry-run resolution", async () => {
+  assert.equal(manageSlashSkillsRpc.name, "finder.manage_slash_skills");
+  const ctx = createMockContext(["/tmp/ws_0"]);
+
+  const statusRes = await handleManageSlashSkills(
+    {
+      action: "status",
+      category: "all",
+      scope: "all",
+      limit: 50,
+    },
+    ctx,
+  );
+  assert.equal(statusRes.ok, true);
+  assert.ok(statusRes.totalAdvertised > 100);
+  assert.ok(statusRes.customizeCounts.commands > 10);
+  assert.ok(statusRes.customizeCounts.skills > 100);
+  assert.ok(statusRes.customizeItems.length > 0);
+  assert.equal(statusRes.customizeItems[0].pinned, true);
+
+  const resolveRes = await handleManageSlashSkills(
+    {
+      action: "test",
+      samplePrompt: "please run /wheel-check and /1password before coding",
+      limit: 20,
+    },
+    ctx,
+  );
+  assert.equal(resolveRes.ok, true);
+  assert.ok(Array.isArray(resolveRes.dryRun.resolutions));
+  assert.equal(resolveRes.dryRun.resolutions.length, 2);
+  assert.equal(resolveRes.dryRun.resolutions[0]?.slug, "wheel-check");
+  assert.equal(resolveRes.dryRun.resolutions[1]?.slug, "1password");
+});
+
+test("34. Stop Hook & Writeback Gate Reconciler RPC (handleManageWritebackHook) supports status inspection and historical transcript replay (v1 vs v2)", async () => {
+  assert.equal(manageWritebackHookRpc.name, "finder.manage_writeback_hook");
+  const ctx = createMockContext(["/tmp/ws_0"]);
+
+  const statusRes = await handleManageWritebackHook(
+    {
+      action: "status",
+    },
+    ctx,
+  );
+  assert.equal(statusRes.ok, true);
+  assert.equal(statusRes.hookVersion, "2.0.0");
+  assert.equal(statusRes.enabled, true);
+  assert.equal(statusRes.requireFullyIdle, true);
+  assert.equal(statusRes.transcriptTailFallback, true);
+});
+
+test("35. Mark session as done shortcut (Option+D / ⌥D) & slash command: toggles 'd ' prefix, scrolls sidebar, and updates title", async () => {
+  // 1. Pure function title toggle
+  const r1 = computeDoneToggledTitle("Fix Paseo auto-launch not triggering");
+  assert.equal(r1.action, "marked");
+  assert.equal(r1.newTitle, "d Fix Paseo auto-launch not triggering");
+
+  const r2 = computeDoneToggledTitle("d Fix Paseo auto-launch not triggering");
+  assert.equal(r2.action, "unmarked");
+  assert.equal(r2.newTitle, "Fix Paseo auto-launch not triggering");
+
+  const r3 = computeDoneToggledTitle("D Fix Paseo auto-launch not triggering");
+  assert.equal(r3.action, "unmarked");
+  assert.equal(r3.newTitle, "Fix Paseo auto-launch not triggering");
+
+  const r4 = computeDoneToggledTitle("d-Fix Paseo auto-launch not triggering");
+  assert.equal(r4.action, "unmarked");
+  assert.equal(r4.newTitle, "Fix Paseo auto-launch not triggering");
+
+  const r5 = computeDoneToggledTitle("d: Fix Paseo auto-launch not triggering");
+  assert.equal(r5.action, "unmarked");
+  assert.equal(r5.newTitle, "Fix Paseo auto-launch not triggering");
+
+  const r6 = computeDoneToggledTitle("d");
+  assert.equal(r6.action, "unmarked");
+  assert.equal(r6.newTitle, "");
+
+  const rCustom = computeDoneToggledTitle("My Clean Task", "done: ");
+  assert.equal(rCustom.action, "marked");
+  assert.equal(rCustom.newTitle, "done: My Clean Task");
+
+  // 2. Keyboard event classification (zero conflicts with Cmd+D / Cmd+Shift+D)
+  const noopPrevent = () => {};
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "d", code: "KeyD", altKey: true, preventDefault: noopPrevent }),
+    true,
+  );
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "∂", code: "KeyD", altKey: true, preventDefault: noopPrevent }),
+    true,
+  );
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "Î", code: "KeyD", altKey: true, shiftKey: true, preventDefault: noopPrevent }),
+    true,
+  );
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "d", code: "KeyD", metaKey: true, preventDefault: noopPrevent }),
+    false,
+  );
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "D", code: "KeyD", metaKey: true, shiftKey: true, preventDefault: noopPrevent }),
+    false,
+  );
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "d", code: "KeyD", ctrlKey: true, preventDefault: noopPrevent }),
+    false,
+  );
+  assert.equal(
+    isMarkDoneKeyboardEvent({ key: "d", code: "KeyD", preventDefault: noopPrevent }),
+    false,
+  );
+
+  // 3. Preference persistence
+  const storageMap = new Map<string, string>();
+  const mockStorage = {
+    length: 0,
+    getItem: (k: string) => storageMap.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      storageMap.set(k, v);
+    },
+    removeItem: (k: string) => {
+      storageMap.delete(k);
+    },
+    clear: () => {
+      storageMap.clear();
+    },
+    key: () => null,
+  };
+  const defaultPrefs = readInlineRenamePreferences(mockStorage);
+  assert.equal(defaultPrefs.enableMarkDoneShortcut, true);
+  assert.equal(defaultPrefs.markDonePrefix, "d ");
+
+  syncInlineRenamePreferences(
+    { enableMarkDoneShortcut: false, markDonePrefix: "done: " },
+    mockStorage,
+  );
+  const syncedPrefs = readInlineRenamePreferences(mockStorage);
+  assert.equal(syncedPrefs.enableMarkDoneShortcut, false);
+  assert.equal(syncedPrefs.markDonePrefix, "done: ");
+
+  // 4. End-to-end toggleCurrentSessionDone
+  const renameCalls: Array<{ newTitle: string | null; options?: unknown }> = [];
+  let rowScrolled = false;
+
+  const titleNode = {
+    tagName: "SPAN",
+    textContent: "Fix Paseo auto-launch not triggering",
+    getAttribute: (name: string) => (name === "data-testid" ? "sidebar-workspace-title-srv_1:ws_done_1" : null),
+  };
+  const rowNode = {
+    tagName: "DIV",
+    getAttribute: (name: string) => {
+      if (name === "data-testid") return "sidebar-workspace-row-srv_1:ws_done_1";
+      if (name === "aria-selected") return "true";
+      return null;
+    },
+    setAttribute: (name: string, val: string) => {
+      (rowNode as Record<string, unknown>)[name] = val;
+    },
+    removeAttribute: (name: string) => {
+      delete (rowNode as Record<string, unknown>)[name];
+    },
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-title-")) return titleNode;
+      return null;
+    },
+    querySelectorAll: () => [],
+    scrollIntoView: () => {
+      rowScrolled = true;
+    },
+    closest: () => null,
+    parentElement: null,
+    children: [titleNode],
+  };
+
+  const headerTitleNode = {
+    tagName: "DIV",
+    textContent: "Fix Paseo auto-launch not triggering",
+    getAttribute: (name: string) => (name === "data-testid" ? "workspace-header-title" : null),
+    parentElement: { tagName: "DIV" },
+  };
+
+  const bodyChildren: unknown[] = [];
+  const mockDoc: MinimalDocument = {
+    body: {
+      tagName: "BODY",
+      appendChild: (el: unknown) => {
+        bodyChildren.push(el);
+        return el;
+      },
+      querySelectorAll: () => [],
+      querySelector: () => null,
+    } as unknown as MinimalElement,
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-") && sel.includes("aria-selected")) {
+        return rowNode as unknown as MinimalElement;
+      }
+      if (sel.includes("sidebar-workspace-row-srv_1:ws_done_1")) {
+        return rowNode as unknown as MinimalElement;
+      }
+      if (sel.includes("workspace-header-title")) {
+        return headerTitleNode as unknown as MinimalElement;
+      }
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-")) {
+        return [rowNode as unknown as MinimalElement];
+      }
+      return [];
+    },
+    createElement: (tag: string) => {
+      const elAttrs: Record<string, string> = {};
+      return {
+        tagName: tag.toUpperCase(),
+        textContent: "",
+        style: {},
+        setAttribute: (k: string, v: string) => {
+          elAttrs[k] = v;
+        },
+        getAttribute: (k: string) => elAttrs[k] ?? null,
+        remove: () => {},
+      } as unknown as MinimalElement;
+    },
+  };
+
+  const mockWin: MinimalWindow = {
+    document: mockDoc,
+    localStorage: mockStorage,
+    location: {
+      pathname: "/workspace/ws_done_1",
+    },
+    navigator: {
+      language: "zh-CN",
+    },
+  };
+
+  const mockCallbacks = {
+    isEnabled: () => true,
+    getLocale: () => "zh-CN",
+    getFallbackWorkspaceId: () => "ws_done_1",
+    onOpenTarget: async () => {},
+    onCopyPath: async () => {},
+    onRenameThread: async (newTitle: string | null, options?: unknown) => {
+      renameCalls.push({ newTitle, options });
+    },
+  };
+
+  // Run 1: Mark as done
+  const markRes = await toggleCurrentSessionDone(
+    {
+      workspaceId: "ws_done_1",
+      doc: mockDoc,
+      win: mockWin,
+      callbacks: mockCallbacks,
+      prefix: "d ",
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  assert.equal(markRes?.ok, true);
+  assert.equal(markRes?.action, "marked");
+  assert.equal(markRes?.previousTitle, "Fix Paseo auto-launch not triggering");
+  assert.equal(markRes?.newTitle, "d Fix Paseo auto-launch not triggering");
+  assert.equal(titleNode.textContent, "d Fix Paseo auto-launch not triggering");
+  assert.equal(headerTitleNode.textContent, "d Fix Paseo auto-launch not triggering");
+  assert.equal(rowScrolled, true);
+  assert.equal((rowNode as Record<string, unknown>)["data-paseo-workspace-jump-flash"], "true");
+  assert.equal(renameCalls.length, 1);
+  assert.equal(renameCalls[0].newTitle, "d Fix Paseo auto-launch not triggering");
+
+  // Run 2: Toggle back (unmark)
+  rowScrolled = false;
+  const unmarkRes = await toggleCurrentSessionDone(
+    {
+      workspaceId: "ws_done_1",
+      doc: mockDoc,
+      win: mockWin,
+      callbacks: mockCallbacks,
+      prefix: "d ",
+    },
+    mockDoc,
+    mockWin,
+  );
+
+  assert.equal(unmarkRes?.ok, true);
+  assert.equal(unmarkRes?.action, "unmarked");
+  assert.equal(unmarkRes?.previousTitle, "d Fix Paseo auto-launch not triggering");
+  assert.equal(unmarkRes?.newTitle, "Fix Paseo auto-launch not triggering");
+  assert.equal(titleNode.textContent, "Fix Paseo auto-launch not triggering");
+  assert.equal(headerTitleNode.textContent, "Fix Paseo auto-launch not triggering");
+  assert.equal(rowScrolled, true);
+  assert.equal(renameCalls.length, 2);
+  assert.equal(renameCalls[1].newTitle, "Fix Paseo auto-launch not triggering");
+});
+
+
+
 
 
 

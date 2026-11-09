@@ -21,6 +21,8 @@ import { useMutation } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
+  type CustomizeCategory,
+  type CustomizeScope,
   type InlineRenameCaretPosition,
   type OpenerTarget,
   type QuickJumpAction,
@@ -29,8 +31,10 @@ import {
   importFolderWorkspaceRpc,
   inspectScheduleRunsRpc,
   manageAgentHistoryRpc,
+  manageSlashSkillsRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
+  manageWritebackHookRpc,
   openFileTargetRpc,
   openScheduleRunSessionRpc,
   pluginSettings,
@@ -75,6 +79,7 @@ import {
 } from "./sidebar-default-collapse-web";
 import {
   applyInlineInputCaret,
+  computeDoneToggledTitle,
   findF2InlineRenameTarget,
   focusWorkspaceInApp,
   locateProjectInSidebar,
@@ -86,6 +91,7 @@ import {
   syncInlineRenamePreferences,
   syncQuickJumpPreferences,
   syncSidebarDropPreferences,
+  toggleCurrentSessionDone,
 } from "./web";
 
 export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps) {
@@ -102,6 +108,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const openScheduleRunSession = useRpc(openScheduleRunSessionRpc);
   const manageVoiceStt = useRpc(manageVoiceSttRpc);
   const manageAgentHistory = useRpc(manageAgentHistoryRpc);
+  const manageSlashSkills = useRpc(manageSlashSkillsRpc);
+  const manageWritebackHook = useRpc(manageWritebackHookRpc);
   const reconcilePaseoRecovery = useRpc(reconcilePaseoRecoveryRpc);
   const isZh = isChineseLocale(
     typeof navigator !== "undefined" ? navigator.language : undefined,
@@ -112,6 +120,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   );
   const [folderTestInput, setFolderTestInput] = useState("~/Documents");
   const [renameDiagInput, setRenameDiagInput] = useState("");
+  const [markDoneTestResult, setMarkDoneTestResult] = useState<string | null>(null);
   const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
   const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
   const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
@@ -164,6 +173,21 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [recoverySnapData, setRecoverySnapData] = useState<
     Awaited<ReturnType<typeof reconcilePaseoRecovery>> | null
   >(null);
+  const [customizeSearchInput, setCustomizeSearchInput] = useState("");
+  const [customizeCategory, setCustomizeCategory] = useState<CustomizeCategory>("all");
+  const [customizeScope, setCustomizeScope] = useState<CustomizeScope>("all");
+  const [customizeDryRunInput, setCustomizeDryRunInput] = useState(
+    "/wheel-check or use context7; /1password if need; /graphify /design-md /ego-browser",
+  );
+  const [customizeSnapData, setCustomizeSnapData] = useState<
+    Awaited<ReturnType<typeof manageSlashSkills>> | null
+  >(null);
+  const [writebackConvInput, setWritebackConvInput] = useState(
+    "4886f126-34b5-4dea-b6dd-01685971fb77",
+  );
+  const [writebackSnapData, setWritebackSnapData] = useState<
+    Awaited<ReturnType<typeof manageWritebackHook>> | null
+  >(null);
 
   useEffect(() => {
     if (settings.status === "ready") {
@@ -177,6 +201,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         inlineRenameCaretPosition: settings.values.inlineRenameCaretPosition,
         enableQuickRenameAndLabelShortcuts:
           settings.values.enableQuickRenameAndLabelShortcuts,
+        enableMarkDoneShortcut: settings.values.enableMarkDoneShortcut,
+        markDonePrefix: settings.values.markDonePrefix,
         enableDesktopContextMenuHelper: settings.values.enableDesktopContextMenuHelper,
       });
       syncQuickJumpPreferences({
@@ -219,7 +245,30 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         setRecoverySnapData(res);
       })
       .catch(() => {});
-  }, [manageVoiceStt, manageAgentHistory, reconcilePaseoRecovery]);
+    void manageSlashSkills({
+      action: "status",
+      limit: 120,
+      source: "settings-ui",
+    })
+      .then((res) => {
+        setCustomizeSnapData(res);
+      })
+      .catch(() => {});
+    void manageWritebackHook({
+      action: "status",
+      source: "settings-ui",
+    })
+      .then((res) => {
+        setWritebackSnapData(res);
+      })
+      .catch(() => {});
+  }, [
+    manageVoiceStt,
+    manageAgentHistory,
+    reconcilePaseoRecovery,
+    manageSlashSkills,
+    manageWritebackHook,
+  ]);
 
   const resolveActiveWsId = (): string | undefined => {
     const g = globalThis as { document?: unknown; window?: unknown };
@@ -609,9 +658,57 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
                 inlineRenameCaretPosition: values.inlineRenameCaretPosition,
                 enableQuickRenameAndLabelShortcuts: next,
+                enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                markDonePrefix: values.markDonePrefix,
                 enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
               });
               void save({ ...values, enableQuickRenameAndLabelShortcuts: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.markDoneShortcutLabel")}
+            hint={t("settings.markDoneShortcutHint")}
+            value={values.enableMarkDoneShortcut ?? true}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableMarkDoneShortcut: next,
+                markDonePrefix: values.markDonePrefix ?? "d ",
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+              });
+              void save({ ...values, enableMarkDoneShortcut: next }, revision);
+            }}
+          />
+
+          <SettingsAction
+            label={t("settings.testMarkDoneLabel")}
+            hint={
+              markDoneTestResult
+                ? markDoneTestResult
+                : isZh
+                  ? "点击即刻测试为当前活跃会话切换「d 」前缀，同时触发左侧边栏平滑滚动定位与高亮闪烁"
+                  : "Click to toggle the 'd ' prefix on the active session and verify left sidebar auto-reveal and highlight"
+            }
+            actionLabel={isZh ? "测试切换" : "Test Toggle"}
+            onPress={async () => {
+              const res = await toggleCurrentSessionDone();
+              if (res) {
+                setMarkDoneTestResult(
+                  `${res.action === "marked" ? "Marked" : "Unmarked"}: "${res.previousTitle}" -> "${res.newTitle}" (${res.workspaceId})`,
+                );
+                toast.show(res.message);
+              } else {
+                setMarkDoneTestResult(
+                  isZh
+                    ? "未能找到当前活跃会话（请先在左侧选择或打开一个工作区）"
+                    : "No active workspace located (select or open a workspace first)",
+                );
+              }
             }}
           />
 
@@ -1352,6 +1449,69 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 {isZh ? "打开运行抽屉 (⌘⇧H)" : "Open Runs Drawer (⌘⇧H)"}
               </Text>
             </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void openScheduleRunSession({
+                  action: "recover-due",
+                  scheduleId: scheduleRunsQueryInput.trim(),
+                  dryRun: false,
+                }).then((res) => {
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "自愈补跑失败槽位 (能调)" : "Recover Failed Slots"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void openScheduleRunSession({
+                  action: "auto-evolve",
+                  scheduleId: scheduleRunsQueryInput.trim(),
+                  dryRun: true,
+                }).then((res) => {
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "预演自演进 (能试)" : "Dry-Run Auto-Evolve"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void openScheduleRunSession({
+                  action: "auto-evolve",
+                  scheduleId: scheduleRunsQueryInput.trim(),
+                  dryRun: false,
+                }).then((res) => {
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "一键自演进与双端同步 (能调)" : "Auto-Evolve & Sync Twins"}
+              </Text>
+            </Pressable>
           </View>
 
           {scheduleRunsDiagData ? (
@@ -1688,15 +1848,414 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       <SettingsSection
         title={
           isZh
-            ? "会话聊天记录回放与保险库对账器 (Agent History & Session Patch Reconciler)"
-            : "Agent History & Session Patch Reconciler (Timeline Sync Guard)"
+            ? "Customize 控制面：斜杠命令、Skills、Rules、Subagents、MCPs 与插件 (能读 / 能试 / 能调)"
+            : "Customize: Slash Commands, Skills, Rules, Subagents, MCPs & Plugins"
         }
       >
         <View style={styles.diagBox}>
           <Text style={styles.label}>
             {isZh
-              ? "双层架构对账（能读 / 能试 / 能调）：底层协议补丁 (session.ts 历史回放 + 本地/云端保险库自动恢复守卫) + 插件层自动拦截「Couldn't refresh agent history」并一键自愈："
-              : "Dual-layer architecture reconciler: inspect session.ts replay patches & CLI Conversation Vault armor, probe any workspace's .db/transcript, or trigger 1-click self-healing:"}
+              ? "对标 Cursor Customize 统一管理面：检索、置顶 (★ Pin)、启用/禁用 947 项斜杠命令与 Skills，盘点 Rules / Subagents / MCPs / Plugins，并测试多 Skill 句中展开："
+              : "Unified Customize control plane: filter, ★ Pin to top of `/` autocomplete, Enable/Disable across 947 Slash Commands & Skills, inspect Rules / Subagents / MCPs / Plugins, and dry-run multi-skill prompt expansion:"}
+          </Text>
+
+          <View style={styles.row}>
+            {(
+              [
+                { id: "all", label: isZh ? "全部" : "All", count: undefined },
+                {
+                  id: "commands",
+                  label: isZh ? "Commands" : "Commands",
+                  count: customizeSnapData?.customizeCounts.commands,
+                },
+                {
+                  id: "skills",
+                  label: isZh ? "Skills" : "Skills",
+                  count: customizeSnapData?.customizeCounts.skills,
+                },
+                {
+                  id: "rules",
+                  label: isZh ? "Rules" : "Rules",
+                  count: customizeSnapData?.customizeCounts.rules,
+                },
+                {
+                  id: "subagents",
+                  label: isZh ? "Subagents" : "Subagents",
+                  count: customizeSnapData?.customizeCounts.subagents,
+                },
+                {
+                  id: "mcps",
+                  label: isZh ? "MCPs" : "MCPs",
+                  count: customizeSnapData?.customizeCounts.mcps,
+                },
+                {
+                  id: "plugins",
+                  label: isZh ? "Plugins" : "Plugins",
+                  count: customizeSnapData?.customizeCounts.plugins,
+                },
+              ] as const
+            ).map((cat) => {
+              const active = customizeCategory === cat.id;
+              return (
+                <Pressable
+                  key={cat.id}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setCustomizeCategory(cat.id);
+                    void manageSlashSkills({
+                      action: "status",
+                      category: cat.id,
+                      scope: customizeScope,
+                      query: customizeSearchInput.trim() || undefined,
+                      limit: 120,
+                      source: "settings-ui",
+                    }).then(setCustomizeSnapData);
+                  }}
+                  style={active ? styles.btn : styles.secondaryBtn}
+                >
+                  <Text style={active ? styles.btnText : styles.secondaryBtnText}>
+                    {cat.label}
+                    {typeof cat.count === "number" ? ` (${cat.count})` : ""}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.row}>
+            {(
+              [
+                { id: "all", label: isZh ? "全部范围" : "All Scopes" },
+                {
+                  id: "pinned",
+                  label: isZh
+                    ? `★ 已置顶 (${customizeSnapData?.pinnedCount ?? 0})`
+                    : `★ Pinned (${customizeSnapData?.pinnedCount ?? 0})`,
+                },
+                { id: "workspace", label: isZh ? "当前工作区" : "Workspace" },
+                { id: "user", label: isZh ? "全局 (Vec Yang)" : "User Global" },
+                {
+                  id: "disabled",
+                  label: isZh
+                    ? `已禁用 (${customizeSnapData?.disabledCount ?? 0})`
+                    : `Disabled (${customizeSnapData?.disabledCount ?? 0})`,
+                },
+              ] as const
+            ).map((sc) => {
+              const active = customizeScope === sc.id;
+              return (
+                <Pressable
+                  key={sc.id}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setCustomizeScope(sc.id);
+                    void manageSlashSkills({
+                      action: "status",
+                      category: customizeCategory,
+                      scope: sc.id,
+                      query: customizeSearchInput.trim() || undefined,
+                      limit: 120,
+                      source: "settings-ui",
+                    }).then(setCustomizeSnapData);
+                  }}
+                  style={active ? styles.btn : styles.secondaryBtn}
+                >
+                  <Text style={active ? styles.btnText : styles.secondaryBtnText}>{sc.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.row}>
+            <TextInput
+              value={customizeSearchInput}
+              onChangeText={setCustomizeSearchInput}
+              placeholder={
+                isZh
+                  ? "搜索 Commands, Skills, Rules, Subagents, MCPs, Plugins (如 wheel-check, boost, plan)..."
+                  : "Search Commands, Skills, Rules, Subagents, MCPs, Plugins (e.g. wheel-check, boost, plan)..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageSlashSkills({
+                  action: "status",
+                  category: customizeCategory,
+                  scope: customizeScope,
+                  query: customizeSearchInput.trim() || undefined,
+                  limit: 120,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setCustomizeSnapData(res);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Search" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>{isZh ? "筛选 (能读)" : "Filter"}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageSlashSkills({
+                  action: "sync",
+                  category: customizeCategory,
+                  scope: customizeScope,
+                  query: customizeSearchInput.trim() || undefined,
+                  limit: 120,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setCustomizeSnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "⚡ 同步全量目录与补丁 (能调)" : "⚡ Sync Catalog & Patches"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageSlashSkills({
+                  action: "reset-pins",
+                  category: customizeCategory,
+                  scope: customizeScope,
+                  query: customizeSearchInput.trim() || undefined,
+                  limit: 120,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setCustomizeSnapData(res);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "重置默认置顶" : "Reset Default Pins"}
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.row}>
+            <TextInput
+              value={customizeDryRunInput}
+              onChangeText={setCustomizeDryRunInput}
+              placeholder={
+                isZh
+                  ? "干跑测试多 Skill 展开，例如：请用 /wheel-check 和 /graphify 检查架构"
+                  : "Dry-run multi-skill prompt expansion, e.g. check architecture with /wheel-check and /graphify"
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageSlashSkills({
+                  action: "test",
+                  samplePrompt:
+                    customizeDryRunInput.trim() ||
+                    "check architecture with /wheel-check and /1password",
+                  category: customizeCategory,
+                  scope: customizeScope,
+                  query: customizeSearchInput.trim() || undefined,
+                  limit: 120,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setCustomizeSnapData(res);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "干跑测试 /skill 展开 (能试)" : "Dry-Run /skill Expansion"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {customizeSnapData ? (
+            <View style={{ gap: 6, marginTop: 6 }}>
+              <Text style={styles.label}>
+                • Catalog: {customizeSnapData.totalAdvertised} exported (`/`) · Commands=
+                {customizeSnapData.customizeCounts.commands} · Skills=
+                {customizeSnapData.customizeCounts.skills} · Rules=
+                {customizeSnapData.customizeCounts.rules} · Subagents=
+                {customizeSnapData.customizeCounts.subagents} · MCPs=
+                {customizeSnapData.customizeCounts.mcps} · Plugins=
+                {customizeSnapData.customizeCounts.plugins} · Source:{" "}
+                {customizeSnapData.configSource}
+              </Text>
+              <Text style={styles.detail}>
+                • ★ Pinned ({customizeSnapData.pinnedCount}):{" "}
+                {customizeSnapData.pinnedSlashCommands
+                  .slice(0, 12)
+                  .map((s: string) => `/${s}`)
+                  .join(", ")}
+                {customizeSnapData.pinnedSlashCommands.length > 12 ? " ..." : ""} · Disabled (
+                {customizeSnapData.disabledCount}):{" "}
+                {customizeSnapData.disabledSlashCommands.length > 0
+                  ? customizeSnapData.disabledSlashCommands.map((s: string) => `/${s}`).join(", ")
+                  : "none"}
+              </Text>
+
+              {customizeSnapData.dryRun.resolutions.length > 0 ? (
+                <View style={{ gap: 3, marginTop: 2 }}>
+                  <Text style={styles.label}>
+                    {isZh ? "• 多 Skill 干跑解析结果：" : "• Multi-Skill Dry-Run Resolution:"}
+                  </Text>
+                  {customizeSnapData.dryRun.resolutions.map((r, idx) => (
+                    <Text key={`${r.slug}-${idx}`} style={styles.detail}>
+                      {"  "}✓ {r.token} [{r.mode} · {r.status}] → {r.path || "(built-in)"} (
+                      {r.injected_chars} chars)
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+
+              <View style={{ gap: 4, marginTop: 4 }}>
+                {customizeSnapData.customizeItems.slice(0, 18).map((item) => {
+                  const canPinOrDisable =
+                    item.category === "commands" || item.category === "skills";
+                  const isDisabled = !item.enabled;
+                  return (
+                    <View
+                      key={`${item.category}-${item.name}`}
+                      style={[
+                        styles.row,
+                        {
+                          justifyContent: "space-between",
+                          paddingVertical: 4,
+                          borderBottomWidth: 1,
+                          borderBottomColor: theme.colors.border,
+                        },
+                      ]}
+                    >
+                      <View style={{ flex: 1, paddingRight: 8 }}>
+                        <Text style={styles.label}>
+                          {item.pinned ? "★ " : ""}
+                          {canPinOrDisable ? `/${item.name}` : item.name}{" "}
+                          <Text style={styles.detail}>
+                            [{item.category} · {item.source}
+                            {isDisabled ? " · DISABLED" : ""}]
+                          </Text>
+                        </Text>
+                        <Text style={styles.detail} numberOfLines={1}>
+                          {item.description}
+                        </Text>
+                      </View>
+                      <View style={styles.row}>
+                        {canPinOrDisable ? (
+                          <>
+                            <Pressable
+                              accessibilityRole="button"
+                              onPress={() => {
+                                void manageSlashSkills({
+                                  action: item.pinned ? "unpin" : "pin",
+                                  slug: item.name,
+                                  category: customizeCategory,
+                                  scope: customizeScope,
+                                  query: customizeSearchInput.trim() || undefined,
+                                  limit: 120,
+                                  source: "settings-ui",
+                                }).then((res) => {
+                                  setCustomizeSnapData(res);
+                                  toast.show(res.message, { variant: "success" });
+                                });
+                              }}
+                              style={item.pinned ? styles.btn : styles.secondaryBtn}
+                            >
+                              <Text
+                                style={item.pinned ? styles.btnText : styles.secondaryBtnText}
+                              >
+                                {item.pinned
+                                  ? isZh
+                                    ? "★ 已置顶"
+                                    : "★ Pinned"
+                                  : isZh
+                                    ? "☆ 置顶"
+                                    : "☆ Pin"}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              accessibilityRole="button"
+                              onPress={() => {
+                                void manageSlashSkills({
+                                  action: isDisabled ? "enable" : "disable",
+                                  slug: item.name,
+                                  category: customizeCategory,
+                                  scope: customizeScope,
+                                  query: customizeSearchInput.trim() || undefined,
+                                  limit: 120,
+                                  source: "settings-ui",
+                                }).then((res) => {
+                                  setCustomizeSnapData(res);
+                                  toast.show(res.message, { variant: "success" });
+                                });
+                              }}
+                              style={styles.secondaryBtn}
+                            >
+                              <Text style={styles.secondaryBtnText}>
+                                {isDisabled
+                                  ? isZh
+                                    ? "启用"
+                                    : "Enable"
+                                  : isZh
+                                    ? "禁用"
+                                    : "Disable"}
+                              </Text>
+                            </Pressable>
+                          </>
+                        ) : null}
+                        {item.path ? (
+                          <Pressable
+                            accessibilityRole="button"
+                            onPress={() => {
+                              if (!item.path) return;
+                              void openTarget({
+                                workspaceId: resolveActiveWsId(),
+                                path: item.path,
+                                target: "finder-reveal",
+                              });
+                            }}
+                            style={styles.secondaryBtn}
+                          >
+                            <Text style={styles.secondaryBtnText}>Finder ↗</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "会话历史回放、全域 Skill 展开与保险库对账器 (Agent History, Slash Skills & Session Patch Reconciler)"
+            : "Agent History, Slash Skills & Session Patch Reconciler"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {isZh
+              ? "双层架构对账（能读 / 能试 / 能调）：底层协议补丁 (session.ts 历史回放 + 947 项全域/句中 /skill 自动展开 + 保险库守卫) + 插件层自动拦截「Couldn't refresh agent history」与句中 `/` 技能补全："
+              : "Dual-layer architecture reconciler: inspect session.ts replay + 947 global/inline /skill patches & CLI Conversation Vault armor, dry-run /skill expansion, or trigger 1-click self-healing:"}
           </Text>
 
           <View style={styles.row}>
@@ -1705,8 +2264,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               onChangeText={setAgentHistoryQueryInput}
               placeholder={
                 isZh
-                  ? "输入 Workspace ID / 标题关键词 / Conversation UUID（留空自动检测当前活跃工作区）..."
-                  : "Enter Workspace ID / title / Conversation UUID (leave empty for active workspace)..."
+                  ? "输入 Workspace ID / Conversation UUID，或输入 `/wheel-check /1password /graphify` 干跑测试多 Skill 展开..."
+                  : "Enter Workspace ID / Conversation UUID, or `/wheel-check /1password /graphify` to dry-run skill expansion..."
               }
               placeholderTextColor={theme.colors.foregroundMuted}
               style={styles.input}
@@ -1931,6 +2490,148 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                   ) : null}
                 </View>
               ))}
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "写回门禁与结束钩子对账器 (Stop Hook & Writeback Gate Reconciler)"
+            : "Stop Hook & Writeback Gate Reconciler (finishing-with-writeback)"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {isZh
+              ? "核验 Antigravity Stop Hook v2.0.0 防复读保护（transcriptPath 尾部回退、fullyIdle:false 后台挂起放行、executionNum 单轮限流），支持按 Conversation UUID 对比回放 v1 vs v2（能读 / 能试 / 能调）："
+              : "Inspect Antigravity Stop Hook v2.0.0 anti-repetition guards (transcriptPath tail fallback, fullyIdle:false background yield bypass, executionNum cap), replay transcripts, or tune policy:"}
+          </Text>
+
+          <View style={styles.row}>
+            <TextInput
+              value={writebackConvInput}
+              onChangeText={setWritebackConvInput}
+              placeholder={
+                isZh
+                  ? "输入 Conversation UUID 回放验算（例如 4886f126-34b5-4dea-b6dd-01685971fb77）..."
+                  : "Conversation UUID to replay (e.g. 4886f126-34b5-4dea-b6dd-01685971fb77)..."
+              }
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={styles.input}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageWritebackHook({
+                  action: "simulate",
+                  conversationId: writebackConvInput.trim() || undefined,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setWritebackSnapData(res);
+                  if (res.ok) {
+                    toast.show(res.message, { variant: "success" });
+                  } else {
+                    toast.error(res.message);
+                  }
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Icon name="Activity" size={14} color={theme.colors.foreground} />
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "回放与验算 (能读/能试)" : "Replay Transcript"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const nextEnabled = !(writebackSnapData?.enabled ?? true);
+                void manageWritebackHook({
+                  action: "tune",
+                  enabled: nextEnabled,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setWritebackSnapData(res);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {writebackSnapData?.enabled === false
+                  ? isZh
+                    ? "启用 Stop Hook (能调)"
+                    : "Enable Stop Hook"
+                  : isZh
+                    ? "暂停 Stop Hook (能调)"
+                    : "Pause Stop Hook"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void manageWritebackHook({
+                  action: "reset",
+                  clearMarkers: true,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setWritebackSnapData(res);
+                  toast.show(res.message, { variant: "success" });
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "重置默认并清理标记" : "Reset & Clear Markers"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {writebackSnapData ? (
+            <View style={{ gap: 5, marginTop: 6 }}>
+              <Text style={styles.label}>
+                • Hook v{writebackSnapData.hookVersion} ({writebackSnapData.configSource}) ·
+                enabled={writebackSnapData.enabled ? "✓ true" : "✕ false"} · maxBlocksPerTurn=
+                {writebackSnapData.maxBlocksPerTurn} · requireFullyIdle=
+                {writebackSnapData.requireFullyIdle ? "✓ true" : "✕ false"} ·
+                transcriptTailFallback=
+                {writebackSnapData.transcriptTailFallback ? "✓ true" : "✕ false"}
+              </Text>
+              <Text style={styles.detail}>
+                • hooks.json: stop={writebackSnapData.stopHookEnabledInHooksJson ? "✓" : "✕"} ·
+                turnMarker={writebackSnapData.turnMarkerEnabledInHooksJson ? "✓" : "✕"} · Active
+                markers: {writebackSnapData.activeMarkersCount} · Recent audit (
+                {writebackSnapData.auditSampleSize}): allow={writebackSnapData.auditAllowCount} ·
+                block={writebackSnapData.auditBlockCount}
+              </Text>
+              {writebackSnapData.replay ? (
+                <View style={{ gap: 4, marginTop: 4 }}>
+                  <Text style={styles.label}>
+                    • Replay ({writebackSnapData.replay.conversationId.slice(0, 8)}):{" "}
+                    {writebackSnapData.replay.totalStopPoints} stop points · Legacy v1 blocked{" "}
+                    {writebackSnapData.replay.legacyV1BlockCount}x → Current v2 blocked{" "}
+                    {writebackSnapData.replay.v2BlockCount}x (Eliminated{" "}
+                    {writebackSnapData.replay.falseBlocksEliminated} false blocks)
+                  </Text>
+                  {writebackSnapData.replay.events
+                    .filter((ev) => ev.legacyV1Decision === "block" || ev.v2Decision === "block")
+                    .slice(0, 8)
+                    .map((ev) => (
+                      <Text
+                        key={`${ev.line}_${ev.stepIndex ?? 0}`}
+                        style={styles.detail}
+                        numberOfLines={1}
+                      >
+                        • L{ev.line} (step {ev.stepIndex ?? "-"}) · fullyIdle=
+                        {ev.fullyIdle ? "true" : "false"} · exec={ev.executionNum} · Writeback=
+                        {ev.hasWritebackLine ? "✓" : "✕"} · v1={ev.legacyV1Decision} → v2=
+                        {ev.v2Decision} ({ev.v2Reason})
+                      </Text>
+                    ))}
+                </View>
+              ) : null}
             </View>
           ) : null}
         </View>

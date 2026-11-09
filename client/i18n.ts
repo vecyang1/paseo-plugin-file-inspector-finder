@@ -35,6 +35,10 @@ export const enMessages = {
     voiceSlashDescription:
       "Switch Paseo Speech-to-text model (e.g. sensevoice, qwen, telespeech, gemini, or custom model ID) or run live probe",
     voiceSlashHint: "[sensevoice | qwen | telespeech | gemini | test | reset | <custom-model-id>]",
+    toggleSessionDone: "Finder: Toggle Session Done (Option+D / ⌥D)",
+    doneSlashDescription:
+      "Toggle the completed 'd ' prefix on the current session and reveal in sidebar",
+    doneSlashHint: "[prefix, defaults to 'd ']",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -75,6 +79,8 @@ export const enMessages = {
     quickJumpBtnOpen: "Jump",
     quickJumpBtnSidebar: "Sidebar",
     quickJumpBtnNew: "+ New",
+    sessionMarkedDone: "Marked session as done",
+    sessionUnmarkedDone: "Unmarked session completed status",
   },
   imagePanel: {
     revealMissingDir: "Reveal parent folder in Finder",
@@ -145,6 +151,10 @@ export const enMessages = {
     quickRenameLabelShortcutsLabel: "Enable quick thread rename & label shortcuts",
     quickRenameLabelShortcutsHint:
       "Press F2 or Cmd+Shift+E for in-place inline rename, or Cmd+Shift+L for colored workspace labels",
+    markDoneShortcutLabel: "Enable mark session done shortcut (Option+D / ⌥D)",
+    markDoneShortcutHint:
+      "Press Option+D or Option+Shift+D to automatically toggle the 'd ' prefix on the current session and scroll the left sidebar to its row",
+    testMarkDoneLabel: "Test toggle 'd ' prefix on current session",
     sidebarDropLabel: "Drag & drop folder onto sidebar as workspace",
     sidebarDropHint:
       "Drop any folder from Finder onto the left Workspaces sidebar to switch if existing or create if new (Option+Drop forces new)",
@@ -330,6 +340,9 @@ export const zhMessages: PluginMessageCatalog = {
     voiceSlashDescription:
       "一键切换 Paseo 语音转文字模型（如 sensevoice、qwen、telespeech、gemini 或任意自定义模型 ID）或实测转录",
     voiceSlashHint: "[sensevoice | qwen | telespeech | gemini | test | reset | <自定义模型ID>]",
+    toggleSessionDone: "Finder：标记或取消当前会话完成 (Option+D / ⌥D)",
+    doneSlashDescription: "为当前会话切换「d 」已完成标记前缀，并自动展开左侧边栏定位",
+    doneSlashHint: "[前缀，默认 d ]",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
@@ -370,6 +383,8 @@ export const zhMessages: PluginMessageCatalog = {
     quickJumpBtnOpen: "跳转",
     quickJumpBtnSidebar: "定位边栏",
     quickJumpBtnNew: "+ 新建",
+    sessionMarkedDone: "已标记会话为完成",
+    sessionUnmarkedDone: "已取消会话完成标记",
   },
   imagePanel: {
     revealMissingDir: "在 Finder 中打开上级文件夹",
@@ -437,6 +452,10 @@ export const zhMessages: PluginMessageCatalog = {
     quickRenameLabelShortcutsLabel: "启用会话重命名与标签快捷键",
     quickRenameLabelShortcutsHint:
       "按 F2 或 Cmd+Shift+E 直接原位重命名工作区，按 Cmd+Shift+L 快速管理彩色标签",
+    markDoneShortcutLabel: "启用快捷键一键标记会话已完成 (Option+D / ⌥D)",
+    markDoneShortcutHint:
+      "按 Option+D 或 Option+Shift+D 自动为当前会话名称切换「d 」前缀，并在左侧边栏高亮闪烁定位该会话",
+    testMarkDoneLabel: "测试当前会话切换「d 」标记",
     sidebarDropLabel: "支持拖拽文件夹到左侧边栏创建或切换工作区",
     sidebarDropHint:
       "从 Finder 拖拽文件夹到左侧工作区栏：已存在则直接切换，不存在则自动新建（按住 Option 强制新建）",

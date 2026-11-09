@@ -13,6 +13,7 @@ import {
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
   manageAgentHistoryRpc,
+  manageSlashSkillsRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
@@ -34,6 +35,7 @@ import {
   readQuickJumpPreferences,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
+  toggleCurrentSessionDone,
 } from "./client/web";
 import {
   WorkspaceFinderPanel,
@@ -181,6 +183,43 @@ export default function contribute(client: PluginClientContext) {
         }
       }
       openPanel("finder-panel", { location: "explorer" });
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "toggle-session-done",
+    title: pluginTranslations.message("commands.toggleSessionDone"),
+    icon: "CheckCircle2",
+    keywords: ["done", "finish", "complete", "d", "toggle", "mark", "rename"],
+    context: "workspace",
+    async onSelect({ workspace, rpc }) {
+      const g = globalThis as { document?: unknown; window?: unknown };
+      const doc = g.document as Parameters<typeof toggleCurrentSessionDone>[1];
+      const win = g.window as Parameters<typeof toggleCurrentSessionDone>[2];
+      await toggleCurrentSessionDone(
+        {
+          workspaceId: workspace.id,
+          doc,
+          win,
+          callbacks: {
+            onRenameThread: async (newTitle, options) => {
+              const targetWsId = options?.workspaceId ?? workspace.id;
+              try {
+                await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
+              } catch {
+                // Fallback
+              }
+              await rpc(renameWorkspaceOrAgentRpc, {
+                workspaceId: targetWsId,
+                title: newTitle,
+                source: "mark-done-shortcut",
+              });
+            },
+          },
+        },
+        doc,
+        win,
+      );
     },
   });
 
@@ -481,6 +520,88 @@ export default function contribute(client: PluginClientContext) {
     });
   }
 
+  client.addCommandCenterItem({
+    id: "customize-slash-skills-catalog",
+    title:
+      "Customize: Sync & Manage Slash Commands, Skills, Rules, Subagents & MCPs (斜杠命令与 Skill 控制面)",
+    icon: "Sliders",
+    keywords: [
+      "customize",
+      "slash",
+      "skills",
+      "commands",
+      "rules",
+      "subagents",
+      "mcps",
+      "plugins",
+      "pin",
+      "disable",
+      "cursor",
+      "斜杠命令",
+      "技能",
+    ],
+    context: "global",
+    async onSelect({ rpc }) {
+      await rpc(manageSlashSkillsRpc, {
+        action: "sync",
+        source: "command-center",
+      });
+    },
+  });
+
+  for (const cmdName of ["customize", "skills-ctl"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description:
+        "Manage Paseo Antigravity slash commands, skills, rules, subagents & MCPs (pin, unpin, disable, enable, sync, or dry-run)",
+      argumentHint: "[sync | pin <slug> | unpin <slug> | disable <slug> | enable <slug> | reset-pins | <query>]",
+      context: "workspace",
+      async onSubmit({ args, rpc }) {
+        const tokens = args.trim().split(/\s+/).filter(Boolean);
+        const first = (tokens[0] || "").toLowerCase();
+        const rest = tokens.slice(1).join(" ");
+        if (!first || first === "status") {
+          await rpc(manageSlashSkillsRpc, {
+            action: "status",
+            source: "slash-command",
+          });
+          return;
+        }
+        if (first === "sync" || first === "reset-pins") {
+          await rpc(manageSlashSkillsRpc, {
+            action: first,
+            source: "slash-command",
+          });
+          return;
+        }
+        if (
+          (first === "pin" || first === "unpin" || first === "disable" || first === "enable") &&
+          rest
+        ) {
+          await rpc(manageSlashSkillsRpc, {
+            action: first,
+            slug: rest,
+            source: "slash-command",
+          });
+          return;
+        }
+        if (args.includes("/")) {
+          await rpc(manageSlashSkillsRpc, {
+            action: "test",
+            samplePrompt: args.trim(),
+            source: "slash-command",
+          });
+          return;
+        }
+        await rpc(manageSlashSkillsRpc, {
+          action: "status",
+          query: args.trim(),
+          source: "slash-command",
+        });
+      },
+    });
+  }
+
   // 6. Register Composer Slash Commands (/reveal, /finder, /rename, /title, /label, /tag)
   for (const cmdName of ["reveal", "finder"] as const) {
     client.addSlashCommand({
@@ -535,6 +656,46 @@ export default function contribute(client: PluginClientContext) {
           title: normalized,
           source: "slash-command",
         });
+      },
+    });
+  }
+
+  for (const cmdName of ["done", "d"] as const) {
+    client.addSlashCommand({
+      name: cmdName,
+      description: pluginTranslations.message("commands.doneSlashDescription"),
+      argumentHint: pluginTranslations.message("commands.doneSlashHint"),
+      context: "workspace",
+      async onSubmit({ args, workspace, rpc }) {
+        const customPrefix = args.trim() ? `${args.trim()} ` : "d ";
+        const g = globalThis as { document?: unknown; window?: unknown };
+        const doc = g.document as Parameters<typeof toggleCurrentSessionDone>[1];
+        const win = g.window as Parameters<typeof toggleCurrentSessionDone>[2];
+        await toggleCurrentSessionDone(
+          {
+            workspaceId: workspace.id,
+            prefix: customPrefix,
+            doc,
+            win,
+            callbacks: {
+              onRenameThread: async (newTitle, options) => {
+                const targetWsId = options?.workspaceId ?? workspace.id;
+                try {
+                  await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
+                } catch {
+                  // Fallback
+                }
+                await rpc(renameWorkspaceOrAgentRpc, {
+                  workspaceId: targetWsId,
+                  title: newTitle,
+                  source: "mark-done-shortcut",
+                });
+              },
+            },
+          },
+          doc,
+          win,
+        );
       },
     });
   }
@@ -739,7 +900,10 @@ export default function contribute(client: PluginClientContext) {
     const seenIds = new Set<string>();
 
     for (const candidate of res.candidates) {
-      const itemId = `jump-project-${candidate.projectId}`;
+      const safeProjectId = String(candidate.projectId ?? "")
+        .replace(/[^a-z0-9.-]/gi, "-")
+        .toLowerCase();
+      const itemId = `jump-project-${safeProjectId}`;
       seenIds.add(itemId);
       projectCommandCleanups.get(itemId)?.();
 
@@ -916,6 +1080,7 @@ export default function contribute(client: PluginClientContext) {
           | "inline-tab"
           | "f2-inline"
           | "slash-command"
+          | "mark-done-shortcut"
           | "ui"
           | "agent-tool";
       },

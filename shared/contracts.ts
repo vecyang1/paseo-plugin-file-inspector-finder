@@ -78,6 +78,7 @@ export const InlineRenameSourceSchema = z.enum([
   "inline-tab",
   "f2-inline",
   "slash-command",
+  "mark-done-shortcut",
   "ui",
   "agent-tool",
 ]);
@@ -108,6 +109,8 @@ export const pluginSettings = defineSettings({
     autoJumpToFirstPlaceInput: z.boolean().default(true),
     inlineRenameCaretPosition: InlineRenameCaretPositionSchema.default("start"),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
+    enableMarkDoneShortcut: z.boolean().default(true),
+    markDonePrefix: z.string().default("d "),
     enableSidebarFolderDrop: z.boolean().default(true),
     sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),
     enableWorkspaceQuickJump: z.boolean().default(true),
@@ -652,6 +655,186 @@ export const reconcilePaseoRecoveryRpc = defineRpc({
     healedAgents: z.array(PaseoRecoveryAgentItemSchema),
     actions: z.array(z.string()),
     issues: z.array(z.string()),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+
+export const CustomizeCategorySchema = z.enum([
+  "all",
+  "commands",
+  "skills",
+  "rules",
+  "subagents",
+  "mcps",
+  "plugins",
+]);
+
+export type CustomizeCategory = z.infer<typeof CustomizeCategorySchema>;
+
+export const CustomizeScopeSchema = z.enum([
+  "all",
+  "workspace",
+  "user",
+  "pinned",
+  "disabled",
+]);
+
+export type CustomizeScope = z.infer<typeof CustomizeScopeSchema>;
+
+export const CustomizeItemSchema = z.object({
+  name: z.string(),
+  category: z.string(),
+  kind: z.string(),
+  scope: z.string(),
+  source: z.string(),
+  path: z.string().nullable(),
+  description: z.string(),
+  pinned: z.boolean(),
+  enabled: z.boolean(),
+  inline_autocomplete: z.boolean(),
+});
+
+export type CustomizeItem = z.infer<typeof CustomizeItemSchema>;
+
+export const SlashDryRunResolutionSchema = z.object({
+  token: z.string(),
+  slug: z.string(),
+  status: z.string(),
+  mode: z.string(),
+  path: z.string().nullable(),
+  injected_chars: z.number(),
+});
+
+export type SlashDryRunResolution = z.infer<typeof SlashDryRunResolutionSchema>;
+
+export const manageSlashSkillsRpc = defineRpc({
+  name: "finder.manage_slash_skills",
+  input: z.object({
+    action: z
+      .enum([
+        "status",
+        "inspect",
+        "test",
+        "sync",
+        "pin",
+        "unpin",
+        "enable",
+        "disable",
+        "reset-pins",
+      ])
+      .default("status"),
+    slug: z.string().optional(),
+    samplePrompt: z.string().optional(),
+    category: CustomizeCategorySchema.optional(),
+    scope: CustomizeScopeSchema.optional(),
+    query: z.string().optional(),
+    cwd: z.string().optional(),
+    limit: z.number().int().min(1).max(1000).optional(),
+    source: z
+      .enum(["settings-ui", "slash-command", "command-center", "agent-tool"])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.string(),
+    slashCommandsMode: z.string(),
+    configSource: z.string(),
+    pinnedSlashCommands: z.array(z.string()),
+    disabledSlashCommands: z.array(z.string()),
+    totalAdvertised: z.number(),
+    builtinCount: z.number(),
+    skillCount: z.number(),
+    inlineAutocompleteCount: z.number(),
+    pinnedCount: z.number(),
+    disabledCount: z.number(),
+    syncedSkillsCount: z.number(),
+    syncedSkillsAllLinked: z.boolean(),
+    customizeCounts: z.object({
+      all: z.number(),
+      commands: z.number(),
+      skills: z.number(),
+      rules: z.number(),
+      subagents: z.number(),
+      mcps: z.number(),
+      plugins: z.number(),
+      pinned: z.number(),
+      disabled: z.number(),
+      workspace: z.number(),
+    }),
+    customizeItems: z.array(CustomizeItemSchema),
+    dryRun: z.object({
+      samplePrompt: z.string(),
+      detectedTokens: z.array(z.string()),
+      expandedCount: z.number(),
+      totalInjectedChars: z.number(),
+      budgetCapChars: z.number(),
+      perSkillBudgetChars: z.number(),
+      resolutions: z.array(SlashDryRunResolutionSchema),
+    }),
+    actions: z.array(z.string()),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+
+export const WritebackReplayEventSchema = z.object({
+  line: z.number(),
+  stepIndex: z.number().nullable(),
+  fullyIdle: z.boolean(),
+  executionNum: z.number(),
+  hasWritebackLine: z.boolean(),
+  recordedHookBlockedInTranscript: z.boolean(),
+  legacyV1Decision: z.string(),
+  legacyV1Reason: z.string(),
+  v2Decision: z.string(),
+  v2Reason: z.string(),
+  preview: z.string(),
+});
+
+export type WritebackReplayEvent = z.infer<typeof WritebackReplayEventSchema>;
+
+export const manageWritebackHookRpc = defineRpc({
+  name: "finder.manage_writeback_hook",
+  input: z.object({
+    action: z.enum(["status", "simulate", "tune", "reset"]).default("status"),
+    conversationId: z.string().optional(),
+    enabled: z.boolean().optional(),
+    maxBlocksPerTurn: z.number().int().min(1).max(5).optional(),
+    requireFullyIdle: z.boolean().optional(),
+    transcriptTailFallback: z.boolean().optional(),
+    clearMarkers: z.boolean().optional(),
+    clearAudit: z.boolean().optional(),
+    source: z
+      .enum(["settings-ui", "slash-command", "command-center", "agent-tool"])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.string(),
+    hookVersion: z.string(),
+    configSource: z.string(),
+    enabled: z.boolean(),
+    maxBlocksPerTurn: z.number(),
+    requireFullyIdle: z.boolean(),
+    transcriptTailFallback: z.boolean(),
+    stopHookEnabledInHooksJson: z.boolean(),
+    turnMarkerEnabledInHooksJson: z.boolean(),
+    activeMarkersCount: z.number(),
+    auditSampleSize: z.number(),
+    auditAllowCount: z.number(),
+    auditBlockCount: z.number(),
+    auditByReason: z.record(z.string(), z.number()),
+    replay: z
+      .object({
+        conversationId: z.string(),
+        totalStopPoints: z.number(),
+        legacyV1BlockCount: z.number(),
+        v2BlockCount: z.number(),
+        falseBlocksEliminated: z.number(),
+        events: z.array(WritebackReplayEventSchema),
+      })
+      .nullable(),
     message: z.string(),
     durationMs: z.number(),
   }),

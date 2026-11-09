@@ -18,6 +18,8 @@ import {
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
+  manageSlashSkillsRpc,
+  manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
 } from "./shared/contracts";
 import {
@@ -26,8 +28,10 @@ import {
   handleInspectFile,
   handleListWorkspaceMedia,
   handleManageAgentHistory,
+  handleManageSlashSkills,
   handleManageVoiceStt,
   handleManageWorkspaceLabels,
+  handleManageWritebackHook,
   handleOpenFileTarget,
   handleQuickJumpWorkspace,
   handleReconcilePaseoRecovery,
@@ -61,6 +65,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(openScheduleRunSessionRpc, handleOpenScheduleRunSession);
   server.handle(manageVoiceSttRpc, handleManageVoiceStt);
   server.handle(manageAgentHistoryRpc, handleManageAgentHistory);
+  server.handle(manageSlashSkillsRpc, handleManageSlashSkills);
+  server.handle(manageWritebackHookRpc, handleManageWritebackHook);
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
 
   const revealTool = defineAgentTool({
@@ -245,9 +251,13 @@ export default function contribute(server: PluginServerContext) {
           "preview-timeline",
           "run-now",
           "toggle-archive-on-finish",
+          "recover-due",
+          "auto-evolve",
         ])
         .optional()
-        .describe("list (default), open-run, preview-timeline, run-now, or toggle-archive-on-finish"),
+        .describe(
+          "list (default), open-run, preview-timeline, run-now, toggle-archive-on-finish, recover-due, or auto-evolve",
+        ),
       scheduleId: z.string().optional().describe("Schedule ID (e.g. 2a8a43f9 or 85c593c3)"),
       runId: z.string().optional().describe("Specific run ID to inspect or open"),
       query: z.string().optional().describe("Filter schedules/runs by name, model, or output"),
@@ -427,6 +437,112 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const slashSkillsTool = defineAgentTool({
+    name: "manage_slash_skills",
+    title: "Customize & Reconcile Paseo Slash Commands, Skills, Rules, Subagents & MCPs",
+    description:
+      "Inspect, search, pin/unpin, enable/disable, dry-run test multi-skill prompt expansion, or sync Paseo Antigravity slash commands, skills, rules, subagents, MCPs, and plugins.",
+    input: z.object({
+      action: z
+        .enum([
+          "status",
+          "inspect",
+          "test",
+          "sync",
+          "pin",
+          "unpin",
+          "enable",
+          "disable",
+          "reset-pins",
+        ])
+        .optional()
+        .describe("status/inspect (default), test (dry-run prompt), sync, pin, unpin, enable, disable, or reset-pins"),
+      slug: z
+        .string()
+        .optional()
+        .describe("Command or skill slug when action is pin, unpin, enable, or disable (e.g. 'wheel-check')"),
+      samplePrompt: z
+        .string()
+        .optional()
+        .describe("Sample prompt containing /commands or inline /skills to dry-run test"),
+      category: z
+        .enum(["all", "commands", "skills", "rules", "subagents", "mcps", "plugins"])
+        .optional()
+        .describe("Filter Customize inventory by category"),
+      scope: z
+        .enum(["all", "workspace", "user", "pinned", "disabled"])
+        .optional()
+        .describe("Filter Customize inventory by scope"),
+      query: z.string().optional().describe("Search query across name, description, and source"),
+    }),
+    async execute(input, { agent, paseo }) {
+      const result = await handleManageSlashSkills(
+        {
+          action: input.action ?? "status",
+          slug: input.slug,
+          samplePrompt: input.samplePrompt,
+          category: input.category,
+          scope: input.scope,
+          query: input.query,
+          cwd: agent.cwd ?? undefined,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
+  const writebackHookTool = defineAgentTool({
+    name: "manage_writeback_hook",
+    title: "Inspect, Replay & Tune Antigravity Stop Hook & Writeback Gate",
+    description:
+      "Inspect, replay against a conversation transcript (comparing legacy v1 vs current v2), tune runtime parameters, or reset the Antigravity finishing-with-writeback Stop hook.",
+    input: z.object({
+      action: z
+        .enum(["status", "simulate", "tune", "reset"])
+        .optional()
+        .describe("status (default), simulate (replay transcript), tune, or reset"),
+      conversationId: z
+        .string()
+        .optional()
+        .describe("Antigravity conversation UUID to replay when action is simulate"),
+      enabled: z.boolean().optional().describe("Enable or disable Stop hook gate"),
+      maxBlocksPerTurn: z.number().int().min(1).max(5).optional().describe("Max blocks per turn"),
+      requireFullyIdle: z
+        .boolean()
+        .optional()
+        .describe("Skip blocking when background tasks are still running (fullyIdle: false)"),
+      transcriptTailFallback: z
+        .boolean()
+        .optional()
+        .describe("Inspect transcriptPath tail when finalModelOutput is scrubbed by agy_cli"),
+    }),
+    async execute(input, { paseo }) {
+      const result = await handleManageWritebackHook(
+        {
+          action: input.action ?? "status",
+          conversationId: input.conversationId,
+          enabled: input.enabled,
+          maxBlocksPerTurn: input.maxBlocksPerTurn,
+          requireFullyIdle: input.requireFullyIdle,
+          transcriptTailFallback: input.transcriptTailFallback,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
@@ -440,6 +556,8 @@ export default function contribute(server: PluginServerContext) {
         voiceSttTool,
         agentHistoryTool,
         paseoRecoveryTool,
+        slashSkillsTool,
+        writebackHookTool,
       ],
     };
   });
