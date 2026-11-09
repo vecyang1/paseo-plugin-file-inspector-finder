@@ -1548,6 +1548,25 @@ export interface LocateProjectSidebarOptions {
   highlightFlash?: boolean;
 }
 
+// Our own presses on a collapsed project row or a "Show more" button. React applies the toggle
+// on a later frame, so a second press before then (the resolved-project `.then` reveal, a staged
+// retry) would collapse it again. One press per element per settle window (T-028).
+const EXPAND_PRESS_SETTLE_MS = 900;
+const recentExpandPresses = new WeakMap<object, number>();
+
+function pressSidebarExpander(el: MinimalElement): boolean {
+  const now = Date.now();
+  const last = recentExpandPresses.get(el);
+  if (last !== undefined && now - last < EXPAND_PRESS_SETTLE_MS) return false;
+  recentExpandPresses.set(el, now);
+  el.click?.();
+  return true;
+}
+
+// > 0 while a reveal is pressing sidebar rows. A reveal started from inside that press (any
+// listener reacting to the synthetic click) must not nest another one (T-028 freeze).
+let sidebarRevealDepth = 0;
+
 export function locateProjectInSidebar(
   options: LocateProjectSidebarOptions,
   docOverride?: MinimalDocument | null,
@@ -1613,7 +1632,7 @@ export function locateProjectInSidebar(
       }
     }
     if (!isExpanded) {
-      matchedRow.click?.();
+      pressSidebarExpander(matchedRow);
     }
   }
 
@@ -1675,7 +1694,6 @@ export function extractCommandCenterSelectionHint(
   workspaceId?: string;
   candidateProjectNames: string[];
 } | null {
-  const panel = doc.querySelector('[data-testid="command-center-panel"]');
   let rowEl: MinimalElement | null = null;
   let curr: MinimalElement | null = target;
   for (let depth = 0; curr && depth < 12; depth += 1) {
@@ -1697,12 +1715,9 @@ export function extractCommandCenterSelectionHint(
     curr = curr.parentElement ?? null;
   }
 
-  if (!rowEl && panel) {
-    rowEl =
-      panel.querySelector?.('[data-testid^="command-center-workspace-"]') ??
-      panel.querySelector?.('[data-testid^="command-center-agent-"]') ??
-      null;
-  }
+  // Only a click that lands inside a ⌘K row is a pick. Never borrow the panel's first row for
+  // a click elsewhere: the reveal's own synthetic sidebar clicks arrive while the panel is still
+  // mounted, and borrowing turned each of them into another reveal (T-028 freeze).
   if (!rowEl) return null;
 
   const rowTid = rowEl.getAttribute?.("data-testid") ?? "";
@@ -1821,6 +1836,7 @@ export function revealWorkspaceInSidebar(
   const win = winOverride ?? getWebWindow();
   const doc = docOverride ?? win?.document ?? null;
   if (!doc) return false;
+  if (sidebarRevealDepth > 0) return false;
 
   const cleanWorkspaceId = (
     options.workspaceId ??
@@ -1903,12 +1919,21 @@ export function revealWorkspaceInSidebar(
           (groupLabel &&
             candidateNames.some((n) => n.toLowerCase() === groupLabel));
         if (matchesProject || (!options.projectId && !options.projectKey && candidateNames.length === 0)) {
-          btn.click?.();
+          pressSidebarExpander(btn);
         }
       }
     }
 
     return projectLocated;
+  };
+
+  const expandWhileHoldingRevealGuard = (): boolean => {
+    sidebarRevealDepth += 1;
+    try {
+      return tryExpandParentProjectAndShowMore();
+    } finally {
+      sidebarRevealDepth -= 1;
+    }
   };
 
   // Fast path: if the workspace row is already rendered in the left sidebar, scroll and flash immediately
@@ -1919,7 +1944,7 @@ export function revealWorkspaceInSidebar(
   }
 
   // Otherwise, uncollapse the parent project (and "Show more" if truncated)
-  const projectExpanded = tryExpandParentProjectAndShowMore();
+  const projectExpanded = expandWhileHoldingRevealGuard();
 
   // Check synchronously in case `.click()` mounted the workspace list immediately
   const rowAfterSyncExpand = findSidebarWorkspaceRow(doc, cleanWorkspaceId);
@@ -1941,7 +1966,7 @@ export function revealWorkspaceInSidebar(
         flashAndScrollWorkspaceRow(row, doc, win, highlightFlash);
         return;
       }
-      tryExpandParentProjectAndShowMore();
+      expandWhileHoldingRevealGuard();
       const rowAfterRetry = findSidebarWorkspaceRow(doc, targetWsId);
       if (rowAfterRetry) {
         revealed = true;
@@ -3535,9 +3560,13 @@ export function installDesktopRevealHelpers(
       removeMenu();
     }
 
+    // Programmatic `.click()` (our own reveal/expand presses, other plugins) is not a user
+    // choice. Treating it as one re-entered the reveal and froze the window (T-028).
+    const isUserClick = (ev as { isTrusted?: boolean }).isTrusted !== false;
+
     // Track direct clicks on left sidebar workspace rows so we don't re-scroll what's already under the cursor,
     // and immediately clear any active jump-flash or lingering inline selection styles on other rows.
-    let currClickEl: MinimalElement | null = me.target;
+    let currClickEl: MinimalElement | null = isUserClick ? me.target : null;
     for (let depth = 0; currClickEl && depth < 8; depth += 1) {
       const tid = currClickEl.getAttribute?.("data-testid") ?? "";
       if (tid.startsWith("sidebar-workspace-row-")) {
@@ -3557,7 +3586,7 @@ export function installDesktopRevealHelpers(
     }
 
     // Detect clicks on Workspace or Agent rows inside Paseo's native Search / CommandCenter (⌘K / ⌘F)
-    const ccHint = extractCommandCenterSelectionHint(me.target, doc);
+    const ccHint = isUserClick ? extractCommandCenterSelectionHint(me.target, doc) : null;
     if (ccHint) {
       pendingCommandCenterHint = {
         ...ccHint,
