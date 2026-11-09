@@ -68,6 +68,8 @@ import {
   triggerJumpToParentSession,
   triggerReconcileSidebarWorkspaceTitles,
 } from "./client/session-lineage-web";
+import { ForkSessionPopover } from "./client/fork-session";
+import { forkSessionRpc } from "./shared/contracts";
 
 export default function contribute(client: PluginClientContext) {
   // 1. Pre-associate image extensions with our Image Inspector file panel & materialize default inline rename prefs
@@ -468,6 +470,42 @@ export default function contribute(client: PluginClientContext) {
       setTimeout(() => {
         triggerSubagentsTreeDrawer({ agentId: agId, conversationId: cid });
       }, 30);
+    },
+  });
+
+  // Fork this session: same RPC as the header Split button; the new agent opens in Paseo.
+  const forkCurrentSession = async (
+    ctx: { agent: { id: string; provider: string }; rpc: typeof client.rpc },
+    title?: string,
+  ) => {
+    const res = await ctx.rpc(forkSessionRpc, {
+      agentId: ctx.agent.id,
+      title: title && title.trim() ? title.trim() : undefined,
+      open: true,
+      dryRun: false,
+      source: "slash-command",
+    });
+    if (!res.ok) throw new Error(res.message);
+  };
+
+  client.addSlashCommand({
+    name: "fork-session",
+    description: "Fork this Antigravity session into a new agent with the full conversation (this one is unchanged)",
+    argumentHint: "[title]",
+    context: "agent",
+    async onSubmit(ctx) {
+      await forkCurrentSession(ctx, ctx.args);
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "fork-this-session",
+    title: "Fork this session",
+    icon: "Split",
+    keywords: ["fork", "branch", "duplicate", "copy session", "分叉", "复制会话"],
+    context: "agent",
+    async onSelect(ctx) {
+      await forkCurrentSession(ctx);
     },
   });
 
@@ -1063,6 +1101,7 @@ export default function contribute(client: PluginClientContext) {
 
   // 7. Dynamically register Top-Right Workspace Header Button + Command Center (⌘K) Project Jump Items
   const headerButtons = new Map<string, PluginButtonRegistration>();
+  const forkButtons = new Map<string, PluginButtonRegistration>();
   const projectCommandCleanups = new Map<string, () => void>();
   const workspaceToProjectMap = new Map<
     string,
@@ -1236,6 +1275,19 @@ export default function contribute(client: PluginClientContext) {
             kind: "popover",
             Content: WorkspaceFinderPopover,
           },
+        },
+      }),
+    );
+    forkButtons.get(workspaceId)?.remove();
+    forkButtons.set(
+      workspaceId,
+      client.addHeaderButton({
+        id: "fork-session-btn",
+        workspaceId,
+        button: {
+          title: "Fork this session",
+          icon: "Split",
+          behavior: { kind: "popover", Content: ForkSessionPopover },
         },
       }),
     );
@@ -1505,5 +1557,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSessionLineageEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
+    for (const btn of forkButtons.values()) btn.remove();
+    forkButtons.clear();
   };
 }

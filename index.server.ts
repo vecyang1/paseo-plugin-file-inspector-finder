@@ -23,7 +23,9 @@ import {
   manageSubagentsRpc,
   manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
+  forkSessionRpc,
 } from "./shared/contracts";
+import { handleForkSession } from "./server/fork-session-handlers";
 import {
   handleDiagnosePath,
   handleImportFolderWorkspace,
@@ -80,6 +82,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(manageSubagentsRpc, handleManageSubagents);
   server.handle(manageWritebackHookRpc, handleManageWritebackHook);
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
+  server.handle(forkSessionRpc, handleForkSession);
 
   const revealTool = defineAgentTool({
     name: "reveal_in_finder",
@@ -628,6 +631,33 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const forkSessionTool = defineAgentTool({
+    name: "fork_session",
+    title: "Fork This Antigravity Session",
+    description:
+      "Copy this Antigravity conversation (full native context, via an agy db branch) into a new Paseo agent " +
+      "titled 'Fork · <title>' and labelled vec.forked-from. The source session is never modified. " +
+      "Use dryRun to preview. Antigravity agents only; other providers use Paseo's per-reply fork.",
+    input: z.object({
+      agentId: z.string().optional().describe("Agent to fork (defaults to the calling agent)"),
+      title: z.string().optional().describe("Title for the new agent"),
+      dryRun: z.boolean().optional().describe("Report what would be forked without writing"),
+    }),
+    async execute(input, { agent }) {
+      const result = await handleForkSession(
+        {
+          agentId: input.agentId ?? agent.id,
+          title: input.title,
+          open: false,
+          dryRun: Boolean(input.dryRun),
+          source: "agent-tool",
+        },
+        {} as never,
+      );
+      return { text: JSON.stringify(result, null, 2), structuredContent: result, isError: !result.ok };
+    },
+  });
+
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,
@@ -645,6 +675,7 @@ export default function contribute(server: PluginServerContext) {
         writebackHookTool,
         sessionLineageTool,
         settingsSearchTool,
+        forkSessionTool,
       ],
     };
   });

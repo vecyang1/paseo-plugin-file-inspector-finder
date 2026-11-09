@@ -1166,3 +1166,29 @@ export const manageSessionLineageRpc = defineRpc({
 
 export * from "./schedule-runs-contracts";
 
+
+// Fork this session: clone the Antigravity conversation (agy db branch) and import it as a new
+// Paseo agent. One owner: `antigravity-ops conversation fork-agent` (agy_conversation_branch.py).
+export const forkSessionRpc = defineRpc({
+  name: "finder.fork_session",
+  input: z.object({
+    agentId: z.string().min(8),
+    title: z.string().optional(),
+    open: z.boolean().default(true),
+    dryRun: z.boolean().default(false),
+    source: z.enum(["header-button", "slash-command", "command-center", "agent-tool"]).optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    dryRun: z.boolean(),
+    agentId: z.string().nullable(),
+    sourceAgentId: z.string(),
+    conversationId: z.string().nullable(),
+    sourceConversationId: z.string().nullable(),
+    title: z.string().nullable(),
+    stepsCopied: z.number().nullable(),
+    message: z.string(),
+    error: z.string().nullable(),
+    durationMs: z.number(),
+  }),
+});
