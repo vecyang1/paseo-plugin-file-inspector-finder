@@ -168,6 +168,44 @@ async function run(page: Page, shots: string[]): Promise<void> {
     [INPUT, RESULT],
   );
   check("Esc clears the query and the results", cleared.value === "" && cleared.results === 0, JSON.stringify(cleared));
+
+  // 5. Paseo re-mounts the whole settings sidebar on every navigation. The field has to ride along
+  //    without a single painted frame where it is missing, or the list below jumps up and back.
+  await page.evaluate((input: string) => {
+    const w = window as any;
+    const ids = new WeakMap<Element, number>();
+    let next = 0;
+    w.__pfssFrames = [];
+    const frame = () => {
+      const field = document.querySelector(input);
+      if (field && !ids.has(field)) ids.set(field, ++next);
+      const list = document.querySelector('[data-testid="settings-sidebar-scroll-body"]');
+      w.__pfssFrames.push({ field: field ? ids.get(field) : 0, top: list ? Math.round(list.getBoundingClientRect().top) : -1 });
+      if (!w.__pfssStop) requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }, INPUT);
+  const visited: string[] = [];
+  for (const target of ["text:Appearance", "settings-host-section-voice", "text:Terminal", "settings-host-section-terminals"]) {
+    if (target.startsWith("text:")) {
+      await page.locator('[data-testid="settings-sidebar-scroll-body"]').getByText(target.slice(5), { exact: true }).first().click();
+    } else {
+      await page.click(`[data-testid="${target}"]`);
+    }
+    await sleep(1000);
+    visited.push(pathOf(page.url()));
+  }
+  const frames: Array<{ field: number; top: number }> = await page.evaluate(() => {
+    (window as any).__pfssStop = true;
+    return (window as any).__pfssFrames;
+  });
+  const missing = frames.filter((f) => f.field === 0).length;
+  const tops = [...new Set(frames.filter((f) => f.top >= 0).map((f) => f.top))];
+  const fields = new Set(frames.map((f) => f.field).filter(Boolean));
+  check("sidebar clicks navigated (precondition for the flicker checks)", new Set(visited).size === 4, visited.join(" -> "));
+  check("navigating keeps the field on screen in every frame", frames.length > 60 && missing === 0, `${missing} of ${frames.length} frames had no field`);
+  check("the settings list does not jump while navigating", tops.length === 1, `list top took ${tops.join("/")} px`);
+  check("the same field element survives navigation", fields.size === 1, `${fields.size} field elements seen`);
 }
 
 async function main(): Promise<number> {

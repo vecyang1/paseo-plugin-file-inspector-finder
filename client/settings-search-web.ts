@@ -878,24 +878,38 @@ function teardownUi(): void {
   currentResults = [];
 }
 
+/** The field sits right above the scroll body of the sidebar that is on screen now. */
+function fieldInPlace(): boolean {
+  return Boolean(
+    ui &&
+      ui.wrap.isConnected &&
+      ui.scroll.isConnected &&
+      ui.wrap.nextElementSibling === ui.results &&
+      ui.results.nextElementSibling === ui.scroll,
+  );
+}
+
 function ensureUi(doc: Document, win: Window): void {
   const prefs = readSettingsSearchPrefs();
   const scroll = doc.querySelector(SEL.sidebar)?.querySelector(SEL.scroll) ?? null;
   const parent = scroll?.parentElement ?? null;
-  if (!prefs.enabled || !scroll || !parent) {
-    if (!prefs.enabled || (ui && !ui.wrap.isConnected)) teardownUi();
+  if (!prefs.enabled) {
+    teardownUi();
     return;
   }
-  if (
-    ui &&
-    ui.wrap.isConnected &&
-    ui.scroll === scroll &&
-    ui.wrap.nextElementSibling === ui.results &&
-    ui.results.nextElementSibling === scroll
-  ) {
+  // No sidebar for a moment (a route swap in progress): keep the detached field for the next one.
+  if (!scroll || !parent) return;
+  if (ui && ui.scroll === scroll && fieldInPlace()) return;
+  if (ui) {
+    // Paseo re-mounts the whole settings sidebar on every navigation. Move the same field into the
+    // new sidebar instead of rebuilding it: query, results and selection stay as they were.
+    if (ui.scroll !== scroll) ui.scroll.removeAttribute(HIDDEN_ATTR);
+    ui.scroll = scroll;
+    parent.insertBefore(ui.wrap, scroll);
+    parent.insertBefore(ui.results, scroll);
+    render(doc, win);
     return;
   }
-  teardownUi();
   syncPaseoThemeCssVariables(doc, win);
   ui = buildUi(doc, win, scroll);
   parent.insertBefore(ui.wrap, scroll);
@@ -958,6 +972,10 @@ export function installSettingsSearch(
       return;
     }
     if (records.every((record) => ownNode(record.target))) return;
+    // Mount in this callback, which runs after React's commit and before the browser paints, so
+    // the re-mounted sidebar is never shown without the field (the list would jump 48px up and back).
+    // The debounced tick stays as the backstop.
+    if (!fieldInPlace()) ensureUi(doc, win);
     if (mountTimer === null) mountTimer = win.setTimeout(tick, MOUNT_DEBOUNCE_MS);
     if (learnTimer !== null) win.clearTimeout(learnTimer);
     learnTimer = win.setTimeout(learn, LEARN_DEBOUNCE_MS);
