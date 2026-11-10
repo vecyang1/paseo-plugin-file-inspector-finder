@@ -134,6 +134,8 @@ export const pluginSettings = defineSettings({
     autoJumpToFirstPlaceInput: z.boolean().default(true),
     inlineRenameCaretPosition: InlineRenameCaretPositionSchema.default("start"),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
+    enableThreadNavigationShortcuts: z.boolean().default(true),
+    enablePinWorkspaceShortcut: z.boolean().default(true),
     labelShortcutCombo: LabelShortcutComboSchema.default("both"),
     enableMarkDoneShortcut: z.boolean().default(true),
     markDonePrefix: z.string().default("d "),

@@ -114,6 +114,12 @@ import {
   resolveSidebarArchiveTarget,
   shouldTriggerSidebarDeleteArchive,
   triggerQuickThreadMetadataBar,
+  isPreviousThreadKeyboardEvent,
+  isNextThreadKeyboardEvent,
+  isPinWorkspaceKeyboardEvent,
+  navigateSidebarThreadRelative,
+  toggleActiveWorkspacePin,
+  isEditableInput,
 } from "../client/web";
 import {
   type MinimalScheduleDomDocument,
@@ -6345,5 +6351,499 @@ test("52. conversation://<cid> Markdown link & inline Role mention clickability,
   assert.deepEqual(interceptedUrls, ["58ca3fa2-3e75-4e9f-bbe0-c3f2c3b327b8"]);
   assert.equal(httpFallbackCalled, 1);
 });
+
+test("53. Orphan / outside-paseo Intake session linkage (srv_* workspace extraction, From a session outside Paseo pill, and trailing-row jump button)", async () => {
+  const {
+    extractCurrentWorkspaceAndAgent,
+    enhanceTimelineSentByButtons,
+    clearSessionDirectoryForTests,
+  } = await import("../client/session-lineage-web");
+
+  clearSessionDirectoryForTests();
+
+  // 1) extractCurrentWorkspaceAndAgent strips srv_<id>: prefix from both pathname and sidebar-workspace-row-<serverId>:<workspaceId>
+  const fakeRow = {
+    getAttribute: (name: string) =>
+      name === "data-testid" ? "sidebar-workspace-row-srv_EXAMPLE00000:wks_477fe6f243d8049a" : null,
+  };
+  const fakeDocForRow = {
+    querySelector: (sel: string) =>
+      sel.includes("sidebar-workspace-row-") ? fakeRow : null,
+    querySelectorAll: () => [],
+  } as unknown as Document;
+  const extractedFromRow = extractCurrentWorkspaceAndAgent(fakeDocForRow, {
+    location: { pathname: "/" },
+  } as unknown as Window);
+  assert.equal(extractedFromRow.workspaceId, "wks_477fe6f243d8049a");
+
+  // 2) enhanceTimelineSentByButtons injects a trailing-row jump button (`paseo-finder-spawn-origin-btn`)
+  // and inline origin pill when first message starts with "From a session outside Paseo, via antigravity-ops peers spawn."
+  const insertedTrailingButtons: Array<{ tid: string | null; text: string }> = [];
+  const trailingRow = {
+    firstChild: null,
+    querySelectorAll: () => [],
+    insertBefore: (btn: { getAttribute?: (k: string) => string | null; textContent?: string }) => {
+      insertedTrailingButtons.push({
+        tid: btn.getAttribute?.("data-testid") ?? null,
+        text: btn.textContent ?? "",
+      });
+    },
+  };
+  const msgEl = {
+    textContent:
+      "From a session outside Paseo, via `antigravity-ops peers spawn`. Your task is in a file: read /workspace/intake/briefs/intake-261110-0534-6fb519de-a1.md",
+    getAttribute: (k: string) => (k === "data-testid" ? "user-message" : null),
+    querySelector: (sel: string) =>
+      sel === '[data-testid="user-message-trailing-row"]' ? trailingRow : null,
+  };
+  const fakeDocForSpawn = {
+    documentElement: { style: { setProperty: () => {} } },
+    createElement: (tag: string) => {
+      const attrs = new Map<string, string>();
+      return {
+        tagName: tag.toUpperCase(),
+        style: {},
+        textContent: "",
+        title: "",
+        setAttribute: (k: string, v: string) => attrs.set(k, v),
+        getAttribute: (k: string) => attrs.get(k) ?? null,
+        addEventListener: () => {},
+        appendChild: () => {},
+      };
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("user-message")) return [msgEl];
+      return [];
+    },
+  } as unknown as Document;
+
+  const healed = enhanceTimelineSentByButtons(
+    {
+      ok: true,
+      action: "inspect",
+      current: {
+        agentId: "fda3af97-6345-4a6c-8074-19dca5afd82a",
+        shortId: "fda3af97",
+        agentTitle: "Intake · 国内 自媒体分发 蚂蚁小二 可以cli or mcp powered?",
+        workspaceId: "wks_477fe6f243d8049a",
+        workspaceTitle: "Intake · 国内 自媒体分发 蚂蚁小二 可以cli or mcp powered?",
+        projectId: "prj_cowork",
+        projectName: "Demo Workspace",
+        status: "done",
+        provider: "antigravity",
+        model: "gemini-3.8-flash-high",
+        providerSessionId: "c7589788-a217-4bde-89d7-bcb0767ff2ad",
+        relationKind: "intake-routed",
+        routedByAgentId: "3e907bec-8da9-4d52-a28c-3fa4b4b121a5",
+        createdAt: "2026-11-10T05:41:09Z",
+        updatedAt: "2026-11-10T05:46:24Z",
+        briefPath: "/workspace/intake/briefs/intake-261110-0534-6fb519de-a1.md",
+        reportPath: "/workspace/intake/reports/intake-261110-0534-6fb519de-a1.report.md",
+        reportExists: true,
+        notionUrl: "https://www.notion.so/3ef0895c8c79812db51fc5876fb519de",
+        notionTaskId: "3ef0895c-8c79-812d-b51f-c5876fb519de",
+      },
+      parent: null,
+      routedOrigin: {
+        agentId: "3e907bec-8da9-4d52-a28c-3fa4b4b121a5",
+        shortId: "3e907bec",
+        agentTitle: "https://www-headquarters.slack.com/archives/C091GLVKLJU/p179",
+        workspaceId: "wks_23b9a39ee3a6dc69",
+        workspaceTitle: "d Fix cadence Notion sync from Slack thread",
+        projectId: "prj_cowork",
+        projectName: "Demo Workspace",
+        status: "done",
+        provider: "antigravity",
+        model: "gemini-3.8-flash-high",
+        providerSessionId: null,
+        relationKind: "intake-routed",
+        routedByAgentId: null,
+        createdAt: "2026-11-09T02:35:47Z",
+        updatedAt: "2026-11-10T04:17:28Z",
+        briefPath: null,
+        reportPath: null,
+        reportExists: false,
+        notionUrl: null,
+        notionTaskId: null,
+      },
+      siblings: [],
+      children: [],
+      colleagues: [],
+      projectPeers: [],
+      directory: [],
+      reconcileSummary: {
+        untitledFound: 0,
+        renamedCount: 0,
+        unlinkedFound: 0,
+        linkedCount: 0,
+        renamedWorkspaces: [],
+      },
+      message: "ok",
+      durationMs: 5,
+    },
+    fakeDocForSpawn,
+    { navigator: { language: "en-US" } } as unknown as Window,
+  );
+
+  assert.equal(healed, 1);
+  assert.equal(insertedTrailingButtons.length, 1);
+  assert.equal(insertedTrailingButtons[0].tid, "paseo-finder-spawn-origin-btn");
+  assert.ok(
+    insertedTrailingButtons[0].text.includes("Routed from Fix cadence Notion sync"),
+    `Expected clean workspaceTitle instead of URL, got: ${insertedTrailingButtons[0].text}`,
+  );
+
+  // 3) When Paseo caches a previously visited workspace in the DOM (ancestor display:none),
+  // extractCurrentWorkspaceAndAgent ignores the hidden workspace's active tab and returns the visible workspace's agentId
+  const hiddenContainer = {
+    nodeType: 1,
+    style: { display: "none" },
+    parentElement: null,
+  };
+  const hiddenAgentTab = {
+    nodeType: 1,
+    style: {},
+    parentElement: hiddenContainer,
+    getAttribute: (k: string) => {
+      if (k === "data-testid") return "workspace-tab-agent_bef7df82-0a46-403c-b4e9-abb84790d7d6";
+      if (k === "aria-selected") return "true";
+      return null;
+    },
+  };
+  const visibleContainer = {
+    nodeType: 1,
+    style: { display: "flex" },
+    parentElement: null,
+  };
+  const visibleAgentTab = {
+    nodeType: 1,
+    style: {},
+    parentElement: visibleContainer,
+    getAttribute: (k: string) => {
+      if (k === "data-testid") return "workspace-tab-agent_fda3af97-6345-4a6c-8074-19dca5afd82a";
+      if (k === "aria-selected") return "true";
+      return null;
+    },
+  };
+  const docWithCachedWorkspaces = {
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("workspace-tab-agent_")) return [hiddenAgentTab, visibleAgentTab];
+      return [];
+    },
+  } as unknown as Document;
+  const extractedVisible = extractCurrentWorkspaceAndAgent(docWithCachedWorkspaces, {
+    location: { pathname: "/workspace/srv_EXAMPLE00000:wks_477fe6f243d8049a" },
+  } as unknown as Window);
+  assert.equal(extractedVisible.agentId, "fda3af97-6345-4a6c-8074-19dca5afd82a");
+});
+
+test("54. Thread Navigation (Cmd+; / Cmd+') and Pin Workspace (Cmd+Option+P) shortcuts, input-protection, context menu annotation, and settings observability", () => {
+  const fakeKe = (init: Record<string, unknown>) => ({
+    key: "",
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    ...init,
+  } as unknown as import("../client/web").MinimalKeyboardEvent);
+
+  // 1) Keyboard event matching
+  assert.equal(isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, key: ";", code: "Semicolon" })), true);
+  assert.equal(isPreviousThreadKeyboardEvent(fakeKe({ ctrlKey: true, key: ";", code: "Semicolon" })), true);
+  assert.equal(isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, shiftKey: true, key: ";" })), false);
+  assert.equal(isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, altKey: true, key: ";" })), false);
+
+  assert.equal(isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "'", code: "Quote" })), true);
+  assert.equal(isNextThreadKeyboardEvent(fakeKe({ ctrlKey: true, key: "'", code: "Quote" })), true);
+  assert.equal(isNextThreadKeyboardEvent(fakeKe({ metaKey: true, shiftKey: true, key: "'" })), false);
+  assert.equal(isNextThreadKeyboardEvent(fakeKe({ metaKey: true, altKey: true, key: "'" })), false);
+
+  assert.equal(isPinWorkspaceKeyboardEvent(fakeKe({ metaKey: true, altKey: true, key: "p", code: "KeyP" })), true);
+  assert.equal(isPinWorkspaceKeyboardEvent(fakeKe({ metaKey: true, altKey: true, key: "π", code: "KeyP" })), true);
+  assert.equal(isPinWorkspaceKeyboardEvent(fakeKe({ ctrlKey: true, altKey: true, key: "p", code: "KeyP" })), true);
+  assert.equal(isPinWorkspaceKeyboardEvent(fakeKe({ metaKey: true, altKey: false, key: "p", code: "KeyP" })), false);
+  assert.equal(isPinWorkspaceKeyboardEvent(fakeKe({ metaKey: true, altKey: true, shiftKey: true, key: "p" })), false);
+
+  // 2) Input safety protection
+  assert.equal(isEditableInput(null), false);
+  assert.equal(isEditableInput({ tagName: "INPUT", getAttribute: () => null } as unknown as MinimalElement), true);
+  assert.equal(isEditableInput({ tagName: "TEXTAREA", getAttribute: () => null } as unknown as MinimalElement), true);
+  assert.equal(isEditableInput({ tagName: "DIV", getAttribute: (k: string) => k === "contenteditable" ? "true" : null } as unknown as MinimalElement), true);
+  assert.equal(isEditableInput({ tagName: "DIV", className: "cm-content", getAttribute: () => null } as unknown as MinimalElement), true);
+
+  // 3) Relative thread navigation dispatches native Cmd+[ and Cmd+]
+  let dispatchedKey = "";
+  let dispatchedMeta = false;
+  const fakeWin = {
+    navigator: { platform: "MacIntel", language: "en-US" },
+    location: { pathname: "/workspace/local:wks_1" },
+    dispatchEvent: (ev: { key: string; metaKey: boolean }) => {
+      dispatchedKey = ev.key;
+      dispatchedMeta = ev.metaKey;
+      return false; // preventDefault
+    },
+    KeyboardEvent: class {
+      key: string;
+      metaKey: boolean;
+      defaultPrevented = true;
+      constructor(_type: string, init?: { key?: string; metaKey?: boolean }) {
+        this.key = init?.key ?? "";
+        this.metaKey = Boolean(init?.metaKey);
+      }
+    },
+  } as unknown as MinimalWindow;
+  const fakeDoc = { querySelectorAll: () => [], querySelector: () => null } as unknown as MinimalDocument;
+
+  const prevRes = navigateSidebarThreadRelative({ delta: -1, win: fakeWin, doc: fakeDoc });
+  assert.equal(prevRes.ok, true);
+  assert.equal(prevRes.source, "native-shortcut");
+  assert.equal(dispatchedKey, "[");
+  assert.equal(dispatchedMeta, true);
+
+  const nextRes = navigateSidebarThreadRelative({ delta: 1, win: fakeWin, doc: fakeDoc });
+  assert.equal(nextRes.ok, true);
+  assert.equal(nextRes.source, "native-shortcut");
+  assert.equal(dispatchedKey, "]");
+  assert.equal(dispatchedMeta, true);
+
+  // 4) Pin workspace action dispatches native Cmd+Shift+P
+  let pinKey = "";
+  let pinShift = false;
+  let pinMeta = false;
+  const fakePinWin = {
+    navigator: { platform: "MacIntel", language: "en-US" },
+    location: { pathname: "/workspace/local:wks_1" },
+    dispatchEvent: (ev: { key: string; metaKey: boolean; shiftKey: boolean }) => {
+      pinKey = ev.key;
+      pinMeta = ev.metaKey;
+      pinShift = ev.shiftKey;
+      return false;
+    },
+    KeyboardEvent: class {
+      key: string;
+      metaKey: boolean;
+      shiftKey: boolean;
+      defaultPrevented = true;
+      constructor(_type: string, init?: { key?: string; metaKey?: boolean; shiftKey?: boolean }) {
+        this.key = init?.key ?? "";
+        this.metaKey = Boolean(init?.metaKey);
+        this.shiftKey = Boolean(init?.shiftKey);
+      }
+    },
+  } as unknown as MinimalWindow;
+
+  const pinRes = toggleActiveWorkspacePin({ win: fakePinWin, doc: fakeDoc });
+  assert.equal(pinRes.ok, true);
+  assert.equal(pinRes.source, "native-shortcut");
+  assert.equal(pinKey, "P");
+  assert.equal(pinShift, true);
+  assert.equal(pinMeta, true);
+
+  // 5) Context menu annotation annotates pin item with ⌘⌥P
+  const addedBadges: MinimalElement[] = [];
+  const fakePinItem: MinimalElement = {
+    tagName: "DIV",
+    style: {},
+    getAttribute: (k: string) => k === "data-testid" ? "sidebar-workspace-menu-pin-wks_test" : null,
+    setAttribute: () => {},
+    querySelectorAll: () => [],
+    appendChild: (b: MinimalElement) => { addedBadges.push(b); },
+  };
+  const docForAnnotation = {
+    querySelectorAll: (sel: string) => sel.includes("sidebar-workspace-menu-pin-") ? [fakePinItem] : [],
+    querySelector: () => null,
+    createElement: (tag: string) => {
+      const a = new Map<string, string>();
+      return {
+        tagName: tag.toUpperCase(),
+        style: {},
+        textContent: "",
+        getAttribute: (k: string) => a.get(k) ?? null,
+        setAttribute: (k: string, v: string) => a.set(k, v),
+      } as unknown as MinimalElement;
+    },
+  } as unknown as MinimalDocument;
+  const annotated = annotateNativeWorkspaceMenusWithShortcuts(
+    docForAnnotation,
+    {
+      enablePinWorkspaceShortcut: true,
+      enableThreadNavigationShortcuts: true,
+      enableQuickRenameAndLabelShortcuts: true,
+      enableSidebarDeleteKeyArchive: true,
+      labelShortcutCombo: "both",
+      enableInlineDoubleClickRename: true,
+      autoJumpToFirstPlaceInput: true,
+      inlineRenameCaretPosition: "start",
+      enableMarkDoneShortcut: true,
+      markDonePrefix: "d ",
+      enableDesktopContextMenuHelper: true,
+      enableCmdClickOpenSystemDefault: true,
+      cmdClickDefaultTarget: "system-default",
+      enableSidebarCmdClickFinder: true,
+    },
+    { navigator: { platform: "MacIntel" } } as unknown as MinimalWindow,
+  );
+  assert.ok(annotated > 0);
+  assert.equal(addedBadges.length, 1);
+  assert.equal(addedBadges[0].getAttribute?.("data-testid"), "sidebar-workspace-menu-pin-shortcut-hint");
+  assert.equal(addedBadges[0].textContent, "⌘⌥P");
+
+  // 6) Settings schema defaults
+  const parsedSettings = pluginSettings.schema.parse({});
+  assert.equal(parsedSettings.enableThreadNavigationShortcuts, true);
+  assert.equal(parsedSettings.enablePinWorkspaceShortcut, true);
+});
+
+test("52. Brand-new user sessions never inherit hidden background <code> references or stale v1 return breadcrumbs", async () => {
+  const {
+    clearSessionDirectoryForTests,
+    ingestSessionLineageResponse,
+    enhanceTimelineAgentMentions,
+    getReturnBreadcrumbForSession,
+  } = await import("../client/session-lineage-web");
+
+  clearSessionDirectoryForTests();
+
+  const hiddenRefNode = {
+    agentId: "a402b245-1111-4222-8333-444455556666",
+    shortId: "a402b245",
+    agentTitle: "Fix AI slop in design prompts",
+    workspaceId: "wks_hidden_old",
+    workspaceTitle: "Fix AI slop in design prompts",
+    projectId: "proj_meta",
+    projectName: "2026-11-08 Meta harness",
+    status: "done",
+    provider: "antigravity",
+    model: "gemini-3.8-flash-high",
+    providerSessionId: null,
+    relationKind: "self" as const,
+    routedByAgentId: null,
+    createdAt: "2026-11-10T06:00:00Z",
+    updatedAt: "2026-11-10T06:30:00Z",
+    briefPath: null,
+    reportPath: null,
+    reportExists: false,
+    notionUrl: null,
+    notionTaskId: null,
+  };
+
+  const newUserSessionNode = {
+    ...hiddenRefNode,
+    agentId: "7714bf68-165b-4475-8220-ef623972a49e",
+    shortId: "7714bf68",
+    agentTitle: "read and submit pr for it /github-ops if need",
+    workspaceId: "wks_f1696f38a7641f5e",
+    workspaceTitle: "read and submit pr for it /github-ops if need",
+  };
+
+  const lineageData = {
+    ok: true,
+    action: "inspect" as const,
+    workspaceId: newUserSessionNode.workspaceId,
+    workspaceTitle: newUserSessionNode.workspaceTitle,
+    current: newUserSessionNode,
+    parent: null,
+    routedOrigin: null,
+    siblings: [],
+    children: [],
+    colleagues: [],
+    projectPeers: [hiddenRefNode],
+    directory: [newUserSessionNode, hiddenRefNode],
+    reconcileSummary: {
+      untitledFound: 0,
+      renamedCount: 0,
+      unlinkedFound: 0,
+      linkedCount: 0,
+      renamedWorkspaces: [],
+    },
+    message: "ok",
+    durationMs: 1,
+  };
+
+  ingestSessionLineageResponse(lineageData);
+
+  // 1) Legacy v1 sessionStorage breadcrumbs (from passive session switching) are purged on read
+  const storageMap = new Map<string, string>();
+  storageMap.set(
+    "paseo_finder_session_jump_breadcrumb_v1",
+    JSON.stringify([
+      {
+        from: hiddenRefNode,
+        toAgentId: newUserSessionNode.agentId,
+        toWorkspaceId: newUserSessionNode.workspaceId,
+        atMs: Date.now(),
+      },
+    ]),
+  );
+  const fakeWin = {
+    navigator: { language: "en-US" },
+    location: { pathname: `/h/srv_test/workspace/${newUserSessionNode.workspaceId}` },
+    sessionStorage: {
+      getItem: (k: string) => storageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => storageMap.set(k, v),
+      removeItem: (k: string) => storageMap.delete(k),
+    },
+  } as unknown as Window;
+
+  assert.equal(
+    getReturnBreadcrumbForSession(
+      newUserSessionNode.workspaceId,
+      newUserSessionNode.agentId,
+      fakeWin,
+    ),
+    null,
+    "Stale v1 breadcrumb from passive session switching must be purged and return null",
+  );
+  assert.equal(
+    storageMap.has("paseo_finder_session_jump_breadcrumb_v1"),
+    false,
+    "Legacy v1 storage key should be deleted",
+  );
+
+  // 2) Hidden inactive screen with <code>a402b245</code> must NOT leak into a new session that has 0 visible <code> elements
+  const hiddenContainer = {
+    nodeType: 1,
+    hidden: false,
+    style: { display: "none" },
+    getAttribute: (k: string) => (k === "data-testid" ? "assistant-message" : null),
+    parentElement: null,
+  };
+  const hiddenCodeEl = {
+    nodeType: 1,
+    textContent: "a402b245",
+    style: {},
+    parentElement: hiddenContainer,
+    getAttribute: () => null,
+    setAttribute: () => {},
+    closest: (sel: string) =>
+      sel.includes("assistant-message") ? hiddenContainer : null,
+  };
+  const visibleUserMsg = {
+    nodeType: 1,
+    hidden: false,
+    style: {},
+    textContent: "read and submit pr for it /github-ops if need",
+    getAttribute: (k: string) => (k === "data-testid" ? "user-message" : null),
+    parentElement: null,
+  };
+  const fakeDoc = {
+    documentElement: { style: { setProperty: () => {} } },
+    querySelector: (sel: string) =>
+      sel.includes("user-message") ? visibleUserMsg : null,
+    querySelectorAll: (sel: string) => {
+      if (sel === "code") return [hiddenCodeEl];
+      if (sel === "a[href]") return [];
+      return [];
+    },
+  } as unknown as Document;
+
+  const refs = enhanceTimelineAgentMentions(lineageData, fakeDoc, fakeWin);
+  assert.equal(
+    refs.length,
+    0,
+    "Hidden <code> elements from inactive background sessions must never leak when the active session has 0 visible <code> elements",
+  );
+});
+
+
 
 

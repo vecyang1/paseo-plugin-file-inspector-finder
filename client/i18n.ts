@@ -205,6 +205,15 @@ export const enMessages = {
     testLabelsBarLabel: "Test open workspace labels bar",
     testLabelsBarHint:
       "Click to test opening the workspace labels management bar on the active workspace",
+    threadNavigationShortcutsLabel: "Enable thread jump shortcuts (Cmd+; / Cmd+')",
+    threadNavigationShortcutsHint:
+      "Press Cmd+; (Ctrl+;) for previous thread and Cmd+' (Ctrl+') for next thread across sidebar workspaces. Protected while typing in text inputs or code editors.",
+    testThreadNavPrevBtn: "Test Prev (Cmd+;)",
+    testThreadNavNextBtn: "Test Next (Cmd+')",
+    pinWorkspaceShortcutLabel: "Enable pin workspace shortcut (Cmd+Option+P / ⌘⌥P)",
+    pinWorkspaceShortcutHint:
+      "Press Cmd+Option+P (Ctrl+Alt+P) to pin or unpin current workspace. Injects ⌘⌥P shortcut hint into sidebar context menu next to 'Pin to top'.",
+    testPinWorkspaceBtn: "Test Pin (⌘⌥P)",
     markDoneShortcutLabel: "Enable mark session done shortcut (Option+D / ⌥D)",
     markDoneShortcutHint:
       "Press Option+D or Option+Shift+D to automatically toggle the 'd ' prefix on the current session and scroll the left sidebar to its row",
@@ -487,7 +496,7 @@ export const zhMessages: PluginMessageCatalog = {
     refresh: "刷新",
     threadMetaTitle: "会话重命名与标签管理 (F2 / Cmd+Shift+L / /rename / /label)",
     threadNamePlaceholder: "输入工作区或会话新标题...",
-    newLabelPlaceholder: "新标签名称（如 feat、⭐️、🤔）...",
+    newLabelPlaceholder: "新标签名称（如 feat、todo、review）...",
     noLabelsYet: "暂无标签，可在下方输入名称并选择颜色一键创建。",
     folderImportTitle: "文件夹转工作区（直接拖拽文件夹到左侧边栏，或在此粘贴路径）",
     folderImportPlaceholder: "粘贴文件夹路径（如 ./packages/web）...",
@@ -579,6 +588,15 @@ export const zhMessages: PluginMessageCatalog = {
     testLabelsBarLabel: "测试打开工作区标签栏",
     testLabelsBarHint:
       "点击即刻在当前活跃工作区打开彩色标签管理栏，测试标签列表与切换响应",
+    threadNavigationShortcutsLabel: "启用会话/线程跳转快捷键 (Cmd+; / Cmd+')",
+    threadNavigationShortcutsHint:
+      "按 Cmd+;（Windows/Linux 为 Ctrl+;）跳转至上一会话，按 Cmd+'（Ctrl+'）跳转至下一会话。在输入框或代码编辑器打字时自动安全避让。",
+    testThreadNavPrevBtn: "测试上一会话 (Cmd+;)",
+    testThreadNavNextBtn: "测试下一会话 (Cmd+')",
+    pinWorkspaceShortcutLabel: "启用工作区置顶快捷键 (Cmd+Option+P / ⌘⌥P)",
+    pinWorkspaceShortcutHint:
+      "按 Cmd+Option+P（Windows/Linux 为 Ctrl+Alt+P）快速置顶或取消置顶当前工作区。并在左侧边栏右键菜单「置顶 / Pin to top」旁展示 ⌘⌥P 快捷键提示。",
+    testPinWorkspaceBtn: "测试置顶切换 (⌘⌥P)",
     markDoneShortcutLabel: "启用快捷键一键标记会话已完成 (Option+D / ⌥D)",
     markDoneShortcutHint:
       "按 Option+D 或 Option+Shift+D 自动为当前会话名称切换「d 」前缀，并在左侧边栏高亮闪烁定位该会话",

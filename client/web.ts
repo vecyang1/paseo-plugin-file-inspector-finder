@@ -26,7 +26,7 @@ import {
 
 export const LABEL_COLOR_HEX: Record<WorkspaceLabelColor, string> = PASEO_IDENTITY_BG_HEX;
 
-interface MinimalStorage {
+export interface MinimalStorage {
   readonly length: number;
   key(index: number): string | null;
   getItem(key: string): string | null;
@@ -64,6 +64,7 @@ export interface MinimalElement {
   click?(): void;
   focus?(): void;
   select?(): void;
+  dispatchEvent?(event: unknown): boolean;
   setSelectionRange?(
     start: number,
     end: number,
@@ -127,6 +128,7 @@ export interface MinimalKeyboardEvent {
   key: string;
   code?: string;
   keyCode?: number;
+  which?: number;
   isComposing?: boolean;
   metaKey?: boolean;
   ctrlKey?: boolean;
@@ -154,7 +156,7 @@ export interface MinimalDocument {
 export interface MinimalWindow {
   localStorage?: MinimalStorage;
   document?: MinimalDocument;
-  navigator?: { language?: string };
+  navigator?: { language?: string; platform?: string; userAgent?: string };
   location?: { pathname?: string; search?: string };
   history?: {
     pushState?(data: unknown, unused: string, url?: string | null): void;
@@ -285,6 +287,8 @@ export interface InlineRenamePreferences {
   autoJumpToFirstPlaceInput: boolean;
   inlineRenameCaretPosition: InlineRenameCaretPosition;
   enableQuickRenameAndLabelShortcuts: boolean;
+  enableThreadNavigationShortcuts: boolean;
+  enablePinWorkspaceShortcut: boolean;
   labelShortcutCombo: LabelShortcutCombo;
   enableMarkDoneShortcut: boolean;
   markDonePrefix: string;
@@ -330,6 +334,14 @@ export function syncInlineRenamePreferences(
       enableQuickRenameAndLabelShortcuts:
         prefs.enableQuickRenameAndLabelShortcuts ??
         existing.enableQuickRenameAndLabelShortcuts,
+      enableThreadNavigationShortcuts:
+        prefs.enableThreadNavigationShortcuts ??
+        existing.enableThreadNavigationShortcuts ??
+        true,
+      enablePinWorkspaceShortcut:
+        prefs.enablePinWorkspaceShortcut ??
+        existing.enablePinWorkspaceShortcut ??
+        true,
       labelShortcutCombo:
         prefs.labelShortcutCombo ?? existing.labelShortcutCombo ?? "both",
       enableMarkDoneShortcut:
@@ -360,6 +372,8 @@ export function readInlineRenamePreferences(
     autoJumpToFirstPlaceInput: true,
     inlineRenameCaretPosition: "start",
     enableQuickRenameAndLabelShortcuts: true,
+    enableThreadNavigationShortcuts: true,
+    enablePinWorkspaceShortcut: true,
     labelShortcutCombo: "both",
     enableMarkDoneShortcut: true,
     markDonePrefix: "d ",
@@ -416,6 +430,10 @@ export function readInlineRenamePreferences(
       inlineRenameCaretPosition: caretPosition,
       enableQuickRenameAndLabelShortcuts:
         parsed.enableQuickRenameAndLabelShortcuts !== false,
+      enableThreadNavigationShortcuts:
+        parsed.enableThreadNavigationShortcuts !== false,
+      enablePinWorkspaceShortcut:
+        parsed.enablePinWorkspaceShortcut !== false,
       labelShortcutCombo,
       enableMarkDoneShortcut: parsed.enableMarkDoneShortcut !== false,
       markDonePrefix:
@@ -601,11 +619,36 @@ export function isInsideFileExplorer(el: MinimalElement | null): boolean {
 }
 
 export function isEditableInput(el: MinimalElement | null): boolean {
+  if (!el) return false;
+  try {
+    if (
+      el.closest?.(
+        'input, textarea, [contenteditable="true"], [contenteditable="plaintext-only"], .cm-editor, .cm-content, .cm-line, [role="textbox"]',
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    // Ignore and fallback to manual traversal
+  }
   let curr: MinimalElement | null = el;
-  for (let depth = 0; curr && depth < 6; depth += 1) {
+  for (let depth = 0; curr && depth < 10; depth += 1) {
     const tag = (curr.tagName ?? "").toUpperCase();
     if (tag === "INPUT" || tag === "TEXTAREA") return true;
-    if (curr.getAttribute?.("contenteditable") === "true") return true;
+    const ce = curr.getAttribute?.("contenteditable");
+    if (ce === "true" || ce === "plaintext-only" || ce === "") return true;
+    if (curr.getAttribute?.("role") === "textbox") return true;
+    const className =
+      typeof curr.className === "string"
+        ? curr.className
+        : (curr.getAttribute?.("class") ?? "");
+    if (
+      className.includes("cm-editor") ||
+      className.includes("cm-content") ||
+      className.includes("cm-line")
+    ) {
+      return true;
+    }
     curr = curr.parentElement ?? null;
   }
   return false;
@@ -2148,6 +2191,263 @@ export function isMarkDoneKeyboardEvent(ke: MinimalKeyboardEvent): boolean {
   return code === "KeyD" || key === "d" || ke.key === "∂" || ke.key === "Î";
 }
 
+export function isPreviousThreadKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
+  if (!ke) return false;
+  if (ke.isComposing || ke.keyCode === 229) return false;
+  const hasMod = Boolean(ke.metaKey || ke.ctrlKey);
+  if (!hasMod || ke.altKey || ke.shiftKey) return false;
+  const key = ke.key;
+  const code = ke.code;
+  const keyCode = ke.keyCode;
+  return key === ";" || code === "Semicolon" || keyCode === 186 || keyCode === 59;
+}
+
+export function isNextThreadKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
+  if (!ke) return false;
+  if (ke.isComposing || ke.keyCode === 229) return false;
+  const hasMod = Boolean(ke.metaKey || ke.ctrlKey);
+  if (!hasMod || ke.altKey || ke.shiftKey) return false;
+  const key = ke.key;
+  const code = ke.code;
+  const keyCode = ke.keyCode;
+  return key === "'" || key === '"' || code === "Quote" || keyCode === 222;
+}
+
+export function isPinWorkspaceKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
+  if (!ke) return false;
+  if (ke.isComposing || ke.keyCode === 229) return false;
+  const hasMod = Boolean(ke.metaKey || ke.ctrlKey);
+  if (!hasMod || !ke.altKey || ke.shiftKey) return false;
+  const key = (ke.key ?? "").toLowerCase();
+  const code = ke.code;
+  const keyCode = ke.keyCode;
+  // On macOS Chromium, Option+P produces 'π'
+  return code === "KeyP" || key === "p" || ke.key === "π" || keyCode === 80;
+}
+
+export function navigateSidebarThreadRelative(options?: {
+  delta?: -1 | 1;
+  doc?: MinimalDocument | null;
+  win?: MinimalWindow | null;
+  callbacks?: Partial<DesktopRevealHelperCallbacks>;
+}): {
+  ok: boolean;
+  source: "native-shortcut" | "dom-click" | "not-handled";
+  targetTitle?: string;
+  targetWorkspaceId?: string;
+} {
+  const delta = options?.delta ?? 1;
+  const win = options?.win ?? getWebWindow();
+  const doc = options?.doc ?? win?.document;
+  const callbacks = options?.callbacks;
+  if (!doc) {
+    return { ok: false, source: "not-handled" };
+  }
+  const isMac = isMacPlatform(win ?? null);
+
+  // 1. Dispatch native KeyboardEvent for Cmd+[ (delta -1) or Cmd+] (delta +1)
+  const targetKey = delta < 0 ? "[" : "]";
+  const targetCode = delta < 0 ? "BracketLeft" : "BracketRight";
+  const targetKeyCode = delta < 0 ? 219 : 221;
+
+  let nativeHandled = false;
+  try {
+    if (win?.dispatchEvent) {
+      const Ctor =
+        win.KeyboardEvent ??
+        (globalThis as unknown as { KeyboardEvent?: typeof KeyboardEvent }).KeyboardEvent;
+      if (Ctor) {
+        const synthEvent = new Ctor("keydown", {
+          key: targetKey,
+          code: targetCode,
+          keyCode: targetKeyCode,
+          which: targetKeyCode,
+          metaKey: isMac,
+          ctrlKey: !isMac,
+          bubbles: true,
+          cancelable: true,
+        });
+        const dispatched = win.dispatchEvent(synthEvent);
+        if (
+          dispatched === false ||
+          (synthEvent as unknown as { defaultPrevented?: boolean }).defaultPrevented
+        ) {
+          nativeHandled = true;
+        }
+      }
+    }
+  } catch {
+    // Ignore and fallback to DOM
+  }
+
+  // 2. DOM-level fallback or synchronization:
+  const rawRows = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-row-"]');
+  const rows = rawRows ? Array.from(rawRows) : [];
+  if (rows.length > 0) {
+    const activeWsId = resolveCurrentActiveWorkspaceId(
+      doc,
+      win,
+      callbacks?.getFallbackWorkspaceId?.(),
+    );
+    let activeIdx = -1;
+    for (let i = 0; i < rows.length; i += 1) {
+      const r = rows[i];
+      if (!r) continue;
+      const tid = r.getAttribute?.("data-testid") ?? "";
+      const isSelected =
+        r.getAttribute?.("aria-selected") === "true" ||
+        r.getAttribute?.("data-selected") === "true";
+      if (
+        isSelected ||
+        (activeWsId &&
+          (tid.endsWith(`:${activeWsId}`) ||
+            tid === `sidebar-workspace-row-${activeWsId}`))
+      ) {
+        activeIdx = i;
+        break;
+      }
+    }
+
+    const nextIdx =
+      activeIdx >= 0
+        ? (activeIdx + delta + rows.length) % rows.length
+        : delta > 0
+          ? 0
+          : rows.length - 1;
+
+    const targetRow = rows[nextIdx];
+    if (targetRow) {
+      const targetTid = targetRow.getAttribute?.("data-testid") ?? "";
+      const parsedWs = parseSidebarWorkspaceRowTestId(targetTid);
+      const titleEl = findSidebarRowTitleElement(targetRow, parsedWs?.workspaceKey ?? "");
+      const targetTitle =
+        titleEl?.textContent?.trim() || parsedWs?.workspaceKey || undefined;
+
+      if (!nativeHandled) {
+        const anchor = targetRow.querySelector?.("a") ?? targetRow;
+        try {
+          if (typeof anchor.click === "function") {
+            anchor.click();
+          } else if (anchor.dispatchEvent && win) {
+            const MouseCtor =
+              (win as unknown as { MouseEvent?: typeof MouseEvent }).MouseEvent ??
+              (globalThis as unknown as { MouseEvent?: typeof MouseEvent }).MouseEvent;
+            if (MouseCtor) {
+              anchor.dispatchEvent(
+                new MouseCtor("click", { bubbles: true, cancelable: true }),
+              );
+            }
+          }
+        } catch {
+          // Ignore click error
+        }
+      }
+
+      flashAndScrollWorkspaceRow(targetRow, doc, win ?? null, true);
+
+      return {
+        ok: true,
+        source: nativeHandled ? "native-shortcut" : "dom-click",
+        targetTitle,
+        targetWorkspaceId: parsedWs?.workspaceKey,
+      };
+    }
+  }
+
+  return {
+    ok: nativeHandled,
+    source: nativeHandled ? "native-shortcut" : "not-handled",
+  };
+}
+
+export function toggleActiveWorkspacePin(options?: {
+  doc?: MinimalDocument | null;
+  win?: MinimalWindow | null;
+  callbacks?: Partial<DesktopRevealHelperCallbacks>;
+}): {
+  ok: boolean;
+  source: "native-shortcut" | "context-menu" | "not-handled";
+  message: string;
+} {
+  const win = options?.win ?? getWebWindow();
+  const doc = options?.doc ?? win?.document;
+  const callbacks = options?.callbacks;
+  if (!doc) {
+    return {
+      ok: false,
+      source: "not-handled",
+      message: "No document available to toggle workspace pin",
+    };
+  }
+  const isMac = isMacPlatform(win ?? null);
+
+  // 1. Dispatch native KeyboardEvent for Cmd+Shift+P (workspace.pin)
+  let nativeHandled = false;
+  try {
+    if (win?.dispatchEvent) {
+      const Ctor =
+        win.KeyboardEvent ??
+        (globalThis as unknown as { KeyboardEvent?: typeof KeyboardEvent }).KeyboardEvent;
+      if (Ctor) {
+        const synthEvent = new Ctor("keydown", {
+          key: "P",
+          code: "KeyP",
+          keyCode: 80,
+          which: 80,
+          metaKey: isMac,
+          ctrlKey: !isMac,
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        const dispatched = win.dispatchEvent(synthEvent);
+        if (
+          dispatched === false ||
+          (synthEvent as unknown as { defaultPrevented?: boolean }).defaultPrevented
+        ) {
+          nativeHandled = true;
+        }
+      }
+    }
+  } catch {
+    // Ignore and fallback to DOM
+  }
+
+  // 2. Fallback: if context menu is open with pin item
+  const pinMenuItem = doc.querySelector?.(
+    '[data-testid^="sidebar-workspace-menu-pin-"]',
+  );
+  if (pinMenuItem) {
+    try {
+      if (typeof pinMenuItem.click === "function") {
+        pinMenuItem.click();
+        return {
+          ok: true,
+          source: "context-menu",
+          message: "Toggled pin via context menu",
+        };
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  const activeWsId = resolveCurrentActiveWorkspaceId(
+    doc,
+    win,
+    callbacks?.getFallbackWorkspaceId?.(),
+  );
+  return {
+    ok: nativeHandled || Boolean(activeWsId),
+    source: nativeHandled ? "native-shortcut" : "not-handled",
+    message: nativeHandled
+      ? `Toggled workspace pin (${isMac ? "⌘⌥P" : "Ctrl+Alt+P"})`
+      : activeWsId
+        ? `Toggled pin for workspace ${activeWsId}`
+        : "Toggled workspace pin",
+  };
+}
+
 export function isSidebarDeleteKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
   if (!ke) return false;
   if (ke.metaKey || ke.ctrlKey || ke.altKey || ke.shiftKey) return false;
@@ -3104,7 +3404,7 @@ export function isInsideWorkspaceHeaderOrTab(el: MinimalElement | null): boolean
 export function hasOpenWorkspaceContextMenu(doc: MinimalDocument): boolean {
   return Boolean(
     doc.querySelector?.(
-      '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"], [data-testid^="sidebar-workspace-menu-archive-"], [data-testid^="sidebar-workspace-context-menu-"]',
+      '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"], [data-testid^="sidebar-workspace-menu-archive-"], [data-testid^="sidebar-workspace-menu-pin-"], [data-testid^="sidebar-workspace-context-menu-"]',
     ),
   );
 }
@@ -3134,7 +3434,8 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
   if (
     !prefs.enableDesktopContextMenuHelper &&
     !prefs.enableQuickRenameAndLabelShortcuts &&
-    !prefs.enableSidebarDeleteKeyArchive
+    !prefs.enableSidebarDeleteKeyArchive &&
+    prefs.enablePinWorkspaceShortcut === false
   ) {
     return 0;
   }
@@ -3147,6 +3448,7 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
       : (mac ? "⌘L" : "Ctrl+L");
   const renameShortcutText = "F2";
   const archiveShortcutText = mac ? "⌫" : "Del";
+  const pinShortcutText = mac ? "⌘⌥P" : "Ctrl+Alt+P";
 
   // 1. Labels trigger: [data-testid^="sidebar-workspace-menu-labels-"]
   const rawLabelItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-labels-"]');
@@ -3347,11 +3649,86 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
     }
   }
 
+  // 3.1. Pin item: [data-testid^="sidebar-workspace-menu-pin-"]
+  let pinItems: MinimalElement[] = [];
+  if (prefs.enablePinWorkspaceShortcut !== false) {
+    const rawPinItems = doc.querySelectorAll?.(
+      '[data-testid^="sidebar-workspace-menu-pin-"]',
+    );
+    pinItems = dedupeMenuContainers(rawPinItems ? Array.from(rawPinItems) : []);
+    for (const item of pinItems) {
+      if (!item) continue;
+
+      const existingBadges = item.querySelectorAll?.(
+        '[data-testid="sidebar-workspace-menu-pin-shortcut-hint"]',
+      );
+      if (existingBadges && existingBadges.length > 0) {
+        for (let b = 1; b < existingBadges.length; b += 1) {
+          existingBadges[b]?.remove?.();
+        }
+        const first = existingBadges[0];
+        if (first && first.textContent !== pinShortcutText) {
+          first.textContent = pinShortcutText;
+          annotatedCount += 1;
+        }
+        continue;
+      }
+
+      const parentBadge = item.parentElement?.querySelector?.(
+        '[data-testid="sidebar-workspace-menu-pin-shortcut-hint"]',
+      );
+      if (parentBadge) {
+        if (parentBadge.textContent !== pinShortcutText) {
+          parentBadge.textContent = pinShortcutText;
+          annotatedCount += 1;
+        }
+        continue;
+      }
+
+      item.setAttribute?.("data-paseo-shortcut-annotated", "true");
+
+      const badge = doc.createElement("span");
+      badge.textContent = pinShortcutText;
+      badge.setAttribute?.("data-testid", "sidebar-workspace-menu-pin-shortcut-hint");
+      if (badge.style) {
+        badge.style.marginLeft = "auto";
+        badge.style.marginRight = "4px";
+        badge.style.fontSize = "11px";
+        badge.style.lineHeight = "14px";
+        badge.style.padding = "1px 5px";
+        badge.style.borderRadius = "4px";
+        badge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
+        badge.style.color = "currentColor";
+        badge.style.opacity = "0.65";
+        badge.style.pointerEvents = "none";
+        badge.style.userSelect = "none";
+        badge.style.fontWeight = "400";
+        badge.style.letterSpacing = "0.02em";
+        badge.style.display = "inline-flex";
+        badge.style.alignItems = "center";
+      }
+
+      const children = item.children;
+      if (children && children.length > 1) {
+        const lastChild = children[children.length - 1];
+        if (item.insertBefore && lastChild) {
+          item.insertBefore(badge, lastChild);
+        } else {
+          item.appendChild?.(badge);
+        }
+      } else {
+        item.appendChild?.(badge);
+      }
+      annotatedCount += 1;
+    }
+  }
+
   // 4. Cadence Run item: [data-testid^="sidebar-workspace-menu-run-cadence-"]
   const allMenuRows = dedupeMenuContainers([
     ...renameItems,
     ...labelItems,
     ...archiveItems,
+    ...pinItems,
   ]);
   const processedMenus = new Set<MinimalElement>();
   for (const sampleMenuRow of allMenuRows) {
@@ -3362,7 +3739,7 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
 
     const testId = sampleMenuRow.getAttribute?.("data-testid") ?? "";
     const workspaceKey = testId
-      .replace(/^sidebar-workspace-menu-(?:rename|labels|archive)-/, "")
+      .replace(/^sidebar-workspace-menu-(?:rename|labels|archive|pin)-/, "")
       .trim();
     if (workspaceKey) {
       const parsed = parseSidebarWorkspaceRowTestId(
@@ -5855,6 +6232,54 @@ export function installDesktopRevealHelpers(
         ke.preventDefault();
         void callbacks.onOpenTarget(activeFile, "finder-reveal");
       }
+      return;
+    }
+    // Cmd+; (Previous thread) / Cmd+' (Next thread) across sidebar workspaces
+    if (
+      prefs.enableThreadNavigationShortcuts !== false &&
+      (isPreviousThreadKeyboardEvent(ke) || isNextThreadKeyboardEvent(ke)) &&
+      !isEditableInput(ke.target ?? null) &&
+      !isEditableInput(doc.activeElement ?? null) &&
+      !doc.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]') &&
+      !doc.querySelector?.('[data-testid*="command-center"]') &&
+      !doc.querySelector?.('[role="dialog"]')
+    ) {
+      ke.preventDefault();
+      ke.stopPropagation?.();
+      const delta: -1 | 1 = isPreviousThreadKeyboardEvent(ke) ? -1 : 1;
+      const res = navigateSidebarThreadRelative({
+        delta,
+        doc,
+        win,
+        callbacks,
+      });
+      if (res.targetTitle) {
+        showDropReceiptToast(
+          delta < 0
+            ? `Previous thread: ${res.targetTitle}`
+            : `Next thread: ${res.targetTitle}`,
+        );
+      }
+      return;
+    }
+    // Cmd+Option+P (Mac, ⌘⌥P) / Ctrl+Alt+P (non-Mac): Toggle pin/unpin on current workspace
+    if (
+      prefs.enablePinWorkspaceShortcut !== false &&
+      isPinWorkspaceKeyboardEvent(ke) &&
+      !isEditableInput(ke.target ?? null) &&
+      !isEditableInput(doc.activeElement ?? null) &&
+      !doc.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]') &&
+      !doc.querySelector?.('[data-testid*="command-center"]') &&
+      !doc.querySelector?.('[role="dialog"]')
+    ) {
+      ke.preventDefault();
+      ke.stopPropagation?.();
+      const res = toggleActiveWorkspacePin({
+        doc,
+        win,
+        callbacks,
+      });
+      showDropReceiptToast(res.message);
       return;
     }
     // F2 or Cmd+Shift+E triggers zero-popup inline rename (or falls back to Quick Bar if inline is disabled)

@@ -143,6 +143,7 @@ import {
   focusWorkspaceInApp,
   locateProjectInSidebar,
   mountInlineTitleInput,
+  navigateSidebarThreadRelative,
   openQuickWorkspaceSwitcherModal,
   resolveCurrentActiveWorkspaceId,
   resolveSidebarArchiveTarget,
@@ -151,6 +152,7 @@ import {
   syncInlineRenamePreferences,
   syncQuickJumpPreferences,
   syncSidebarDropPreferences,
+  toggleActiveWorkspacePin,
   toggleCurrentSessionDone,
   triggerQuickThreadMetadataBar,
 } from "./web";
@@ -185,6 +187,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [markDoneTestResult, setMarkDoneTestResult] = useState<string | null>(null);
   const [deleteArchiveTestResult, setDeleteArchiveTestResult] = useState<string | null>(null);
   const [labelsBarTestResult, setLabelsBarTestResult] = useState<string | null>(null);
+  const [threadNavTestResult, setThreadNavTestResult] = useState<string | null>(null);
+  const [pinWorkspaceTestResult, setPinWorkspaceTestResult] = useState<string | null>(null);
   const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
   const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
   const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
@@ -333,6 +337,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         inlineRenameCaretPosition: settings.values.inlineRenameCaretPosition,
         enableQuickRenameAndLabelShortcuts:
           settings.values.enableQuickRenameAndLabelShortcuts,
+        enableThreadNavigationShortcuts:
+          settings.values.enableThreadNavigationShortcuts ?? true,
+        enablePinWorkspaceShortcut:
+          settings.values.enablePinWorkspaceShortcut ?? true,
         enableMarkDoneShortcut: settings.values.enableMarkDoneShortcut,
         markDonePrefix: settings.values.markDonePrefix,
         enableDesktopContextMenuHelper: settings.values.enableDesktopContextMenuHelper,
@@ -969,6 +977,114 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                   setLabelsBarTestResult(res.message);
                   toast.show(res.message);
                 }
+              }}
+            />
+          )}
+
+          <SettingsSwitch
+            label={t("settings.threadNavigationShortcutsLabel")}
+            hint={t("settings.threadNavigationShortcutsHint")}
+            value={values.enableThreadNavigationShortcuts ?? true}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableThreadNavigationShortcuts: next,
+              });
+              void save({ ...values, enableThreadNavigationShortcuts: next }, revision);
+            }}
+          />
+
+          {(values.enableThreadNavigationShortcuts ?? true) && (
+            <>
+              <SettingsAction
+                label={
+                  isZh
+                    ? "测试跳转至上一会话 (Cmd+; / ⌘;)"
+                    : "Test jump to previous thread (Cmd+;)"
+                }
+                hint={
+                  threadNavTestResult
+                    ? threadNavTestResult
+                    : isZh
+                      ? "点击即刻测试在侧边栏向后切换至上一个会话，验证工作区激活、平滑滚动定位与高亮闪烁"
+                      : "Click to test jumping to the previous thread in the sidebar with auto-scroll and highlight"
+                }
+                actionLabel={t("settings.testThreadNavPrevBtn")}
+                onPress={() => {
+                  const res = navigateSidebarThreadRelative({ delta: -1 });
+                  const desc = res.ok
+                    ? `${isZh ? "已跳转至上一会话" : "Jumped to previous thread"}: ${res.targetTitle ?? res.targetWorkspaceId ?? "ok"} (${res.source})`
+                    : (isZh
+                        ? "未找到可跳转的侧边栏会话（请先在左侧边栏展开项目或选择工作区）"
+                        : "No thread located to jump to");
+                  setThreadNavTestResult(desc);
+                  toast.show(desc);
+                }}
+              />
+
+              <SettingsAction
+                label={
+                  isZh
+                    ? "测试跳转至下一会话 (Cmd+' / ⌘')"
+                    : "Test jump to next thread (Cmd+')"
+                }
+                hint={
+                  threadNavTestResult
+                    ? threadNavTestResult
+                    : isZh
+                      ? "点击即刻测试在侧边栏向前切换至下一个会话，验证工作区激活、平滑滚动定位与高亮闪烁"
+                      : "Click to test jumping to the next thread in the sidebar with auto-scroll and highlight"
+                }
+                actionLabel={t("settings.testThreadNavNextBtn")}
+                onPress={() => {
+                  const res = navigateSidebarThreadRelative({ delta: 1 });
+                  const desc = res.ok
+                    ? `${isZh ? "已跳转至下一会话" : "Jumped to next thread"}: ${res.targetTitle ?? res.targetWorkspaceId ?? "ok"} (${res.source})`
+                    : (isZh
+                        ? "未找到可跳转的侧边栏会话（请先在左侧边栏展开项目或选择工作区）"
+                        : "No thread located to jump to");
+                  setThreadNavTestResult(desc);
+                  toast.show(desc);
+                }}
+              />
+            </>
+          )}
+
+          <SettingsSwitch
+            label={t("settings.pinWorkspaceShortcutLabel")}
+            hint={t("settings.pinWorkspaceShortcutHint")}
+            value={values.enablePinWorkspaceShortcut ?? true}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enablePinWorkspaceShortcut: next,
+              });
+              void save({ ...values, enablePinWorkspaceShortcut: next }, revision);
+            }}
+          />
+
+          {(values.enablePinWorkspaceShortcut ?? true) && (
+            <SettingsAction
+              label={
+                isZh
+                  ? "测试置顶切换 (Cmd+Option+P / ⌘⌥P)"
+                  : "Test pin toggle (Cmd+Option+P / ⌘⌥P)"
+              }
+              hint={
+                pinWorkspaceTestResult
+                  ? pinWorkspaceTestResult
+                  : isZh
+                    ? "点击即刻测试为当前活跃工作区切换置顶状态，验证 workspace.pin 调度与上下文菜单 ⌘⌥P 提示"
+                    : "Click to test toggling pin on the active workspace and verify workspace.pin dispatch with ⌘⌥P hint"
+              }
+              actionLabel={t("settings.testPinWorkspaceBtn")}
+              onPress={() => {
+                const res = toggleActiveWorkspacePin();
+                const desc = res.ok
+                  ? `${isZh ? "已触发置顶切换" : "Toggled pin"}: ${res.message} (${res.source})`
+                  : (isZh
+                      ? "未定位到活跃工作区（请先打开或选择一个工作区）"
+                      : "No active workspace located");
+                setPinWorkspaceTestResult(desc);
+                toast.show(desc);
               }}
             />
           )}

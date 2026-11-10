@@ -1308,16 +1308,23 @@ export async function handleManageSessionLineage(
   const paseoDir = path.join(home, ".paseo");
 
   try {
-    // If explicit reconcile requested, run CLI reconciler first so labels + titles are synced
+    // If explicit reconcile requested: for background lineage-bar polling, trigger CLI reconciler non-blocking
+    // so the UI renders in <20ms; for Settings/explicit diagnostic calls, await the full CLI summary.
     let cliReconcileRaw: Record<string, unknown> | null = null;
     if (action === "reconcile") {
-      try {
-        const res = await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "reconcile", "--json"], {
+      if (input.source === "lineage-bar") {
+        void execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "reconcile", "--json"], {
           timeout: 25_000,
-        });
-        cliReconcileRaw = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
-      } catch {
-        // Continue with in-process inspection & title reconciliation
+        }).catch(() => {});
+      } else {
+        try {
+          const res = await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "reconcile", "--json"], {
+            timeout: 25_000,
+          });
+          cliReconcileRaw = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
+        } catch {
+          // Continue with in-process inspection & title reconciliation
+        }
       }
     }
 
@@ -1354,12 +1361,19 @@ export async function handleManageSessionLineage(
     // 2. Load Intake state.json for brief/report/Notion links
     const intakeByAgentId = new Map<string, IntakeTaskStateEntry>();
     const intakeByBriefStem = new Map<string, IntakeTaskStateEntry>();
+    const intakeByPageSuffix = new Map<string, IntakeTaskStateEntry>();
     try {
       const stateRaw = JSON.parse(
         await fs.readFile(path.join(paseoDir, "vec-intake", "state.json"), "utf8"),
       ) as { tasks?: Record<string, IntakeTaskStateEntry> };
       for (const [pageId, entry] of Object.entries(stateRaw.tasks ?? {})) {
-        const enriched: IntakeTaskStateEntry = { ...entry, page_id: entry.page_id ?? pageId };
+        const fullPageId = (entry.page_id ?? pageId).trim();
+        const enriched: IntakeTaskStateEntry = { ...entry, page_id: fullPageId };
+        const cleanHex = fullPageId.replace(/-/g, "").toLowerCase();
+        if (cleanHex.length >= 8) {
+          intakeByPageSuffix.set(cleanHex.slice(-8), enriched);
+          intakeByPageSuffix.set(cleanHex.slice(0, 8), enriched);
+        }
         if (entry.agent_id) {
           intakeByAgentId.set(entry.agent_id, enriched);
           intakeByAgentId.set(entry.agent_id.slice(0, 8), enriched);
@@ -1537,6 +1551,42 @@ export async function handleManageSessionLineage(
         const found = resolveAgentByIdOrPrefix(cleaned);
         if (found && found.id !== rec.id) return found;
       }
+
+      if (isIntakeOrRoutedAgent(rec)) {
+        // Fallback 1: check if another intake-routed session already points to a valid coordinator
+        for (const other of agentsById.values()) {
+          if (!other.id || other.id === rec.id) continue;
+          const otherOriginId = (other.labels?.["routed-by-agent-id"] ?? "").trim();
+          if (otherOriginId && otherOriginId !== "outside-paseo") {
+            const found = resolveAgentByIdOrPrefix(otherOriginId);
+            if (found && found.id !== rec.id) return found;
+          }
+        }
+        // Fallback 2: explicit Cowork intake coordinator if present
+        const preferred = agentsById.get("3e907bec-8da9-4d52-a28c-3fa4b4b121a5");
+        if (preferred && preferred.id !== rec.id && !preferred.archivedAt) {
+          return preferred;
+        }
+        // Fallback 3: most recent non-Intake root session in the same cwd/project
+        const recCwd = (rec.cwd ?? "").trim();
+        const sameProjectRoots = Array.from(agentsById.values()).filter(
+          (cand) =>
+            cand.id &&
+            cand.id !== rec.id &&
+            !cand.archivedAt &&
+            !isIntakeOrRoutedAgent(cand) &&
+            !isColleagueLabeledAgent(cand) &&
+            (recCwd ? (cand.cwd ?? "").trim() === recCwd : true),
+        );
+        if (sameProjectRoots.length > 0) {
+          sameProjectRoots.sort((a, b) =>
+            String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+              String(a.updatedAt ?? a.createdAt ?? ""),
+            ),
+          );
+          return sameProjectRoots[0];
+        }
+      }
       return null;
     };
 
@@ -1591,7 +1641,12 @@ export async function handleManageSessionLineage(
       const briefStem = (rec.labels?.brief ?? "").trim();
       const match = briefStem.match(/^intake-\d+-\d+-([0-9a-f]{8})-/i);
       if (match?.[1]) {
-        return match[1].toLowerCase();
+        const suffix = match[1].toLowerCase();
+        const suffixHit = intakeByPageSuffix.get(suffix);
+        if (suffixHit?.page_id) {
+          return suffixHit.page_id;
+        }
+        return suffix;
       }
       return null;
     };
@@ -1778,11 +1833,19 @@ export async function handleManageSessionLineage(
 
     // 5. Resolve target current agent
     let currentAgent: FullRawAgentRecord | null = null;
+    const targetWs = input.workspaceId
+      ? input.workspaceId.replace(/^[^:]+:/, "").trim()
+      : "";
     if (input.agentId && input.agentId.trim()) {
-      currentAgent = resolveAgentByIdOrPrefix(input.agentId.trim());
+      const candidate = resolveAgentByIdOrPrefix(input.agentId.trim());
+      if (
+        candidate &&
+        (!targetWs || !candidate.workspaceId || candidate.workspaceId === targetWs)
+      ) {
+        currentAgent = candidate;
+      }
     }
-    if (!currentAgent && input.workspaceId && input.workspaceId.trim()) {
-      const targetWs = input.workspaceId.trim();
+    if (!currentAgent && targetWs) {
       const wsAgents = [...(agentsByWorkspaceId.get(targetWs) ?? [])].sort((a, b) =>
         String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
       );

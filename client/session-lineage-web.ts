@@ -70,6 +70,67 @@ export function buildProviderSubagentTabTestId(
   return `workspace-tab-provider_subagent_${p.length}_${p}_${s.length}_${s}`;
 }
 
+export function isElementInVisibleBranch(
+  el: Element | null | undefined,
+  win?: Window | null,
+): boolean {
+  if (!el) return false;
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  const ownerBody = el.ownerDocument?.body as HTMLElement | null | undefined;
+  const bodyRects =
+    ownerBody && typeof ownerBody.getClientRects === "function"
+      ? ownerBody.getClientRects()
+      : null;
+  if (
+    bodyRects &&
+    bodyRects.length > 0 &&
+    typeof (el as HTMLElement).getClientRects === "function"
+  ) {
+    if ((el as HTMLElement).getClientRects().length === 0) {
+      return false;
+    }
+  }
+  let cur: Element | null = el;
+  while (cur && cur.nodeType === 1) {
+    const htmlEl = cur as HTMLElement;
+    if (
+      htmlEl.hidden ||
+      htmlEl.getAttribute?.("aria-hidden") === "true" ||
+      htmlEl.getAttribute?.("data-state") === "inactive" ||
+      htmlEl.style?.display === "none" ||
+      htmlEl.style?.visibility === "hidden" ||
+      htmlEl.classList?.contains?.("hidden")
+    ) {
+      return false;
+    }
+    if (typeof w?.getComputedStyle === "function") {
+      try {
+        const cs = w.getComputedStyle(htmlEl);
+        if (cs && (cs.display === "none" || cs.visibility === "hidden")) {
+          return false;
+        }
+      } catch {
+        // Ignore in synthetic test DOMs
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return true;
+}
+
+export function queryFirstVisible<T extends HTMLElement = HTMLElement>(
+  root: ParentNode | null | undefined,
+  selector: string,
+  win?: Window | null,
+): T | null {
+  if (!root || typeof root.querySelectorAll !== "function") {
+    return (root as Document | null)?.querySelector?.<T>(selector) ?? null;
+  }
+  const all = Array.from(root.querySelectorAll<T>(selector));
+  if (all.length === 0) return null;
+  return all.find((el) => isElementInVisibleBranch(el, win)) ?? null;
+}
+
 export function extractCurrentWorkspaceAndAgent(
   doc?: Document | null,
   win?: Window | null,
@@ -99,25 +160,33 @@ export function extractCurrentWorkspaceAndAgent(
         '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
       );
       const rawTestId = selectedRow?.getAttribute("data-testid") ?? "";
-      const stripped = rawTestId.replace(/^sidebar-workspace-row-(?:local:)?/, "").trim();
+      const stripped = rawTestId.replace(/^sidebar-workspace-row-(?:[^:]+:)?/, "").trim();
       if (stripped.startsWith("wks_")) {
         workspaceId = stripped;
       }
     }
 
-    const subagentTabs = Array.from(
+    const allSubagentTabs = Array.from(
       doc.querySelectorAll<HTMLElement>('[data-testid^="workspace-tab-provider_subagent_"]'),
     ).filter((el) => {
       const tid = el.getAttribute("data-testid") ?? "";
       return parseProviderSubagentTabTestId(tid) !== null;
     });
+    const visibleSubagentTabs = allSubagentTabs.filter((el) =>
+      isElementInVisibleBranch(el, win),
+    );
+    const subagentTabs =
+      visibleSubagentTabs.length > 0 ? visibleSubagentTabs : allSubagentTabs;
+    const hasVisibleSubPanel = Array.from(
+      doc.querySelectorAll<HTMLElement>('[data-testid="provider-subagent-panel"]'),
+    ).some((el) => isElementInVisibleBranch(el, win));
     const selectedSubagentTab =
       subagentTabs.find(
         (el) =>
           el.getAttribute("aria-selected") === "true" ||
           el.getAttribute("data-state") === "active",
       ) ??
-      (subagentTabs.length === 1 && doc.querySelector('[data-testid="provider-subagent-panel"]')
+      (subagentTabs.length === 1 && hasVisibleSubPanel
         ? subagentTabs[0]
         : null);
     if (selectedSubagentTab) {
@@ -133,7 +202,7 @@ export function extractCurrentWorkspaceAndAgent(
     }
 
     if (!agentId) {
-      const tabs = Array.from(
+      const allTabs = Array.from(
         doc.querySelectorAll<HTMLElement>('[data-testid^="workspace-tab-agent_"]'),
       ).filter((el) => {
         const tid = el.getAttribute("data-testid") ?? "";
@@ -145,6 +214,8 @@ export function extractCurrentWorkspaceAndAgent(
           !tid.startsWith("workspace-tab-close-")
         );
       });
+      const visibleTabs = allTabs.filter((el) => isElementInVisibleBranch(el, win));
+      const tabs = visibleTabs.length > 0 ? visibleTabs : allTabs;
       const selectedTab =
         tabs.find(
           (el) =>
@@ -161,7 +232,7 @@ export function extractCurrentWorkspaceAndAgent(
       }
     }
 
-    if ((!agentId || !activeSubagentId) && doc.querySelector('[data-testid="provider-subagent-panel"]')) {
+    if ((!agentId || !activeSubagentId) && hasVisibleSubPanel) {
       const focusedTarget = extractFocusedWorkspaceTabTarget(workspaceId, win);
       if (focusedTarget) {
         if (!agentId && focusedTarget.agentId) {
@@ -192,7 +263,8 @@ export interface SessionJumpBreadcrumb {
   atMs: number;
 }
 
-const BREADCRUMB_STORAGE_KEY = "paseo_finder_session_jump_breadcrumb_v1";
+const LEGACY_BREADCRUMB_STORAGE_KEY = "paseo_finder_session_jump_breadcrumb_v1";
+const BREADCRUMB_STORAGE_KEY = "paseo_finder_session_jump_breadcrumb_v2";
 const globalSessionDirectoryByAgentId = new Map<string, SessionLineageNode>();
 const globalSessionDirectoryByWorkspaceId = new Map<string, SessionLineageNode[]>();
 let jumpBreadcrumbStack: SessionJumpBreadcrumb[] = [];
@@ -772,6 +844,11 @@ export function resolveSessionReference(
 }
 
 function loadJumpBreadcrumbs(win?: Window | null): SessionJumpBreadcrumb[] {
+  try {
+    win?.sessionStorage?.removeItem?.(LEGACY_BREADCRUMB_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
   if (jumpBreadcrumbStack.length > 0) return jumpBreadcrumbStack;
   try {
     const raw = win?.sessionStorage?.getItem(BREADCRUMB_STORAGE_KEY);
@@ -825,13 +902,16 @@ export function getReturnBreadcrumbForSession(
   agentId: string | null | undefined,
   win?: Window | null,
 ): SessionLineageNode | null {
+  const cleanWsId = (workspaceId ?? "").replace(/^[^:]+:/, "").trim();
   const stack = loadJumpBreadcrumbs(win);
   for (let i = stack.length - 1; i >= 0; i -= 1) {
     const entry = stack[i];
     if (!entry) continue;
+    const entryToWs = (entry.toWorkspaceId ?? "").replace(/^[^:]+:/, "").trim();
+    const entryFromWs = (entry.from.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
     if (
       (agentId && entry.toAgentId === agentId) ||
-      (workspaceId && entry.toWorkspaceId === workspaceId && entry.from.workspaceId !== workspaceId)
+      (cleanWsId && entryToWs === cleanWsId && entryFromWs !== cleanWsId)
     ) {
       if (entry.from.agentId !== agentId) {
         return globalSessionDirectoryByAgentId.get(entry.from.agentId) ?? entry.from;
@@ -846,14 +926,15 @@ export function clearReturnBreadcrumbForSession(
   agentId: string | null | undefined,
   win?: Window | null,
 ): void {
+  const cleanWsId = (workspaceId ?? "").replace(/^[^:]+:/, "").trim();
   const stack = loadJumpBreadcrumbs(win);
-  jumpBreadcrumbStack = stack.filter(
-    (entry) =>
-      !(
-        (agentId && entry.toAgentId === agentId) ||
-        (workspaceId && entry.toWorkspaceId === workspaceId)
-      ),
-  );
+  jumpBreadcrumbStack = stack.filter((entry) => {
+    const entryToWs = (entry.toWorkspaceId ?? "").replace(/^[^:]+:/, "").trim();
+    return !(
+      (agentId && entry.toAgentId === agentId) ||
+      (cleanWsId && entryToWs === cleanWsId)
+    );
+  });
   saveJumpBreadcrumbs(win);
 }
 
@@ -928,7 +1009,7 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
             ...row,
             subtitle: nextSubtitle,
             run:
-              typeof origRun === "function"
+              typeof origRun === "function" && idHit
                 ? () => {
                     const cur = extractCurrentWorkspaceAndAgent(w?.document, w);
                     const fromNode =
@@ -1014,7 +1095,7 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
           let matchedAgentNode: SessionLineageNode | null = null;
 
           for (const tok of qTokens) {
-            if (tok.length < 3) continue;
+            if (tok.length < 4) continue;
             if (
               wsId.toLowerCase() === tok ||
               wsId.toLowerCase().replace(/^wks_/, "").startsWith(tok)
@@ -1025,8 +1106,7 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
             const agHit = wsAgents.find(
               (a) =>
                 a.agentId.toLowerCase().startsWith(tok) ||
-                (a.providerSessionId && a.providerSessionId.toLowerCase().startsWith(tok)) ||
-                a.agentTitle.toLowerCase().includes(tok),
+                (a.providerSessionId && a.providerSessionId.toLowerCase().startsWith(tok)),
             );
             if (agHit) {
               matchedAgentNode = agHit;
@@ -1246,7 +1326,7 @@ export function enhanceTimelineAgentMentions(
   };
 
   // 0. Wrap bare plain-text session IDs inside timeline message bubbles (e.g. "Paseo agent af81b8f0") into <code> so they become interactive pills
-  const timelineRoot = d.querySelector<HTMLElement>('[data-testid="agent-timeline"]');
+  const timelineRoot = queryFirstVisible<HTMLElement>(d, '[data-testid="agent-timeline"]', w);
   if (timelineRoot && typeof d.createTreeWalker === "function") {
     const walker = d.createTreeWalker(timelineRoot, 4 /* NodeFilter.SHOW_TEXT */);
     const textNodesToProcess: Text[] = [];
@@ -1314,7 +1394,16 @@ export function enhanceTimelineAgentMentions(
   }
 
   // 1. Upgrade inline <code> elements that reference a known Paseo agent ID / shortId / workspace ID
-  const codeEls = Array.from(d.querySelectorAll<HTMLElement>("code"));
+  // Strict visibility & message container scoping: never fall back to hidden/inactive screen elements when visibleCodeEls is empty.
+  const MESSAGE_CONTAINER_SELECTOR =
+    '[data-testid="assistant-message"], [data-testid^="assistant-message-"], [data-testid="user-message"], [data-testid^="user-message-"], [data-testid="agent-timeline"]';
+  const hasMessageContainers = Boolean(d.querySelector(MESSAGE_CONTAINER_SELECTOR));
+  const allCodeEls = Array.from(d.querySelectorAll<HTMLElement>("code"));
+  const codeEls = allCodeEls.filter(
+    (el) =>
+      isElementInVisibleBranch(el, w) &&
+      (!hasMessageContainers || Boolean(el.closest(MESSAGE_CONTAINER_SELECTOR))),
+  );
   for (const codeEl of codeEls) {
     if (codeEl.closest("pre")) continue;
     if (
@@ -1421,7 +1510,12 @@ export function enhanceTimelineAgentMentions(
   }
 
   // 2. Upgrade <a href="conversation://..."> or <a href="paseo://..."> links in chat messages
-  const anchorEls = Array.from(d.querySelectorAll<HTMLAnchorElement>("a[href]"));
+  const allAnchorEls = Array.from(d.querySelectorAll<HTMLAnchorElement>("a[href]"));
+  const anchorEls = allAnchorEls.filter(
+    (el) =>
+      isElementInVisibleBranch(el, w) &&
+      (!hasMessageContainers || Boolean(el.closest(MESSAGE_CONTAINER_SELECTOR))),
+  );
   for (const anchor of anchorEls) {
     const href = (anchor.getAttribute("href") ?? "").trim();
     if (
@@ -1471,95 +1565,277 @@ export function enhanceTimelineSentByButtons(
   const peerCandidates: SessionLineageNode[] = [
     ...(data.children ?? []),
     ...(data.parent ? [data.parent] : []),
+    ...(data.routedOrigin ? [data.routedOrigin] : []),
     ...(data.siblings ?? []),
   ].filter((n) => n.agentId && n.agentId !== currentId);
-  if (peerCandidates.length === 0) return 0;
 
   let healedCount = 0;
-  const buttons = Array.from(d.querySelectorAll<HTMLButtonElement>("button"));
-  for (const btn of buttons) {
-    const rawText = (btn.textContent ?? "").trim();
-    if (!rawText.startsWith("Sent by ") && !rawText.startsWith("发送自 ")) {
-      continue;
-    }
-
-    let cur = findReactFiber(btn);
-    let senderFiber: Record<string, any> | null = null;
-    for (let depth = 0; depth < 12 && cur; depth++, cur = cur.return) {
-      const p = cur.memoizedProps ?? cur.pendingProps;
-      if (p && typeof p === "object" && p.sender && typeof p.sender.id === "string") {
-        senderFiber = cur;
-        break;
+  if (peerCandidates.length > 0) {
+    const allButtons = Array.from(d.querySelectorAll<HTMLButtonElement>("button"));
+    const buttons = allButtons.filter((el) => isElementInVisibleBranch(el, w));
+    for (const btn of buttons) {
+      const rawText = (btn.textContent ?? "").trim();
+      if (!rawText.startsWith("Sent by ") && !rawText.startsWith("发送自 ")) {
+        continue;
       }
-    }
 
-    const senderObj =
-      (senderFiber?.memoizedProps?.sender ?? senderFiber?.pendingProps?.sender) as
-        | { id?: string; title?: string }
-        | undefined;
-    const isSelfSender =
-      (senderObj?.id && senderObj.id === currentId) ||
-      rawText === `Sent by ${data.current.agentTitle}` ||
-      rawText === `发送自 ${data.current.agentTitle}`;
+      let cur = findReactFiber(btn);
+      let senderFiber: Record<string, any> | null = null;
+      for (let depth = 0; depth < 12 && cur; depth++, cur = cur.return) {
+        const p = cur.memoizedProps ?? cur.pendingProps;
+        if (p && typeof p === "object" && p.sender && typeof p.sender.id === "string") {
+          senderFiber = cur;
+          break;
+        }
+      }
 
-    if (!isSelfSender) continue;
+      const senderObj =
+        (senderFiber?.memoizedProps?.sender ?? senderFiber?.pendingProps?.sender) as
+          | { id?: string; title?: string }
+          | undefined;
+      const isSelfSender =
+        (senderObj?.id && senderObj.id === currentId) ||
+        rawText === `Sent by ${data.current.agentTitle}` ||
+        rawText === `发送自 ${data.current.agentTitle}`;
 
-    const msgContainer =
-      btn.closest('[data-testid^="user-message-"]') ??
-      btn.parentElement?.parentElement ??
-      btn.parentElement;
-    const msgText = (msgContainer?.textContent ?? "").toLowerCase();
+      if (!isSelfSender) continue;
 
-    let matchedPeer =
-      peerCandidates.find((cand) => {
-        const stem = cand.briefPath
-          ? cand.briefPath.split("/").pop()?.replace(/\.md$/i, "").toLowerCase()
-          : "";
-        if (stem && msgText.includes(stem)) return true;
-        const titleTail = cand.agentTitle.split(":").pop()?.trim().toLowerCase() ?? "";
-        if (titleTail.length >= 6 && msgText.includes(titleTail)) return true;
-        return false;
-      }) ??
-      (peerCandidates.length === 1 ? peerCandidates[0] : null);
+      const msgContainer =
+        btn.closest('[data-testid^="user-message-"]') ??
+        btn.parentElement?.parentElement ??
+        btn.parentElement;
+      const msgText = (msgContainer?.textContent ?? "").toLowerCase();
 
-    if (!matchedPeer) continue;
+      const matchedPeer =
+        peerCandidates.find((cand) => {
+          const stem = cand.briefPath
+            ? cand.briefPath.split("/").pop()?.replace(/\.md$/i, "").toLowerCase()
+            : "";
+          if (stem && msgText.includes(stem)) return true;
+          const titleTail = cand.agentTitle.split(":").pop()?.trim().toLowerCase() ?? "";
+          if (titleTail.length >= 6 && msgText.includes(titleTail)) return true;
+          return false;
+        }) ??
+        (peerCandidates.length === 1 ? peerCandidates[0] : null);
 
-    if (senderFiber) {
-      for (const f of [senderFiber, senderFiber.alternate]) {
-        if (!f) continue;
-        for (const propBag of [f.memoizedProps, f.pendingProps]) {
-          if (propBag?.sender && typeof propBag.sender === "object") {
-            propBag.sender.id = matchedPeer.agentId;
-            propBag.sender.title = matchedPeer.agentTitle;
+      if (!matchedPeer) continue;
+
+      if (senderFiber) {
+        for (const f of [senderFiber, senderFiber.alternate]) {
+          if (!f) continue;
+          for (const propBag of [f.memoizedProps, f.pendingProps]) {
+            if (propBag?.sender && typeof propBag.sender === "object") {
+              propBag.sender.id = matchedPeer.agentId;
+              propBag.sender.title = matchedPeer.agentTitle;
+            }
           }
         }
       }
-    }
 
-    const prefix = rawText.startsWith("发送自 ") ? "发送自 " : "Sent by ";
-    for (const childNode of Array.from(btn.childNodes)) {
-      if (childNode.nodeType === 3 && (childNode.textContent ?? "").includes(prefix.trim())) {
-        childNode.textContent = `${prefix}${matchedPeer.agentTitle}`;
+      const prefix = rawText.startsWith("发送自 ") ? "发送自 " : "Sent by ";
+      for (const childNode of Array.from(btn.childNodes)) {
+        if (childNode.nodeType === 3 && (childNode.textContent ?? "").includes(prefix.trim())) {
+          childNode.textContent = `${prefix}${matchedPeer.agentTitle}`;
+        }
+      }
+      if ((btn.textContent ?? "").trim() === rawText) {
+        const spans = Array.from(btn.querySelectorAll("span"));
+        const targetSpan = spans[spans.length - 1];
+        if (targetSpan) {
+          targetSpan.textContent = `${prefix}${matchedPeer.agentTitle}`;
+        }
+      }
+
+      if (btn.getAttribute("data-vec-healed-sender") !== matchedPeer.agentId) {
+        btn.setAttribute("data-vec-healed-sender", matchedPeer.agentId);
+        const peerTarget = matchedPeer;
+        btn.addEventListener("click", () => {
+          setTimeout(() => {
+            navigateToLineageNode(peerTarget, d, w);
+          }, 30);
+        });
+      }
+      healedCount += 1;
+    }
+  }
+
+  // Step 2: For spawned sessions whose first user message says "From a session outside Paseo, via antigravity-ops peers spawn"
+  // (or "From agent <id>, via antigravity-ops peers spawn") without a native "Sent by" button, inject a clickable jump pill
+  // both inline on "a session outside Paseo" and in `[data-testid="user-message-trailing-row"]`.
+  const originTarget =
+    data.parent ??
+    data.routedOrigin ??
+    getReturnBreadcrumbForSession(data.current.workspaceId, data.current.agentId, w);
+  if (originTarget && originTarget.agentId && originTarget.agentId !== currentId) {
+    const tokens = syncPaseoThemeCssVariables(d as never, w as never);
+    const zh = isChineseLocale(w.navigator?.language);
+    const originIsUrl = /^https?:\/\//i.test((originTarget.agentTitle ?? "").trim());
+    const rawOriginTitle =
+      originIsUrl &&
+      originTarget.workspaceTitle &&
+      !/^https?:\/\//i.test(originTarget.workspaceTitle.trim())
+        ? originTarget.workspaceTitle
+        : originTarget.workspaceTitle || originTarget.agentTitle || originTarget.shortId;
+    const cleanOriginTitle = cleanSessionDisplayTitle(rawOriginTitle) || originTarget.shortId;
+    const shortOriginTitle =
+      cleanOriginTitle.length > 28 ? `${cleanOriginTitle.slice(0, 28)}\u2026` : cleanOriginTitle;
+    const isIntake = data.current.relationKind === "intake-routed" || !data.parent;
+
+    const allUserMessages = Array.from(
+      d.querySelectorAll<HTMLElement>('[data-testid="user-message"], [data-testid^="user-message-"]'),
+    ).filter((el) => {
+      const tid = el.getAttribute("data-testid") ?? "";
+      return tid !== "user-message-trailing-row" && tid !== "user-message-timestamp";
+    });
+    const userMessages = allUserMessages.filter((el) => isElementInVisibleBranch(el, w));
+
+    for (const msgEl of userMessages) {
+      const msgText = msgEl.textContent ?? "";
+      if (
+        !msgText.includes("peers spawn") &&
+        !msgText.includes("From a session outside Paseo") &&
+        !msgText.startsWith("From agent ")
+      ) {
+        continue;
+      }
+
+      // 2A. Upgrade literal "a session outside Paseo" text inside the bubble into an inline clickable session pill
+      if (
+        msgText.includes("a session outside Paseo") &&
+        !msgEl.querySelector('[data-testid="paseo-finder-inline-outside-origin-pill"]') &&
+        typeof d.createTreeWalker === "function"
+      ) {
+        const walker = d.createTreeWalker(msgEl, 4 /* NodeFilter.SHOW_TEXT */);
+        let curT = walker.nextNode();
+        while (curT) {
+          const val = curT.nodeValue ?? "";
+          const idx = val.indexOf("a session outside Paseo");
+          if (idx >= 0 && curT.parentNode) {
+            const frag = d.createDocumentFragment();
+            if (idx > 0) {
+              frag.appendChild(d.createTextNode(val.slice(0, idx)));
+            }
+            const pill = d.createElement("code");
+            pill.setAttribute("data-testid", "paseo-finder-inline-outside-origin-pill");
+            pill.setAttribute("role", "button");
+            pill.tabIndex = 0;
+            pill.title = zh
+              ? `点击返回来源会话: ${cleanOriginTitle} (#${originTarget.shortId})`
+              : `Click to jump back to origin session: ${cleanOriginTitle} (#${originTarget.shortId})`;
+            Object.assign(pill.style, {
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "5px",
+              padding: "1px 7px",
+              margin: "0 2px",
+              borderRadius: "5px",
+              border: `1px solid ${tokens.border}`,
+              backgroundColor: tokens.surface1,
+              color: tokens.foreground,
+              cursor: "pointer",
+              verticalAlign: "baseline",
+              fontFamily:
+                'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+              fontSize: "0.9em",
+              fontWeight: "500",
+            });
+            const dot = d.createElement("span");
+            Object.assign(dot.style, {
+              width: "5px",
+              height: "5px",
+              borderRadius: "999px",
+              backgroundColor:
+                originTarget.status === "running" ? tokens.statusWarning : tokens.statusSuccess,
+              flexShrink: "0",
+            });
+            const labelSpan = d.createElement("span");
+            labelSpan.textContent = `${shortOriginTitle} ↗`;
+            pill.appendChild(dot);
+            pill.appendChild(labelSpan);
+            const onJump = (ev: Event) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              navigateToLineageNode(originTarget, d, w, data.current);
+            };
+            pill.addEventListener("click", onJump);
+            pill.addEventListener("keydown", (ke: KeyboardEvent) => {
+              if (ke.key === "Enter" || ke.key === " ") onJump(ke);
+            });
+            frag.appendChild(pill);
+            const afterIdx = idx + "a session outside Paseo".length;
+            if (afterIdx < val.length) {
+              frag.appendChild(d.createTextNode(val.slice(afterIdx)));
+            }
+            curT.parentNode.replaceChild(frag, curT);
+            healedCount += 1;
+            break;
+          }
+          curT = walker.nextNode();
+        }
+      }
+
+      // 2B. Ensure `[data-testid="user-message-trailing-row"]` has a clickable "Routed from / Sent by" jump button
+      const trailingRow =
+        msgEl.querySelector<HTMLElement>('[data-testid="user-message-trailing-row"]') ??
+        msgEl.parentElement?.querySelector<HTMLElement>('[data-testid="user-message-trailing-row"]');
+      if (trailingRow) {
+        const hasExistingBtn = Array.from(trailingRow.querySelectorAll("button")).some((b) => {
+          const t = (b.textContent ?? "").trim();
+          return (
+            b.getAttribute("data-testid") === "paseo-finder-spawn-origin-btn" ||
+            t.startsWith("Sent by ") ||
+            t.startsWith("发送自 ") ||
+            t.startsWith("Routed from ") ||
+            t.startsWith("派发自 ")
+          );
+        });
+        if (!hasExistingBtn) {
+          const originBtn = d.createElement("button");
+          originBtn.type = "button";
+          originBtn.setAttribute("data-testid", "paseo-finder-spawn-origin-btn");
+          originBtn.title = zh
+            ? `点击返回来源会话: ${cleanOriginTitle} (#${originTarget.shortId})`
+            : `Click to jump back to origin session: ${cleanOriginTitle} (#${originTarget.shortId})`;
+          originBtn.textContent = isIntake
+            ? zh
+              ? `派发自 ${shortOriginTitle} ↗`
+              : `Routed from ${shortOriginTitle} ↗`
+            : zh
+              ? `发送自 ${shortOriginTitle} ↗`
+              : `Sent by ${shortOriginTitle} ↗`;
+          Object.assign(originBtn.style, {
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "4px",
+            padding: "1px 6px",
+            marginRight: "6px",
+            borderRadius: "999px",
+            border: `1px solid ${tokens.border}`,
+            backgroundColor: tokens.surface1,
+            color: tokens.foregroundMuted,
+            fontSize: "11px",
+            fontWeight: "500",
+            cursor: "pointer",
+            lineHeight: "1.3",
+          });
+          originBtn.addEventListener("pointerenter", () => {
+            originBtn.style.backgroundColor = tokens.surface2;
+            originBtn.style.color = tokens.foreground;
+          });
+          originBtn.addEventListener("pointerleave", () => {
+            originBtn.style.backgroundColor = tokens.surface1;
+            originBtn.style.color = tokens.foregroundMuted;
+          });
+          originBtn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            navigateToLineageNode(originTarget, d, w, data.current);
+          });
+          trailingRow.insertBefore(originBtn, trailingRow.firstChild);
+          healedCount += 1;
+        }
       }
     }
-    if ((btn.textContent ?? "").trim() === rawText) {
-      const spans = Array.from(btn.querySelectorAll("span"));
-      const targetSpan = spans[spans.length - 1];
-      if (targetSpan) {
-        targetSpan.textContent = `${prefix}${matchedPeer.agentTitle}`;
-      }
-    }
-
-    if (btn.getAttribute("data-vec-healed-sender") !== matchedPeer.agentId) {
-      btn.setAttribute("data-vec-healed-sender", matchedPeer.agentId);
-      const peerTarget = matchedPeer;
-      btn.addEventListener("click", () => {
-        setTimeout(() => {
-          navigateToLineageNode(peerTarget, d, w);
-        }, 30);
-      });
-    }
-    healedCount += 1;
   }
 
   return healedCount;
@@ -1597,6 +1873,7 @@ export function installDesktopSessionLineageEnhancer(
   >();
 
   let lastRouteKey = "";
+  let lastActiveSessionNode: SessionLineageNode | null = null;
   let activePopoverSection: "children" | "colleagues" | "refs" | null = null;
   let rafId: number | null = null;
   let pollId: ReturnType<typeof setInterval> | null = null;
@@ -1678,8 +1955,9 @@ export function installDesktopSessionLineageEnhancer(
       });
     }
     const data = await fetchLineage(workspaceId, agentId, true, "inspect");
-    if (data?.parent) {
-      return navigateToLineageNode(data.parent, document, window);
+    const jumpOrigin = data?.parent ?? data?.routedOrigin ?? null;
+    if (jumpOrigin) {
+      return navigateToLineageNode(jumpOrigin, document, window);
     }
     return false;
   };
@@ -1715,8 +1993,8 @@ export function installDesktopSessionLineageEnhancer(
     enhanceTimelineSentByButtons(data, document, window);
     const referencedPeers = enhanceTimelineAgentMentions(data, document, window);
 
-    const existing = document.querySelector<HTMLElement>(
-      '[data-testid="paseo-finder-session-lineage-bar"]',
+    const allExistingBars = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid="paseo-finder-session-lineage-bar"]'),
     );
     const hasParent = Boolean(data?.parent);
     const hasRoutedOrigin = Boolean(data?.routedOrigin);
@@ -1726,6 +2004,13 @@ export function installDesktopSessionLineageEnhancer(
     const current = data?.current ?? null;
     const { workspaceId: curWksId, agentId: curAgentId } =
       extractCurrentWorkspaceAndAgent(document, window);
+    if (current?.agentId && current?.workspaceId) {
+      // Track the currently rendered session, but NEVER passively call recordSessionJump here:
+      // a return breadcrumb (`↩ Back · ...`) is only recorded when the user explicitly clicks a
+      // cross-session link (inline mention pill, commit pill, lineage bar pill, or #id search),
+      // never when creating a new workspace or switching sessions in the sidebar.
+      lastActiveSessionNode = current;
+    }
     const returnBreadcrumb = getReturnBreadcrumbForSession(
       current?.workspaceId ?? curWksId,
       current?.agentId ?? curAgentId,
@@ -1786,20 +2071,30 @@ export function installDesktopSessionLineageEnhancer(
         !hasReturnOrPeerMentions &&
         !hasCadence)
     ) {
-      existing?.remove();
+      for (const b of allExistingBars) b.remove();
       return;
     }
 
-    const composer = document.querySelector<HTMLElement>(
+    const composer = queryFirstVisible<HTMLElement>(
+      document,
       '[data-testid="agent-composer"], [data-testid="message-input-root"]',
+      window,
     );
     const hostParent = composer?.parentElement ?? null;
     if (!hostParent || !composer) {
-      existing?.remove();
+      for (const b of allExistingBars) b.remove();
       return;
     }
 
     const displayLabelFor = (node: SessionLineageNode): string => {
+      const agentIsUrl = /^https?:\/\//i.test((node.agentTitle ?? "").trim());
+      if (
+        agentIsUrl &&
+        node.workspaceTitle &&
+        !/^https?:\/\//i.test(node.workspaceTitle.trim())
+      ) {
+        return cleanSessionDisplayTitle(node.workspaceTitle) || node.shortId;
+      }
       const raw =
         (node.workspaceId && node.workspaceId === current?.workspaceId) ||
         node.relationKind === "intake-routed" ||
@@ -1812,9 +2107,11 @@ export function installDesktopSessionLineageEnhancer(
     const zh = isZh();
     const tokens = syncPaseoThemeCssVariables(document as never, window as never);
 
-    let bar = existing;
+    let bar = allExistingBars.find((b) => b.parentElement === hostParent) ?? null;
+    for (const b of allExistingBars) {
+      if (b !== bar) b.remove();
+    }
     if (!bar || bar.parentElement !== hostParent) {
-      existing?.remove();
       bar = document.createElement("div");
       bar.setAttribute("data-testid", "paseo-finder-session-lineage-bar");
       hostParent.insertBefore(bar, composer);
@@ -2526,10 +2823,11 @@ export function installDesktopSessionLineageEnhancer(
         return;
       }
       const cached = cacheByKey.get(`${workspaceId ?? ""}:${agentId ?? ""}`)?.data;
-      if (cached?.parent) {
+      const jumpOrigin = cached?.parent ?? cached?.routedOrigin ?? null;
+      if (jumpOrigin) {
         ev.preventDefault();
         ev.stopPropagation();
-        navigateToLineageNode(cached.parent, document, window);
+        navigateToLineageNode(jumpOrigin, document, window);
       }
     }
   };

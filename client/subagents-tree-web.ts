@@ -18,6 +18,7 @@ import {
   navigateToLineageNode,
   openWorkspaceTargetTabViaStore,
   parseProviderSubagentTabTestId,
+  queryFirstVisible,
   resolveSessionReference,
 } from "./session-lineage-web";
 import {
@@ -3128,8 +3129,8 @@ export function installDesktopSubagentsTreeEnhancer(
 
     // 2. Penetrated Multi-Level Subagents Hierarchy Bar:
     // Mounts above `[data-testid="agent-composer"]` on Main Agent (L0) AND above `[data-testid="parent-agent-callout"]` inside Subagent 1 / Subagent 2!
-    const existingBar = document.querySelector<HTMLElement>(
-      '[data-testid="paseo-finder-subagents-bar"]',
+    const allExistingBars = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid="paseo-finder-subagents-bar"]'),
     );
     const hasSubagents = Boolean(
       scope.scopeKey &&
@@ -3141,24 +3142,32 @@ export function installDesktopSubagentsTreeEnhancer(
       !activeSub && tree && isAllSubagentsArchivedForTree(tree, window),
     );
     if (!hasSubagents || !tree || isArchivedDone) {
-      existingBar?.remove();
+      for (const b of allExistingBars) b.remove();
     } else {
-      const composer = document.querySelector<HTMLElement>(
+      const composer = queryFirstVisible<HTMLElement>(
+        document,
         '[data-testid="agent-composer"], [data-testid="message-input-root"]',
+        window,
       );
-      const calloutAnchor = document.querySelector<HTMLElement>(
+      const calloutAnchor = queryFirstVisible<HTMLElement>(
+        document,
         '[data-testid="parent-agent-callout"]',
+        window,
       );
-      const subPanel = document.querySelector<HTMLElement>(
+      const subPanel = queryFirstVisible<HTMLElement>(
+        document,
         '[data-testid="provider-subagent-panel"]',
+        window,
       );
       const anchorEl = composer ?? calloutAnchor ?? null;
       const hostParent = anchorEl?.parentElement ?? subPanel ?? null;
 
       if (hostParent) {
-        let bar = existingBar;
+        let bar = allExistingBars.find((b) => b.parentElement === hostParent) ?? null;
+        for (const b of allExistingBars) {
+          if (b !== bar) b.remove();
+        }
         if (!bar || bar.parentElement !== hostParent) {
-          existingBar?.remove();
           bar = document.createElement("div");
           bar.setAttribute("data-testid", "paseo-finder-subagents-bar");
           if (anchorEl && anchorEl.parentElement === hostParent) {

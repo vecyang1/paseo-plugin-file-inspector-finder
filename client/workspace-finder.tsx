@@ -67,6 +67,10 @@ function FinderBrowserView({
           settingsState.values.enableInlineDoubleClickRename,
         enableQuickRenameAndLabelShortcuts:
           settingsState.values.enableQuickRenameAndLabelShortcuts,
+        enableThreadNavigationShortcuts:
+          settingsState.values.enableThreadNavigationShortcuts,
+        enablePinWorkspaceShortcut:
+          settingsState.values.enablePinWorkspaceShortcut,
         enableDesktopContextMenuHelper:
           settingsState.values.enableDesktopContextMenuHelper,
         enableSidebarDeleteKeyArchive:
