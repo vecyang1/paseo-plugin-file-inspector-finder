@@ -1325,3 +1325,44 @@ export const managePeerAgentsRpc = defineRpc({
     durationMs: z.number(),
   }),
 });
+
+export const SystemPromptSectionSchema = z.object({
+  title: z.string(),
+  charCount: z.number(),
+  preview: z.string(),
+});
+
+export type SystemPromptSection = z.infer<typeof SystemPromptSectionSchema>;
+
+export const inspectSystemPromptRpc = defineRpc({
+  name: "finder.inspect_system_prompt",
+  input: z.object({
+    action: z.enum(["inspect", "test_clean"]).default("inspect"),
+    testInput: z.string().optional(),
+    workspaceId: z.string().optional(),
+    agentId: z.string().optional(),
+    cwd: z.string().optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    configPath: z.string(),
+    mtime: z.string().nullable().optional(),
+    appendSystemPrompt: z.string(),
+    systemPrompt: z.string(),
+    charCount: z.number(),
+    lineCount: z.number(),
+    estimatedTokens: z.number(),
+    sections: z.array(SystemPromptSectionSchema),
+    cleanedPreview: z.string().optional(),
+    testResult: z
+      .object({
+        inputChars: z.number(),
+        cleanedText: z.string(),
+        cleanedChars: z.number(),
+        strippedPrefix: z.boolean(),
+      })
+      .optional(),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});

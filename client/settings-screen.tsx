@@ -43,6 +43,7 @@ import {
   quickJumpWorkspaceRpc,
   reconcilePaseoRecoveryRpc,
   renameWorkspaceOrAgentRpc,
+  inspectSystemPromptRpc,
 } from "../shared/contracts";
 import { isChineseLocale, pluginTranslations } from "./i18n";
 import { MermaidSettingsSection } from "./mermaid-settings-section";
@@ -176,6 +177,16 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const manageWritebackHook = useRpc(manageWritebackHookRpc);
   const reconcilePaseoRecovery = useRpc(reconcilePaseoRecoveryRpc);
   const managePeerAgents = useRpc(managePeerAgentsRpc);
+  const inspectSystemPrompt = useRpc(inspectSystemPromptRpc);
+  const [systemPromptSnap, setSystemPromptSnap] = useState<
+    Awaited<ReturnType<typeof inspectSystemPrompt>> | null
+  >(null);
+  const [testCleanInput, setTestCleanInput] = useState("");
+  const [testCleanResult, setTestCleanResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    void inspectSystemPrompt({ action: "inspect" }).then(setSystemPromptSnap).catch(() => {});
+  }, []);
   const isZh = isChineseLocale(
     typeof navigator !== "undefined" ? navigator.language : undefined,
   );
@@ -3937,6 +3948,106 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               <Text style={styles.detail}>
                 • {isZh ? "一键跨模型评审命令" : "1-Command Cross-Model Review"}:{" "}
                 {peerAgentsSnapData.resolvedPreview.sampleReviewCommand}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "系统起始提示词与全局环境指令对账 (System Starter Prompt & Instructions)"
+            : "System Starter Prompt & Instructions Inspector"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.detail}>
+            • {isZh ? "配置文件路径 (能读)" : "Config Path (Read)"}:{" "}
+            {systemPromptSnap?.configPath ?? "~/.paseo/config.json"} (
+            {systemPromptSnap?.charCount ?? 0} {isZh ? "字符" : "chars"} · ~
+            {systemPromptSnap?.estimatedTokens ?? 0} tokens ·{" "}
+            {systemPromptSnap?.sections.length ?? 0} {isZh ? "个规则分区" : "sections"})
+          </Text>
+          <Text style={styles.detail}>
+            • {isZh ? "最近保存时间" : "Last Saved"}:{" "}
+            {systemPromptSnap?.mtime ? new Date(systemPromptSnap.mtime).toLocaleString() : "unknown"}
+          </Text>
+          <Text style={styles.detail}>
+            • {isZh ? "规则模块概览" : "Rule Sections"}:{" "}
+            {(systemPromptSnap?.sections ?? [])
+              .map((s) => `${s.title} (${s.charCount}c)`)
+              .join(" · ") || (isZh ? "无" : "none")}
+          </Text>
+
+          <View style={styles.row}>
+            <View style={{ flex: 1, minWidth: 260 }}>
+              <TextInput
+                placeholder={
+                  isZh
+                    ? "输入模拟转录本文本测试 cleanPromptText 气泡清洗..."
+                    : "Enter transcript text to test cleanPromptText sanitization..."
+                }
+                value={testCleanInput}
+                onChangeText={setTestCleanInput}
+              />
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void inspectSystemPrompt({
+                  action: "test_clean",
+                  testInput:
+                    testCleanInput ||
+                    "<system starter prompt in paseo>\n\nhttps://example.com/task",
+                }).then((res) => {
+                  setSystemPromptSnap(res);
+                  if (res.testResult) {
+                    setTestCleanResult(
+                      `[${res.testResult.strippedPrefix ? "STRIPPED" : "UNCHANGED"}] ${res.testResult.inputChars}c -> ${res.testResult.cleanedChars}c: ${res.testResult.cleanedText}`,
+                    );
+                  }
+                  toast.show(res.message);
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "能试 (测试清洗)" : "Test Sanitization"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                if (systemPromptSnap?.configPath) {
+                  void openTarget({
+                    path: systemPromptSnap.configPath,
+                    target: "system-default",
+                  });
+                }
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "能调 (打开配置文件)" : "Edit in Editor"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {testCleanResult ? (
+            <View style={{ gap: 4, marginTop: 6 }}>
+              <Text style={styles.detail}>• {isZh ? "清洗测试结果" : "Sanitization Result"}:</Text>
+              <Text style={{ fontSize: 11, fontFamily: "monospace", color: "#16a34a", marginTop: 4 }}>
+                {testCleanResult}
+              </Text>
+            </View>
+          ) : null}
+
+          {systemPromptSnap?.appendSystemPrompt ? (
+            <View style={{ marginTop: 8, padding: 8, backgroundColor: "rgba(0,0,0,0.03)", borderRadius: 6 }}>
+              <Text style={{ fontSize: 11, fontFamily: "monospace", color: "var(--color-text-secondary, #656d76)", maxHeight: 120, overflow: "hidden" }}>
+                {systemPromptSnap.appendSystemPrompt.slice(0, 400)}
+                {systemPromptSnap.appendSystemPrompt.length > 400 ? "..." : ""}
               </Text>
             </View>
           ) : null}

@@ -4,6 +4,7 @@ import {
   type SessionLineageNode,
   manageSessionLineageRpc,
   openFileTargetRpc,
+  inspectSystemPromptRpc,
 } from "../shared/contracts";
 import { isChineseLocale } from "./i18n";
 import { syncPaseoThemeCssVariables } from "./theme-web";
@@ -15,7 +16,12 @@ import {
 } from "./schedule-runs-web";
 
 export interface SessionLineageWebClient {
-  call<TDef extends typeof manageSessionLineageRpc | typeof openFileTargetRpc>(
+  call<
+    TDef extends
+      | typeof manageSessionLineageRpc
+      | typeof openFileTargetRpc
+      | typeof inspectSystemPromptRpc,
+  >(
     def: TDef,
     input: RpcInput<TDef>,
   ): Promise<RpcOutput<TDef>>;
@@ -2000,6 +2006,246 @@ export async function triggerReconcileSidebarWorkspaceTitles(): Promise<LineageR
   return externalReconcileTitlesFn();
 }
 
+export function openSystemPromptViewer(
+  client: SessionLineageWebClient,
+  doc: Document,
+  win: Window,
+  zh: boolean,
+) {
+  const existingModal = doc.getElementById("paseo-finder-system-prompt-modal-root");
+  if (existingModal) {
+    existingModal.remove();
+    return;
+  }
+
+  const root = doc.createElement("div");
+  root.id = "paseo-finder-system-prompt-modal-root";
+  root.setAttribute("data-testid", "paseo-finder-system-prompt-modal-root");
+  Object.assign(root.style, {
+    position: "fixed",
+    inset: "0",
+    zIndex: "99999",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+    backdropFilter: "blur(2px)",
+    padding: "20px",
+  });
+
+  const dialog = doc.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("data-testid", "paseo-finder-system-prompt-modal");
+  Object.assign(dialog.style, {
+    backgroundColor: "var(--color-background-primary, #ffffff)",
+    color: "var(--color-text-primary, #1f2328)",
+    border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.25))",
+    borderRadius: "10px",
+    boxShadow: "0 12px 32px rgba(0, 0, 0, 0.2)",
+    width: "100%",
+    maxWidth: "760px",
+    maxHeight: "85vh",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+  });
+
+  const header = doc.createElement("div");
+  Object.assign(header.style, {
+    padding: "14px 18px",
+    borderBottom: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.2))",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  });
+
+  const titleBox = doc.createElement("div");
+  const title = doc.createElement("div");
+  title.style.fontWeight = "600";
+  title.style.fontSize = "15px";
+  title.textContent = zh
+    ? "⚡ 系统起始提示词与全局环境指令"
+    : "⚡ Active System Starter Prompt & Instructions";
+
+  const subtitle = doc.createElement("div");
+  subtitle.style.fontSize = "12px";
+  subtitle.style.color = "var(--color-text-secondary, #656d76)";
+  subtitle.style.marginTop = "2px";
+  subtitle.textContent = zh ? "加载中..." : "Loading configuration...";
+
+  titleBox.appendChild(title);
+  titleBox.appendChild(subtitle);
+  header.appendChild(titleBox);
+
+  const closeBtn = doc.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.textContent = "×";
+  closeBtn.setAttribute("data-testid", "paseo-finder-system-prompt-close");
+  Object.assign(closeBtn.style, {
+    border: "none",
+    background: "transparent",
+    fontSize: "20px",
+    cursor: "pointer",
+    padding: "0 6px",
+    color: "var(--color-text-secondary, #656d76)",
+    lineHeight: "1",
+  });
+  closeBtn.addEventListener("click", () => root.remove());
+  header.appendChild(closeBtn);
+  dialog.appendChild(header);
+
+  const body = doc.createElement("div");
+  Object.assign(body.style, {
+    padding: "16px 18px",
+    overflowY: "auto",
+    flex: "1",
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+  });
+
+  const loading = doc.createElement("div");
+  loading.textContent = zh
+    ? "正在从 ~/.paseo/config.json 读取配置..."
+    : "Reading from ~/.paseo/config.json...";
+  loading.style.fontSize = "13px";
+  loading.style.color = "var(--color-text-secondary, #656d76)";
+  body.appendChild(loading);
+  dialog.appendChild(body);
+
+  const footer = doc.createElement("div");
+  Object.assign(footer.style, {
+    padding: "12px 18px",
+    borderTop: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.2))",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "var(--color-background-secondary, rgba(0, 0, 0, 0.02))",
+  });
+
+  const footerLeft = doc.createElement("div");
+  footerLeft.style.fontSize = "12px";
+  footerLeft.style.color = "var(--color-text-secondary, #656d76)";
+
+  const footerRight = doc.createElement("div");
+  footerRight.style.display = "flex";
+  footerRight.style.gap = "8px";
+
+  footer.appendChild(footerLeft);
+  footer.appendChild(footerRight);
+  dialog.appendChild(footer);
+
+  root.appendChild(dialog);
+  root.addEventListener("click", (e) => {
+    if (e.target === root) root.remove();
+  });
+  doc.body.appendChild(root);
+
+  void client
+    .call(inspectSystemPromptRpc, { action: "inspect" })
+    .then((res) => {
+      loading.remove();
+      subtitle.textContent = `${res.configPath} · ${res.charCount} chars · ~${res.estimatedTokens} tokens · ${res.sections.length} sections`;
+      footerLeft.textContent = res.mtime
+        ? `${zh ? "修改时间" : "Updated"}: ${new Date(res.mtime).toLocaleString()}`
+        : "";
+
+      if (res.sections.length > 0) {
+        const sectionsBar = doc.createElement("div");
+        Object.assign(sectionsBar.style, {
+          display: "flex",
+          gap: "6px",
+          flexWrap: "wrap",
+        });
+        for (const sec of res.sections) {
+          const tag = doc.createElement("span");
+          Object.assign(tag.style, {
+            fontSize: "11px",
+            padding: "2px 8px",
+            borderRadius: "10px",
+            backgroundColor: "rgba(128, 128, 128, 0.12)",
+            color: "var(--color-text-secondary, #57606a)",
+          });
+          tag.textContent = `${sec.title} (${sec.charCount}c)`;
+          sectionsBar.appendChild(tag);
+        }
+        body.appendChild(sectionsBar);
+      }
+
+      const pre = doc.createElement("pre");
+      Object.assign(pre.style, {
+        margin: "0",
+        padding: "12px",
+        borderRadius: "6px",
+        backgroundColor: "var(--color-background-code, rgba(0, 0, 0, 0.04))",
+        color: "var(--color-text-code, inherit)",
+        fontSize: "12px",
+        lineHeight: "1.5",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        fontFamily:
+          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.15))",
+        maxHeight: "45vh",
+        overflowY: "auto",
+        userSelect: "text",
+      });
+      pre.textContent =
+        res.appendSystemPrompt ||
+        res.systemPrompt ||
+        (zh ? "(空提示词)" : "(Empty prompt)");
+      body.appendChild(pre);
+
+      const copyBtn = doc.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.textContent = zh ? "复制内容" : "Copy Content";
+      Object.assign(copyBtn.style, {
+        padding: "6px 12px",
+        borderRadius: "6px",
+        border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.3))",
+        backgroundColor: "var(--color-background-primary, #ffffff)",
+        cursor: "pointer",
+        fontSize: "12px",
+        fontWeight: "500",
+      });
+      copyBtn.addEventListener("click", () => {
+        void win.navigator.clipboard
+          .writeText(res.appendSystemPrompt || res.systemPrompt)
+          .then(() => {
+            copyBtn.textContent = zh ? "已复制!" : "Copied!";
+            setTimeout(() => {
+              copyBtn.textContent = zh ? "复制内容" : "Copy Content";
+            }, 1500);
+          });
+      });
+      footerRight.appendChild(copyBtn);
+
+      const openBtn = doc.createElement("button");
+      openBtn.type = "button";
+      openBtn.textContent = zh ? "在编辑器打开" : "Open in Editor";
+      Object.assign(openBtn.style, {
+        padding: "6px 12px",
+        borderRadius: "6px",
+        border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.3))",
+        backgroundColor: "var(--color-background-primary, #ffffff)",
+        cursor: "pointer",
+        fontSize: "12px",
+        fontWeight: "500",
+      });
+      openBtn.addEventListener("click", () => {
+        void client.call(openFileTargetRpc, {
+          path: res.configPath,
+          target: "system-default",
+        });
+      });
+      footerRight.appendChild(openBtn);
+    })
+    .catch((err) => {
+      loading.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    });
+}
+
 export function installDesktopSessionLineageEnhancer(
   client: SessionLineageWebClient,
 ): () => void {
@@ -2781,6 +3027,21 @@ export function installDesktopSessionLineageEnhancer(
       notionLink.style.textDecoration = "none";
       rightGroup.appendChild(notionLink);
     }
+
+    const promptBtn = document.createElement("button");
+    promptBtn.type = "button";
+    promptBtn.setAttribute("data-testid", "paseo-finder-lineage-system-prompt-btn");
+    promptBtn.textContent = zh ? "⚡ 提示词" : "⚡ Prompt";
+    promptBtn.title = zh
+      ? "查看当前生效的系统起始提示词与全局环境指令 (~/.paseo/config.json)"
+      : "Inspect active system starter prompt & daemon instructions (~/.paseo/config.json)";
+    styleTrackPill(promptBtn);
+    promptBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openSystemPromptViewer(client, document, window, zh);
+    });
+    rightGroup.appendChild(promptBtn);
 
     topRow.appendChild(leftGroup);
     if (rightGroup.childElementCount > 0) {

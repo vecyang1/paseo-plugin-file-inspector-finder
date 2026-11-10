@@ -26,8 +26,10 @@ import {
   manageWritebackHookRpc,
   reconcilePaseoRecoveryRpc,
   forkSessionRpc,
+  inspectSystemPromptRpc,
 } from "./shared/contracts";
 import { handleForkSession } from "./server/fork-session-handlers";
+import { handleInspectSystemPrompt } from "./server/system-prompt-handlers";
 import {
   handleArchiveWorkspace,
   handleDiagnosePath,
@@ -101,6 +103,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(managePeerAgentsRpc, handleManagePeerAgents);
   server.handle(forkSessionRpc, handleForkSession);
   server.handle(resolveCommitOriginRpc, (input) => handleResolveCommitOrigin(input));
+  server.handle(inspectSystemPromptRpc, handleInspectSystemPrompt);
 
   // Same resolver as the inline commit pill (client/commit-origin-web.ts).
   const commitOriginTool = defineAgentTool({
@@ -797,6 +800,26 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const inspectSystemPromptTool = defineAgentTool({
+    name: "inspect_system_prompt",
+    title: "Inspect Active Paseo System Starter Prompt & Instructions",
+    description:
+      "Inspect the active Paseo system starter prompt and daemon appendSystemPrompt configured in ~/.paseo/config.json. " +
+      "Returns the full instruction content, character count, rule sections, and test clean simulation.",
+    input: z.object({
+      action: z.enum(["inspect", "test_clean"]).default("inspect"),
+      testInput: z.string().optional(),
+    }),
+    async execute(input) {
+      const result = await handleInspectSystemPrompt(input as never);
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -825,6 +848,7 @@ export default function contribute(server: PluginServerContext) {
         forkSessionTool,
         linkRetitleTool,
         commitOriginTool,
+        inspectSystemPromptTool,
       ],
     };
   });
