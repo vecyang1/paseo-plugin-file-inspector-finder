@@ -721,10 +721,20 @@ export async function handleInspectScheduleRuns(
   for (const active of activeAgents) {
     const s = summaries.find((x) => x.id === active.scheduleId);
     if (s) {
-      s.runningRuns = Math.max(1, (s.runningRuns ?? 0) + 1);
-      s.lastRunStatus = "running";
-      runningRuns += 1;
       const cleanWid = active.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim();
+      const existingMatchingRun = (s.runs ?? []).find(
+        (r) =>
+          r.agentId === active.agentId ||
+          (cleanWid && r.workspaceId?.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanWid),
+      );
+      const wasAlreadyCountedRunning = existingMatchingRun?.status === "running";
+
+      if (!wasAlreadyCountedRunning) {
+        s.runningRuns = (s.runningRuns ?? 0) + 1;
+        runningRuns += 1;
+      }
+      s.lastRunStatus = "running";
+
       if (cleanWid) {
         workspaceScheduleMap[cleanWid] = {
           scheduleId: s.id,
@@ -733,10 +743,7 @@ export async function handleInspectScheduleRuns(
           runStatus: "running",
         };
       }
-      const hasExistingRun = (s.runs ?? []).some(
-        (r) => r.agentId === active.agentId || (cleanWid && r.workspaceId?.includes(cleanWid)),
-      );
-      if (!hasExistingRun) {
+      if (!existingMatchingRun) {
         const inFlightRun: ScheduleRunEntry = {
           id: `in-flight-${active.agentId}`,
           scheduleId: s.id,
@@ -756,6 +763,8 @@ export async function handleInspectScheduleRuns(
           error: null,
         };
         s.runs = [inFlightRun, ...(s.runs ?? [])];
+        s.totalRuns = (s.totalRuns ?? 0) + 1;
+        totalRuns += 1;
         allRecentRuns.unshift(inFlightRun);
       }
     }

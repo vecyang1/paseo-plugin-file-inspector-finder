@@ -15,13 +15,24 @@ import {
   parseSidebarWorkspaceRowTestId,
   type MinimalElement,
 } from "./web";
-import { getMetroModuleMap, type MetroWindow } from "./metro-registry";
+import {
+  getMetroModuleMap,
+  requireMetroExport,
+  type MetroWindow,
+} from "./metro-registry";
+
+const sessionStoreCache = new WeakMap<
+  object,
+  { getState?: () => { sessions?: Record<string, unknown> } }
+>();
 
 function findSessionStore(
   win?: Window | null,
 ): { getState?: () => { sessions?: Record<string, unknown> } } | null {
   const w = win ?? (typeof window !== "undefined" ? window : null);
   if (!w) return null;
+  const cached = sessionStoreCache.get(w as object);
+  if (cached) return cached;
 
   // 1. Live Metro module registry in Paseo production Electron window
   try {
@@ -30,12 +41,27 @@ function findSessionStore(
       for (const m of metroMap.values()) {
         const store = m?.isInitialized ? m.publicModule?.exports?.useSessionStore : null;
         if (store && typeof (store as { getState?: unknown }).getState === "function") {
-          return store as { getState: () => { sessions?: Record<string, unknown> } };
+          const typedStore = store as { getState: () => { sessions?: Record<string, unknown> } };
+          sessionStoreCache.set(w as object, typedStore);
+          return typedStore;
         }
       }
     }
   } catch {
     // Fallback if metro-registry lookup throws
+  }
+
+  // 2. Safe requireMetroExport factory lookup (supports uninitialized modules)
+  try {
+    const hit = requireMetroExport("useSessionStore", w as unknown as MetroWindow);
+    const store = hit?.exports?.useSessionStore;
+    if (store && typeof (store as { getState?: unknown }).getState === "function") {
+      const typedStore = store as { getState: () => { sessions?: Record<string, unknown> } };
+      sessionStoreCache.set(w as object, typedStore);
+      return typedStore;
+    }
+  } catch {
+    // Ignore require error
   }
 
   // 2. Fallback to __r.getModules or __metroModules (mocked / dev environments)
@@ -570,11 +596,22 @@ export function findCadenceScheduleForWorkspace(
       const sessions = sessionStore.getState()?.sessions ?? {};
       for (const session of Object.values(sessions)) {
         const rawAgents = (session as Record<string, unknown> | undefined)?.agents;
-        const agents = rawAgents
-          ? rawAgents instanceof Map
-            ? Array.from(rawAgents.values())
-            : Object.values(rawAgents)
-          : [];
+        const rawDetails = (session as Record<string, unknown> | undefined)?.agentDetails;
+        const agents: Array<Record<string, unknown>> = [];
+        if (rawAgents) {
+          if (rawAgents instanceof Map) {
+            agents.push(...(rawAgents.values() as Iterable<Record<string, unknown>>));
+          } else if (typeof rawAgents === "object") {
+            agents.push(...(Object.values(rawAgents) as Array<Record<string, unknown>>));
+          }
+        }
+        if (rawDetails) {
+          if (rawDetails instanceof Map) {
+            agents.push(...(rawDetails.values() as Iterable<Record<string, unknown>>));
+          } else if (typeof rawDetails === "object") {
+            agents.push(...(Object.values(rawDetails) as Array<Record<string, unknown>>));
+          }
+        }
         for (const a of agents as Array<Record<string, unknown>>) {
           if (!a) continue;
           const aWid = String(a.workspaceId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
@@ -1269,12 +1306,37 @@ export function decorateSchedulesDomOnDocument(
       const isInWorkingGroup = Boolean(
         rowEl.closest?.('[data-testid*="working"]') ||
         rowEl.closest?.('[data-testid^="sidebar-status-group-rows-working"]') ||
-        (rowEl.parentElement && (rowEl.parentElement.getAttribute("data-testid") ?? "").includes("working")),
+        rowEl.closest?.('[data-testid*="running"]') ||
+        rowEl.closest?.('[data-testid^="sidebar-status-group-rows-running"]') ||
+        (rowEl.parentElement &&
+          ((rowEl.parentElement.getAttribute("data-testid") ?? "").includes("working") ||
+           (rowEl.parentElement.getAttribute("data-testid") ?? "").includes("running"))) ||
+        rowEl.querySelector?.('[data-testid*="status-indicator-running"]') ||
+        rowEl.querySelector?.('[data-testid="project-status-badge"][aria-label*="Working" i]') ||
+        rowEl.querySelector?.('[data-testid="project-status-badge"][aria-label*="工作中"]') ||
+        rowEl.querySelector?.('[role="status"][aria-label*="Working" i]') ||
+        rowEl.querySelector?.('[role="status"][aria-label*="工作中"]'),
       );
-      const isRunning =
-        Boolean(sched.runningRuns && sched.runningRuns > 0) ||
-        sched.lastRunStatus === "running" ||
-        isInWorkingGroup;
+
+      const metaForWs =
+        (cleanWorkspaceId && cachedWorkspaceScheduleMap[cleanWorkspaceId]) ||
+        (testId && cachedWorkspaceScheduleMap[testId]) ||
+        null;
+      const isWorkspaceExplicitlyFinished =
+        metaForWs &&
+        !metaForWs.isRunning &&
+        metaForWs.runStatus &&
+        metaForWs.runStatus !== "running" &&
+        !isInWorkingGroup;
+
+      const isRunning = isWorkspaceExplicitlyFinished
+        ? false
+        : Boolean(
+            isInWorkingGroup ||
+            (metaForWs && metaForWs.isRunning) ||
+            (sched.runningRuns && sched.runningRuns > 0) ||
+            sched.lastRunStatus === "running",
+          );
       const schedStatus = sched.status ?? "active";
       const lastStatus = sched.lastRunStatus ?? "none";
       const cadenceSig = `${cleanWorkspaceId}:${sched.id}:${themeKey}:${schedStatus}:${lastStatus}:${isRunning ? 1 : 0}:${options.isZh ? "zh" : "en"}`;
@@ -1313,6 +1375,7 @@ export function decorateSchedulesDomOnDocument(
           height: "13px",
           marginRight: "4px",
           flexShrink: "0",
+          alignSelf: "center",
           verticalAlign: "middle",
           cursor: "pointer",
           userSelect: "none",
@@ -1335,7 +1398,8 @@ export function decorateSchedulesDomOnDocument(
           badge.style.opacity = "1";
         });
         badge.addEventListener("mouseleave", () => {
-          badge.style.opacity = isRunning ? "1" : "0.75";
+          const currentlyRunning = badge.getAttribute("data-running") === "true";
+          badge.style.opacity = currentlyRunning ? "1" : "0.75";
         });
         const stopEv = (e: unknown) => {
           const me = e as {
@@ -1430,14 +1494,33 @@ export function decorateSchedulesDomOnDocument(
     } else {
       const isHeaderActiveTurnRunning = Boolean(
         doc.querySelector?.('[data-testid="agent-turn-stop"]') ||
-        doc.querySelector?.('button[aria-label*="Stop"]') ||
+        doc.querySelector?.('button[aria-label*="Stop" i]') ||
+        doc.querySelector?.('[role="button"][aria-label*="Stop" i]') ||
+        doc.querySelector?.('[role="button"][aria-label*="Canceling" i]') ||
+        doc.querySelector?.('[role="button"][aria-label*="停止"]') ||
         doc.querySelector?.('[data-testid="turn-status-running"]') ||
-        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.closest?.('[data-testid*="working"]')),
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.closest?.('[data-testid*="working"]')) ||
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.closest?.('[data-testid*="running"]')) ||
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid*="status-indicator-running"]')),
       );
-      const isRunning =
-        Boolean(sched.runningRuns && sched.runningRuns > 0) ||
-        sched.lastRunStatus === "running" ||
-        isHeaderActiveTurnRunning;
+
+      const metaForHeaderWs =
+        (activeWsId && cachedWorkspaceScheduleMap[activeWsId]) || null;
+      const isHeaderWsExplicitlyFinished =
+        metaForHeaderWs &&
+        !metaForHeaderWs.isRunning &&
+        metaForHeaderWs.runStatus &&
+        metaForHeaderWs.runStatus !== "running" &&
+        !isHeaderActiveTurnRunning;
+
+      const isRunning = isHeaderWsExplicitlyFinished
+        ? false
+        : Boolean(
+            isHeaderActiveTurnRunning ||
+            (metaForHeaderWs && metaForHeaderWs.isRunning) ||
+            (sched.runningRuns && sched.runningRuns > 0) ||
+            sched.lastRunStatus === "running",
+          );
       const schedStatus = sched.status ?? "active";
       const lastStatus = sched.lastRunStatus ?? "none";
       const badgeTestId = `workspace-header-cadence-badge-${sched.id}`;
@@ -1500,7 +1583,8 @@ export function decorateSchedulesDomOnDocument(
           badge.style.opacity = "1";
         });
         badge.addEventListener("mouseleave", () => {
-          badge.style.opacity = isRunning ? "1" : "0.85";
+          const currentlyRunning = badge.getAttribute("data-running") === "true";
+          badge.style.opacity = currentlyRunning ? "1" : "0.85";
         });
         const stopEv = (e: unknown) => {
           const me = e as {

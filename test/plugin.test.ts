@@ -7772,6 +7772,7 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
   // 4. Header title badge DOM mounting & interaction
   type CadenceTestNode = {
     id?: string;
+    tagName: string;
     title?: string;
     style: Record<string, string>;
     childrenList: CadenceTestNode[];
@@ -7779,6 +7780,7 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
     listeners: Map<string, Array<(ev: unknown) => void>>;
     textContent: string;
     firstChild: CadenceTestNode | null;
+    children: CadenceTestNode[];
     getAttribute: (k: string) => string | null;
     setAttribute: (k: string, v: string) => void;
     hasAttribute: (k: string) => boolean;
@@ -7787,6 +7789,7 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
     remove: () => void;
     addEventListener: (type: string, fn: (ev: unknown) => void) => void;
     dispatchEvent: (ev: unknown) => boolean;
+    closest: (sel: string) => CadenceTestNode | null;
     querySelector: (sel: string) => CadenceTestNode | null;
     querySelectorAll: (sel: string) => CadenceTestNode[];
   };
@@ -7800,10 +7803,14 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
     let rawText = "";
     const n: CadenceTestNode = {
       id: attrs.id,
+      tagName: tag.toUpperCase(),
       style: {},
       childrenList: [],
       parentElement: null,
       listeners,
+      get children() {
+        return n.childrenList;
+      },
       get textContent(): string {
         if (n.childrenList.length > 0) {
           return n.childrenList.map((c) => c.textContent ?? "").join("");
@@ -7859,11 +7866,42 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
         for (const fn of listeners.get(type) ?? []) fn(ev);
         return true;
       },
+      closest: (sel: string) => {
+        let cur: CadenceTestNode | null = n;
+        while (cur) {
+          const tid = cur.getAttribute("data-testid") ?? "";
+          if (sel.includes("working") && tid.includes("working")) return cur;
+          if (sel.includes("running") && tid.includes("running")) return cur;
+          cur = cur.parentElement;
+        }
+        return null;
+      },
       querySelector: (sel) => {
         const check = (node: CadenceTestNode): CadenceTestNode | null => {
           if (sel.startsWith("[data-testid=")) {
             const val = sel.slice(14, -2);
             if (node.getAttribute("data-testid") === val) return node;
+          }
+          if (sel.startsWith("[data-testid^=")) {
+            const prefix = sel.slice(15, -2);
+            if ((node.getAttribute("data-testid") ?? "").startsWith(prefix)) return node;
+          }
+          if (sel.startsWith("[data-testid*=")) {
+            const sub = sel.slice(15, -2);
+            if ((node.getAttribute("data-testid") ?? "").includes(sub)) return node;
+          }
+          if (sel.includes('[role="button"]') && node.getAttribute("role") === "button") {
+            if (sel.includes("aria-label")) {
+              const label = node.getAttribute("aria-label") ?? "";
+              if (
+                label.toLowerCase().includes("stop") ||
+                label.includes("停止") ||
+                label.toLowerCase().includes("cancel")
+              ) {
+                return node;
+              }
+            }
+            return node;
           }
           if (sel.startsWith("#") && node.id === sel.slice(1)) return node;
           for (const ch of node.childrenList) {
@@ -8000,6 +8038,166 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
   assert.ok(sidebarBadge, "Sidebar workspace row under working status group must mount cadence badge");
   assert.equal(sidebarBadge.getAttribute("data-running"), "true", "Badge must have data-running='true' when in working group");
   assert.ok(sidebarBadge.getAttribute("title")?.includes("运行中"));
+
+  // 5b. Real Paseo 0.15.3 running status group: sidebar-status-group-rows-running & leaf text node without title testID
+  const runningGroupContainer = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-status-group-rows-running",
+  });
+  const liveSentinelRowEl = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_79b75c38e58c72fb",
+  });
+  const projIconEl = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-row-project-icon-local:wks_79b75c38e58c72fb",
+  });
+  projIconEl.textContent = "M";
+  const statusIndicatorEl = makeScheduleTestNode("div", {
+    "data-testid": "workspace-status-indicator-running",
+  });
+  const titleRowContainer = makeScheduleTestNode("div");
+  const leafTitleEl = makeScheduleTestNode("div", { dir: "auto" });
+  leafTitleEl.textContent = "Run Mac speed sentinel scheduled check";
+  titleRowContainer.appendChild(leafTitleEl);
+  liveSentinelRowEl.appendChild(projIconEl);
+  liveSentinelRowEl.appendChild(statusIndicatorEl);
+  liveSentinelRowEl.appendChild(titleRowContainer);
+  runningGroupContainer.appendChild(liveSentinelRowEl);
+
+  const mockRunningGroupDoc = {
+    body: makeScheduleTestNode("body"),
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid^="sidebar-workspace-row-"]') return [liveSentinelRowEl];
+      return [];
+    },
+    getElementById: () => null,
+    createElement: (tag: string) => makeScheduleTestNode(tag),
+  };
+
+  decorateSchedulesDomOnDocument(
+    mockRunningGroupDoc as unknown as MinimalScheduleDomDocument,
+    {
+      schedulesById: testMap,
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 1 },
+      isZh: true,
+      onOpenDrawer: () => {},
+    },
+  );
+
+  const liveBadge = liveSentinelRowEl.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_79b75c38e58c72fb"]',
+  );
+  assert.ok(liveBadge, "Must mount cadence badge on real Paseo 0.15.3 row with running group & leaf text");
+  assert.equal(liveBadge.getAttribute("data-running"), "true");
+  assert.equal(liveBadge.style.alignSelf, "center");
+
+  // Verify dynamic mouseleave listener does not suffer from stale closure
+  liveBadge.setAttribute("data-running", "false");
+  liveBadge.dispatchEvent?.({ type: "mouseleave" });
+  assert.equal(liveBadge.style.opacity, "0.75", "mouseleave must reflect updated data-running attribute dynamically");
+
+  // 5c. Real Paseo RNW Stop button in Header: <div role="button" aria-label="Stop agent">
+  const rnwStopButtonEl = makeScheduleTestNode("div", {
+    role: "button",
+    "aria-label": "Stop agent",
+  });
+  const mockRnwHeaderDoc = {
+    body: makeScheduleTestNode("body"),
+    querySelector: (sel: string) => {
+      if (sel === '[data-testid="workspace-header-title"]') return headerTitleEl;
+      if (sel.includes('[role="button"]') && sel.includes("Stop")) return rnwStopButtonEl;
+      return null;
+    },
+    querySelectorAll: () => [],
+    getElementById: () => null,
+    createElement: (tag: string) => makeScheduleTestNode(tag),
+  };
+
+  testMap.get("0180dc31")!.lastRunStatus = "succeeded";
+  testMap.get("0180dc31")!.runningRuns = 0;
+  decorateSchedulesDomOnDocument(
+    mockRnwHeaderDoc as unknown as MinimalScheduleDomDocument,
+    {
+      schedulesById: testMap,
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 1 },
+      isZh: false,
+      onOpenDrawer: () => {},
+    },
+  );
+
+  const rnwHeaderBadge = headerContainer.querySelector(
+    '[data-testid="workspace-header-cadence-badge-0180dc31"]',
+  );
+  assert.ok(rnwHeaderBadge, "Header cadence badge must mount with RNW Stop button");
+  assert.equal(rnwHeaderBadge.getAttribute("data-running"), "true", "RNW stop button must detect active running turn");
+
+  // 5d. Multi-run schedule with 1 running workspace + 1 completed workspace: scoped isRunning
+  const activeWsRow = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_multi_active",
+  });
+  const activeWsTitle = makeScheduleTestNode("span", {
+    "data-testid": "sidebar-workspace-title-local:wks_multi_active",
+  });
+  activeWsTitle.textContent = "Run Mac speed sentinel scheduled check";
+  activeWsRow.appendChild(activeWsTitle);
+
+  const doneWsRow = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_multi_done",
+  });
+  const doneWsTitle = makeScheduleTestNode("span", {
+    "data-testid": "sidebar-workspace-title-local:wks_multi_done",
+  });
+  doneWsTitle.textContent = "Run Mac speed sentinel scheduled check";
+  doneWsRow.appendChild(doneWsTitle);
+
+  setCachedSchedulesForTesting(testMap, {
+    wks_multi_active: {
+      scheduleId: "0180dc31",
+      scheduleName: "Mac Speed",
+      isRunning: true,
+      runStatus: "running",
+    },
+    wks_multi_done: {
+      scheduleId: "0180dc31",
+      scheduleName: "Mac Speed",
+      isRunning: false,
+      runStatus: "succeeded",
+    },
+  });
+
+  const mockMultiDoc = {
+    body: makeScheduleTestNode("body"),
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid^="sidebar-workspace-row-"]') return [activeWsRow, doneWsRow];
+      return [];
+    },
+    getElementById: () => null,
+    createElement: (tag: string) => makeScheduleTestNode(tag),
+  };
+
+  testMap.get("0180dc31")!.runningRuns = 1;
+  testMap.get("0180dc31")!.lastRunStatus = "running";
+
+  decorateSchedulesDomOnDocument(
+    mockMultiDoc as unknown as MinimalScheduleDomDocument,
+    {
+      schedulesById: testMap,
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 2 },
+      isZh: true,
+      onOpenDrawer: () => {},
+    },
+  );
+
+  const activeBadge = activeWsRow.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_multi_active"]',
+  );
+  const doneBadge = doneWsRow.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_multi_done"]',
+  );
+  assert.ok(activeBadge, "Active workspace must have cadence badge");
+  assert.ok(doneBadge, "Done workspace must have cadence badge");
+  assert.equal(activeBadge.getAttribute("data-running"), "true", "Active workspace must be marked running");
+  assert.equal(doneBadge.getAttribute("data-running"), "false", "Completed workspace of multi-run schedule must NOT be marked running");
 
   // Clean up cache
   resetScheduleRunsCacheForTesting();

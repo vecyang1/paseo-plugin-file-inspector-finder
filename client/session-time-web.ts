@@ -79,6 +79,11 @@ const durationMsToCompletedAt = new Map<number, Date>();
 const compactLabelToDate = new Map<string, Date>();
 let lastCompactInputDate: Date | null = null;
 let lastFormattedMessageDate: Date | null = null;
+let activeTurnFooterRenderContext: {
+  durationMs?: number | null;
+  completedAt?: Date | null;
+  lastDurationLabel?: string;
+} | null = null;
 
 const healthState = {
   metroHookInstalled: false,
@@ -365,6 +370,24 @@ export function stripExistingTurnTimeSuffix(rawDurationLabel: string): string {
 }
 
 /**
+ * Formats a duration in milliseconds using the exact same rules as Paseo's
+ * Module 3356 `formatDuration(ms)` (`45s`, `53m 42s`, `1h 29m`).
+ */
+export function formatTurnDurationMs(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "0s";
+  const totalSeconds = durationMs / 1000;
+  if (totalSeconds < 60) return `${Math.floor(totalSeconds)}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const secs = Math.floor(totalSeconds) % 60;
+    return secs === 0 ? `${totalMinutes}m` : `${totalMinutes}m ${secs}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  return mins === 0 ? `${hours}h` : `${hours}h ${mins}m`;
+}
+
+/**
  * Formats an assistant turn footer (`Worked for 1h 29m`) to include the concise
  * finished time in the user's local timezone (`Worked for 1h 29m · 01:38 (7h ago)`).
  */
@@ -538,6 +561,18 @@ export function extractTimestampFromReactFiber(
     | {
         memoizedProps?: Record<string, unknown> | null;
         pendingProps?: Record<string, unknown> | null;
+        updateQueue?: {
+          memoCache?: {
+            data?: Array<Array<unknown>>;
+          } | null;
+        } | null;
+        alternate?: {
+          updateQueue?: {
+            memoCache?: {
+              data?: Array<Array<unknown>>;
+            } | null;
+          } | null;
+        } | null;
         return?: unknown;
       }
     | undefined
@@ -550,7 +585,7 @@ export function extractTimestampFromReactFiber(
     activityAt?: Date;
   } = {};
 
-  for (let depth = 0; cur && depth < 10; depth += 1) {
+  for (let depth = 0; cur && depth < 16; depth += 1) {
     const props = cur.memoizedProps ?? cur.pendingProps;
     if (props && typeof props === "object") {
       if (!out.completedAt && props.completedAt) {
@@ -586,9 +621,86 @@ export function extractTimestampFromReactFiber(
         if (d) out.activityAt = d;
       }
     }
+
+    const caches = [
+      cur.updateQueue?.memoCache?.data,
+      cur.alternate?.updateQueue?.memoCache?.data,
+    ];
+    for (const data of caches) {
+      if (!Array.isArray(data)) continue;
+      for (const slots of data) {
+        if (!Array.isArray(slots) || slots.length < 7) continue;
+        if (out.durationMs === undefined && typeof slots[2] === "number") {
+          out.durationMs = slots[2];
+        }
+        if (!out.completedAt && slots[5]) {
+          const d = coerceToValidDate(slots[5] as Date | string | number);
+          if (d) out.completedAt = d;
+        }
+      }
+    }
+
     cur = cur.return as typeof cur;
   }
   return out;
+}
+
+/**
+ * Synchronizes React Compiler's `useMemoCache(29)` slots on Paseo's `AssistantTurnFooter`
+ * fiber (`l[4]` = `C` duration label, `l[6]` = `k` hover label) so hovering (`onHoverIn`)
+ * and moving the mouse away (`onHoverOut`) never revert the DOM text to an unformatted
+ * or shrunk string.
+ */
+export function syncTurnFooterFiberMemoCache(
+  el: Element | null,
+  desiredText: string,
+  hoverText: string,
+): boolean {
+  if (!el || !desiredText) return false;
+  const rec = el as unknown as Record<string, unknown>;
+  const fiberKey = Object.keys(rec).find(
+    (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"),
+  );
+  if (!fiberKey) return false;
+
+  type FiberNode = {
+    updateQueue?: {
+      memoCache?: {
+        data?: Array<Array<unknown>>;
+      } | null;
+    } | null;
+    alternate?: FiberNode | null;
+    return?: FiberNode | null;
+  };
+
+  let cur = rec[fiberKey] as FiberNode | undefined | null;
+  let updated = false;
+
+  for (let depth = 0; cur && depth < 16; depth += 1) {
+    const fibers = [cur, cur.alternate];
+    for (const f of fibers) {
+      const data = f?.updateQueue?.memoCache?.data;
+      if (!Array.isArray(data)) continue;
+      for (const slots of data) {
+        if (
+          Array.isArray(slots) &&
+          slots.length === 29 &&
+          typeof slots[4] === "string" &&
+          typeof slots[6] === "string"
+        ) {
+          if (slots[4] !== desiredText || slots[6] !== hoverText) {
+            slots[4] = desiredText;
+            slots[6] = hoverText;
+            // Invalidate slot 19 (`C` dependency of Pressable JSX at slot 24) so next hover/unhover rebuilds VDOM
+            slots[19] = null;
+            updated = true;
+          }
+        }
+      }
+    }
+    cur = cur.return;
+  }
+  return updated;
 }
 
 /**
@@ -603,7 +715,11 @@ export function parseEndedTimestampFromAriaLabel(
   const endedIdx = raw.lastIndexOf(", ended ");
   if (endedIdx <= 0) return null;
   const durationLabel = stripExistingTurnTimeSuffix(raw.slice(0, endedIdx).trim());
-  const endedStr = raw.slice(endedIdx + ", ended ".length).trim();
+  const rawEndedStr = raw.slice(endedIdx + ", ended ".length).trim();
+  const endedStr = rawEndedStr
+    .replace(/^.*?\s·\s/, "")
+    .replace(/\s*\([^)]*\)$/, "")
+    .trim();
   if (!durationLabel || !endedStr) return null;
 
   // Case 1: Already formatted by our `formatCompactHoverTimestamp` (`11/10 01:38:24 GMT+8`)
@@ -834,6 +950,9 @@ export function patchMetroSessionTimeModules(win: MetroWindow): boolean {
             if (!activePrefs.enabled || !d) {
               return origFormatMessageTimestamp(date, now);
             }
+            if (activeTurnFooterRenderContext?.lastDurationLabel) {
+              return activeTurnFooterRenderContext.lastDurationLabel;
+            }
             return formatCompactHoverTimestamp(d, {
               nowMs: now.getTime(),
               clockFormat: activePrefs.clockFormat,
@@ -851,6 +970,9 @@ export function patchMetroSessionTimeModules(win: MetroWindow): boolean {
       typeof exp.useCompactTimeAgo === "function"
     ) {
       if (!exp.__paseoFinderUseTimeAgoPatched) {
+        const origUseTimeAgo = exp.useTimeAgo as (
+          date: Date | null | undefined,
+        ) => string;
         const origUseCompactTimeAgo = exp.useCompactTimeAgo as (
           date: Date | null | undefined,
         ) => string;
@@ -858,6 +980,20 @@ export function patchMetroSessionTimeModules(win: MetroWindow): boolean {
           value: true,
           configurable: true,
         });
+        exp.useTimeAgo = function patchedUseTimeAgo(
+          date: Date | null | undefined,
+        ): string {
+          const d = coerceToValidDate(date);
+          const out = origUseTimeAgo(date);
+          if (!activePrefs.enabled || !d) {
+            return out;
+          }
+          const formatted = formatRelativeWithLocalTime(d, {
+            compact: false,
+            clockFormat: activePrefs.clockFormat,
+          });
+          return formatted.label || out;
+        };
         exp.useCompactTimeAgo = function patchedUseCompactTimeAgo(
           date: Date | null | undefined,
         ): string {
@@ -869,7 +1005,16 @@ export function patchMetroSessionTimeModules(win: MetroWindow): boolean {
           if (d && out) {
             compactLabelToDate.set(out, d);
           }
-          return out;
+          if (!activePrefs.enabled || !activePrefs.showFinishedTimeInSidebar || !d) {
+            return out;
+          }
+          const formatted = formatRelativeWithLocalTime(d, {
+            compact: true,
+            clockFormat: activePrefs.clockFormat,
+          });
+          const label = formatted.label || out;
+          compactLabelToDate.set(label, d);
+          return label;
         };
       }
       healthState.hookedModules.add(`useTimeAgo:${modId}`);
@@ -880,24 +1025,30 @@ export function patchMetroSessionTimeModules(win: MetroWindow): boolean {
     if (typeof exp.deriveStreamTurnTiming === "function") {
       if (!exp.__paseoFinderTurnTimingPatched) {
         const origDeriveStreamTurnTiming = exp.deriveStreamTurnTiming as (
-          items: unknown[],
+          items: unknown,
         ) => {
           activeStartedAt?: Date | null;
-          byItemId?: Record<
-            string,
-            { completedAt?: Date | null; durationMs?: number | null }
-          >;
+          byItemId?:
+            | Map<string, { completedAt?: Date | null; durationMs?: number | null }>
+            | Record<
+                string,
+                { completedAt?: Date | null; durationMs?: number | null }
+              >;
         };
         Object.defineProperty(exp, "__paseoFinderTurnTimingPatched", {
           value: true,
           configurable: true,
         });
         exp.deriveStreamTurnTiming = function patchedDeriveStreamTurnTiming(
-          items: unknown[],
+          items: unknown,
         ) {
           const res = origDeriveStreamTurnTiming(items);
           if (res?.byItemId && typeof res.byItemId === "object") {
-            for (const entry of Object.values(res.byItemId)) {
+            const entries =
+              res.byItemId instanceof Map
+                ? res.byItemId.values()
+                : Object.values(res.byItemId);
+            for (const entry of entries) {
               if (entry && typeof entry.durationMs === "number" && entry.completedAt) {
                 registerTurnTimingCompletedAt(entry.durationMs, entry.completedAt);
               }
@@ -928,12 +1079,63 @@ export function patchMetroSessionTimeModules(win: MetroWindow): boolean {
           const base = origGetTurnDurationLabel(durationMs, t);
           if (!activePrefs.enabled || !base) return base;
           const completedAt =
-            durationMsToCompletedAt.get(durationMs) ?? lastFormattedMessageDate;
+            activeTurnFooterRenderContext?.completedAt ??
+            durationMsToCompletedAt.get(durationMs);
           if (!completedAt) return base;
-          return formatTurnWorkedForWithFinishedTime(base, completedAt);
+          const formatted = formatTurnWorkedForWithFinishedTime(base, completedAt);
+          if (activeTurnFooterRenderContext) {
+            activeTurnFooterRenderContext.lastDurationLabel = formatted;
+          }
+          return formatted;
         };
       }
       healthState.hookedModules.add(`turnDuration:${modId}`);
+      hookedAny = true;
+    }
+
+    // 5. AssistantTurnFooter Memo Component (Module 5187 signature: AssistantTurnFooter.type)
+    const turnFooterExport = exp.AssistantTurnFooter as
+      | {
+          type?: (props: Record<string, unknown>) => unknown;
+          __paseoFinderTurnFooterPatched?: boolean;
+        }
+      | undefined;
+    if (
+      turnFooterExport &&
+      typeof turnFooterExport === "object" &&
+      typeof turnFooterExport.type === "function"
+    ) {
+      if (!turnFooterExport.__paseoFinderTurnFooterPatched) {
+        const origTurnFooterType = turnFooterExport.type;
+        Object.defineProperty(turnFooterExport, "__paseoFinderTurnFooterPatched", {
+          value: true,
+          configurable: true,
+        });
+        turnFooterExport.type = function patchedAssistantTurnFooterType(
+          props: Record<string, unknown>,
+        ) {
+          const durationMs =
+            typeof props?.durationMs === "number" ? props.durationMs : null;
+          const completedAt = coerceToValidDate(
+            props?.completedAt as Date | string | number | null | undefined,
+          );
+          if (durationMs !== null && completedAt) {
+            registerTurnTimingCompletedAt(durationMs, completedAt);
+          }
+          const prevCtx = activeTurnFooterRenderContext;
+          activeTurnFooterRenderContext = {
+            durationMs,
+            completedAt,
+            lastDurationLabel: "",
+          };
+          try {
+            return origTurnFooterType(props);
+          } finally {
+            activeTurnFooterRenderContext = prevCtx;
+          }
+        };
+      }
+      healthState.hookedModules.add(`turnFooter:${modId}`);
       hookedAny = true;
     }
   }
@@ -1002,50 +1204,104 @@ export function decorateSessionTimestampsDom(
 
     const aria = btn.getAttribute("aria-label") ?? "";
     const parsed = parseEndedTimestampFromAriaLabel(aria, nowMs);
-    const completedAt = fiberInfo.completedAt ?? parsed?.completedAt ?? null;
+    const completedAt =
+      fiberInfo.completedAt ??
+      coerceToValidDate(btn.getAttribute("data-paseo-completed-at")) ??
+      parsed?.completedAt ??
+      null;
     if (!completedAt) continue;
 
+    const completedIso = completedAt.toISOString();
+    if (btn.getAttribute("data-paseo-completed-at") !== completedIso) {
+      btn.setAttribute("data-paseo-completed-at", completedIso);
+    }
+
     const storedBase = btn.getAttribute("data-paseo-turn-base-duration");
+    const fiberDurationLabel =
+      typeof fiberInfo.durationMs === "number" &&
+      Number.isFinite(fiberInfo.durationMs) &&
+      fiberInfo.durationMs >= 0
+        ? `Worked for ${formatTurnDurationMs(fiberInfo.durationMs)}`
+        : "";
+    const currentTextTrimmed = (btn.textContent ?? "").trim();
+    const currentTextBase = currentTextTrimmed.startsWith("Worked for ")
+      ? stripExistingTurnTimeSuffix(currentTextTrimmed)
+      : "";
+    // Always prioritize live React Fiber `durationMs` and `aria-label` over `storedBase`
+    // so mid-turn snapshots (e.g. `44m 20s` before turn completion at `53m 42s`) never stick.
     const baseDuration =
-      storedBase ||
+      fiberDurationLabel ||
       parsed?.durationLabel ||
-      stripExistingTurnTimeSuffix((btn.textContent ?? "").trim());
+      currentTextBase ||
+      storedBase ||
+      "";
     if (!baseDuration) continue;
 
-    if (!storedBase) {
+    if (storedBase !== baseDuration) {
       btn.setAttribute("data-paseo-turn-base-duration", baseDuration);
     }
 
     const desiredText = activePrefs.enabled
       ? formatTurnWorkedForWithFinishedTime(baseDuration, completedAt, { nowMs })
       : baseDuration;
-    const hoverText = formatCompactHoverTimestamp(completedAt, { nowMs });
+    const hoverText = activePrefs.enabled
+      ? desiredText
+      : formatClockPart(completedAt, "12h");
     const fullTooltip = formatFullLocalFinishedTooltip(completedAt);
 
     if (btn.getAttribute("title") !== fullTooltip) {
       btn.setAttribute("title", fullTooltip);
     }
+    if (btn.getAttribute("data-paseo-turn-desired-text") !== desiredText) {
+      btn.setAttribute("data-paseo-turn-desired-text", desiredText);
+    }
 
-    // Update both `labelSizer` (first child text) and `labelOverlay` (second child text) when not actively hovered
-    const isHovered = btn.matches(":hover");
-    if (!isHovered) {
-      const textSpans = btn.querySelectorAll<HTMLElement>('[dir="auto"]');
+    // Keep React Compiler's `useMemoCache(29)` slots (`l[4]` and `l[6]`) in sync so
+    // `onHoverIn` and `onHoverOut` never shrink or revert the label.
+    syncTurnFooterFiberMemoCache(btn, desiredText, hoverText);
+
+    const applyTurnButtonDomText = (targetBtn: HTMLElement) => {
+      const targetText =
+        targetBtn.getAttribute("data-paseo-turn-desired-text") ?? desiredText;
+      if (!targetText) return false;
+      const textSpans = targetBtn.querySelectorAll<HTMLElement>('[dir="auto"]');
+      let changed = false;
       if (textSpans.length >= 2) {
         const sizer = textSpans[0];
         const overlay = textSpans[1];
-        const sizerTarget =
-          desiredText.length >= hoverText.length ? desiredText : hoverText;
-        if (sizer && sizer.textContent !== sizerTarget) {
-          sizer.textContent = sizerTarget;
+        if (sizer && sizer.textContent !== targetText) {
+          sizer.textContent = targetText;
+          changed = true;
         }
-        if (overlay && overlay.textContent !== desiredText) {
-          overlay.textContent = desiredText;
-          turnFootersUpdated += 1;
+        if (overlay && overlay.textContent !== targetText) {
+          overlay.textContent = targetText;
+          changed = true;
         }
-      } else if (btn.textContent !== desiredText) {
-        btn.textContent = desiredText;
-        turnFootersUpdated += 1;
+      } else if (targetBtn.textContent !== targetText) {
+        targetBtn.textContent = targetText;
+        changed = true;
       }
+      return changed;
+    };
+
+    if (applyTurnButtonDomText(btn)) {
+      turnFootersUpdated += 1;
+    }
+
+    if (btn.getAttribute("data-paseo-turn-hover-bound") !== "1") {
+      btn.setAttribute("data-paseo-turn-hover-bound", "1");
+      const syncOnPointer = () => {
+        applyTurnButtonDomText(btn);
+        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(() => {
+            applyTurnButtonDomText(btn);
+          });
+        }
+      };
+      btn.addEventListener("pointerenter", syncOnPointer);
+      btn.addEventListener("pointerleave", syncOnPointer);
+      btn.addEventListener("mouseenter", syncOnPointer);
+      btn.addEventListener("mouseleave", syncOnPointer);
     }
   }
 
@@ -1335,6 +1591,7 @@ export function installDesktopSessionTimeEnhancer(): () => void {
     observer.observe(document.body, {
       childList: true,
       subtree: true,
+      characterData: true,
     });
   }
 
