@@ -163,6 +163,8 @@ import {
   repairMarkdownAstTables,
   repairRenderedDomMath,
   runMarkdownTableSelfTest,
+  readMarkdownTablePreferences,
+  MARKDOWN_TABLE_PREFS_KEY,
   setCachedKaTeX,
   syncMarkdownTablePreferences,
 } from "../client/markdown-table-web";
@@ -4382,6 +4384,130 @@ test("44b. LaTeX Math formula rendering (KaTeX MathML), Metro AST options overri
   syncMarkdownTablePreferences({ renderLatexMath: true });
   mockMod3993.publicModule.exports.parseMarkdownSync("$$x=1$$", { latexMath: false });
   assert.equal(capturedOptions?.latexMath, true, "When re-enabled, latexMath flag must be forced again");
+});
+
+test("44c. LaTeX Math lazy Metro hooks, EnrichedMarkdownText wrapper, DOM deduplication & storage persistence", () => {
+  // 1. Test EnrichedMarkdownText (Module 3986) hook: forces md4cFlags.latexMath = true
+  let receivedEnrichedProps: Record<string, unknown> | undefined;
+  const mockMod3986 = {
+    isInitialized: true,
+    publicModule: {
+      exports: {
+        EnrichedMarkdownText: (props: Record<string, unknown>) => {
+          receivedEnrichedProps = props;
+          return { rendered: true };
+        },
+      },
+    },
+  };
+
+  // 2. Test lazy uninitialized Metro module discovery via factory string
+  let factoryInitialized = false;
+  const mockLazyMod = {
+    isInitialized: false,
+    factory: function () {
+      factoryInitialized = true;
+      return {
+        exports: {
+          loadKaTeX: async () => katex,
+        },
+      };
+    },
+    publicModule: {
+      exports: {
+        loadKaTeX: async () => katex,
+      },
+    },
+  };
+
+  const fakeMetroMap = new Map<number, unknown>();
+  for (let i = 0; i < 60; i++) {
+    fakeMetroMap.set(i, { isInitialized: true, publicModule: { exports: {} } });
+  }
+  fakeMetroMap.set(3986, mockMod3986);
+  fakeMetroMap.set(4006, mockLazyMod);
+
+  const mockReq = (id: number) => {
+    const m = fakeMetroMap.get(id) as {
+      isInitialized?: boolean;
+      factory?: () => unknown;
+      publicModule?: { exports?: Record<string, unknown> };
+    };
+    if (m && !m.isInitialized && typeof m.factory === "function") {
+      m.isInitialized = true;
+      m.factory();
+    }
+    return m?.publicModule?.exports;
+  };
+
+  const fakeWin = {
+    __r: mockReq,
+    __c: () => fakeMetroMap,
+  } as unknown as Window & { __r?: unknown; __c?: unknown };
+
+  const hooked = installMetroMarkdownTableHooks(fakeWin);
+  assert.equal(hooked, true, "installMetroMarkdownTableHooks should succeed on lazy Metro map");
+  assert.equal(factoryInitialized, true, "Lazy module with factory containing loadKaTeX should be initialized");
+
+  // Call EnrichedMarkdownText with latexMath: false (as Paseo 3984 does)
+  mockMod3986.publicModule.exports.EnrichedMarkdownText({
+    text: "Formula: $$\\frac{1}{2}$$",
+    md4cFlags: { latexMath: false, hardSoftBreaks: true },
+  });
+  const passedFlags = receivedEnrichedProps?.md4cFlags as Record<string, unknown>;
+  assert.equal(passedFlags?.latexMath, true, "EnrichedMarkdownText hook must force md4cFlags.latexMath = true");
+  assert.equal(passedFlags?.hardSoftBreaks, true, "Other md4cFlags must be preserved");
+
+  // 3. Test DOM Math Healer: deduplication of nested <pre><code>, language-math blocks & inline code
+  const fakeDoc = {
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+  };
+  const testContainer = createInteractiveDomNode("div");
+  (testContainer as unknown as { ownerDocument: typeof fakeDoc }).ownerDocument = fakeDoc;
+  const preEl = createInteractiveDomNode("pre");
+  (preEl as unknown as { ownerDocument: typeof fakeDoc }).ownerDocument = fakeDoc;
+  const codeInsidePre = createInteractiveDomNode("code", {}, "$$\\sum_{i=1}^n i = \\frac{n(n+1)}{2}$$");
+  preEl.appendChild?.(codeInsidePre);
+
+  const mathLangBlock = createInteractiveDomNode(
+    "code",
+    { class: "language-math" },
+    "\\int_0^1 x^2 dx = \\frac{1}{3}",
+  );
+
+  const inlineCodeSpan = createInteractiveDomNode("code", {}, "$\\sqrt{2}$");
+
+  testContainer.appendChild?.(preEl);
+  testContainer.appendChild?.(mathLangBlock);
+  testContainer.appendChild?.(inlineCodeSpan);
+
+  const healRes = repairRenderedDomMath(testContainer as unknown as ParentNode);
+  // pre + language-math + inline = 3 healed formulas (pre's child code is NOT double-healed)
+  assert.equal(healRes.mathNodesHealed, 3, "Exactly 3 distinct formulas must be healed without child duplication");
+
+  // 4. Test storage persistence
+  const storageStore = new Map<string, string>();
+  const customStorage = {
+    getItem: (k: string) => storageStore.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      storageStore.set(k, v);
+    },
+    removeItem: (k: string) => {
+      storageStore.delete(k);
+    },
+  };
+
+  syncMarkdownTablePreferences({ renderLatexMath: false }, customStorage);
+  const storedJson = storageStore.get(MARKDOWN_TABLE_PREFS_KEY);
+  assert.ok(storedJson, "Preferences must be saved to custom storage");
+  assert.ok(storedJson.includes('"renderLatexMath":false'), "Stored JSON must reflect renderLatexMath: false");
+
+  const restored = readMarkdownTablePreferences(customStorage);
+  assert.equal(restored.renderLatexMath, false, "readMarkdownTablePreferences must read stored values");
+
+  // Restore defaults
+  syncMarkdownTablePreferences({ renderLatexMath: true }, customStorage);
+  assert.equal(readMarkdownTablePreferences(customStorage).renderLatexMath, true);
 });
 
 test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut annotation with UI Observability", async () => {

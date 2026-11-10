@@ -28,6 +28,10 @@ export interface ActiveWorkspaceAndAgent {
   activeSubagentId?: string | null;
 }
 
+export function normalizeWorkspaceIdKey(id?: string | null): string {
+  return (id ?? "").replace(/^[^:]+:/, "").trim();
+}
+
 export interface ParsedProviderSubagentTabTestId {
   parentAgentId: string;
   subagentId: string;
@@ -175,8 +179,10 @@ export function extractCurrentWorkspaceAndAgent(
     const visibleSubagentTabs = allSubagentTabs.filter((el) =>
       isElementInVisibleBranch(el, win),
     );
-    const subagentTabs =
-      visibleSubagentTabs.length > 0 ? visibleSubagentTabs : allSubagentTabs;
+    // Never fall back to hidden `allSubagentTabs` from background navigation screens
+    // when the active workspace has 0 visible subagent tabs; otherwise clicking away from a
+    // workspace with subagents leaks the previous workspace's `parentAgentId` into the new scope.
+    const subagentTabs = visibleSubagentTabs;
     const hasVisibleSubPanel = Array.from(
       doc.querySelectorAll<HTMLElement>('[data-testid="provider-subagent-panel"]'),
     ).some((el) => isElementInVisibleBranch(el, win));
@@ -194,10 +200,17 @@ export function extractCurrentWorkspaceAndAgent(
         selectedSubagentTab.getAttribute("data-testid"),
       );
       if (parsedSubTab) {
-        if (!agentId) {
-          agentId = parsedSubTab.parentAgentId;
+        const cleanCurrentWs = normalizeWorkspaceIdKey(workspaceId);
+        const knownParent = globalSessionDirectoryByAgentId.get(parsedSubTab.parentAgentId);
+        const knownParentWs = normalizeWorkspaceIdKey(knownParent?.workspaceId);
+        const wsCompatible =
+          !cleanCurrentWs || !knownParentWs || cleanCurrentWs === knownParentWs;
+        if (wsCompatible) {
+          if (!agentId) {
+            agentId = parsedSubTab.parentAgentId;
+          }
+          activeSubagentId = parsedSubTab.subagentId;
         }
-        activeSubagentId = parsedSubTab.subagentId;
       }
     }
 

@@ -1,3 +1,5 @@
+import bundledKaTeX from "katex";
+
 export interface MarkdownTablePreferences {
   enabled: boolean;
   convertCellBrToLineBreak: boolean;
@@ -64,8 +66,15 @@ export interface KaTeXLike {
   ParseError?: unknown;
 }
 
+export interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
+}
+
 export const TABLE_CELL_BR_SENTINEL = "\u2063\u200a";
 export const MARKDOWN_TABLE_EVENT = "paseo-finder:markdown-table-updated";
+export const MARKDOWN_TABLE_PREFS_KEY = "paseo_finder_markdown_table_prefs";
 const STYLE_ELEMENT_ID = "paseo-finder-markdown-table-style";
 
 export const DEFAULT_MARKDOWN_MATH_SAMPLE = [
@@ -93,8 +102,55 @@ let currentPrefs: MarkdownTablePreferences = {
   enhanceLatexMathTypographyCss: true,
 };
 
-let cachedKaTeX: KaTeXLike | null = null;
+let cachedKaTeX: KaTeXLike | null =
+  typeof (bundledKaTeX as unknown as KaTeXLike)?.renderToString === "function"
+    ? (bundledKaTeX as unknown as KaTeXLike)
+    : null;
 let mathFormulasHealedTotal = 0;
+
+export function readMarkdownTablePreferences(
+  storage?: StorageLike | null,
+): MarkdownTablePreferences {
+  const store =
+    storage ??
+    (typeof window !== "undefined" && window.localStorage
+      ? window.localStorage
+      : null);
+  if (store) {
+    try {
+      const raw = store.getItem(MARKDOWN_TABLE_PREFS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<MarkdownTablePreferences>;
+        currentPrefs = {
+          enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : currentPrefs.enabled,
+          convertCellBrToLineBreak:
+            typeof parsed.convertCellBrToLineBreak === "boolean"
+              ? parsed.convertCellBrToLineBreak
+              : currentPrefs.convertCellBrToLineBreak,
+          healTruncatedRows:
+            typeof parsed.healTruncatedRows === "boolean"
+              ? parsed.healTruncatedRows
+              : currentPrefs.healTruncatedRows,
+          enhanceTableTypographyCss:
+            typeof parsed.enhanceTableTypographyCss === "boolean"
+              ? parsed.enhanceTableTypographyCss
+              : currentPrefs.enhanceTableTypographyCss,
+          renderLatexMath:
+            typeof parsed.renderLatexMath === "boolean"
+              ? parsed.renderLatexMath
+              : currentPrefs.renderLatexMath,
+          enhanceLatexMathTypographyCss:
+            typeof parsed.enhanceLatexMathTypographyCss === "boolean"
+              ? parsed.enhanceLatexMathTypographyCss
+              : currentPrefs.enhanceLatexMathTypographyCss,
+        };
+      }
+    } catch {
+      // ignore storage parse errors
+    }
+  }
+  return { ...currentPrefs };
+}
 
 export function setCachedKaTeX(instance: unknown): void {
   if (!instance) return;
@@ -410,38 +466,94 @@ export function repairMarkdownAstTables(ast: unknown): {
  * Hooks Paseo's Metro module exports (`normalizeMarkdownHtml`, `prepareMarkdownSource`,
  * `parseMarkdownSync`, `parseMarkdown`) in memory without touching `app.asar` or `app-dist`.
  */
-export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown }): boolean {
+export function installMetroMarkdownTableHooks(
+  win?: Window & { __r?: unknown; __c?: unknown },
+): boolean {
   const targetWin =
-    win ?? (typeof window !== "undefined" ? (window as Window & { __r?: unknown }) : undefined);
+    win ??
+    (typeof window !== "undefined"
+      ? (window as Window & { __r?: unknown; __c?: unknown })
+      : undefined);
   if (!targetWin || typeof targetWin.__r !== "function") return false;
 
-  let metroMap: Map<number, { isInitialized?: boolean; publicModule?: { exports?: Record<string, unknown> } }> | null =
-    null;
-  const origMapGet = Map.prototype.get;
-  try {
-    Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) {
-      if (key === 0 && !metroMap && this instanceof Map && this.size > 50) {
-        metroMap = this as unknown as Map<
-          number,
-          { isInitialized?: boolean; publicModule?: { exports?: Record<string, unknown> } }
-        >;
-      }
-      return origMapGet.call(this, key);
-    };
+  const req = targetWin.__r as (id: number) => unknown;
+
+  type MetroModuleMap = Map<
+    number,
+    {
+      isInitialized?: boolean;
+      factory?: unknown;
+      dependencyMap?: unknown[];
+      publicModule?: { exports?: Record<string, unknown> };
+    }
+  >;
+
+  const holder: { map: MetroModuleMap | null } = { map: null };
+
+  if (typeof targetWin.__c === "function") {
     try {
-      (targetWin.__r as (id: number) => unknown)(0);
+      const res = (targetWin.__c as () => unknown)();
+      if (res instanceof Map) {
+        holder.map = res as unknown as MetroModuleMap;
+      }
     } catch {
       // ignore
     }
-  } finally {
-    Map.prototype.get = origMapGet;
   }
 
-  if (!metroMap) return false;
-  const mapRef = metroMap as Map<
-    number,
-    { isInitialized?: boolean; publicModule?: { exports?: Record<string, unknown> } }
-  >;
+  if (!holder.map) {
+    const origMapGet = Map.prototype.get;
+    try {
+      Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) {
+        if (key === 0 && !holder.map && this instanceof Map && this.size > 50) {
+          holder.map = this as unknown as MetroModuleMap;
+        }
+        return origMapGet.call(this, key);
+      };
+      try {
+        req(0);
+      } catch {
+        // ignore
+      }
+    } finally {
+      Map.prototype.get = origMapGet;
+    }
+  }
+
+  const mapRef = holder.map;
+  if (!mapRef) return false;
+
+  // Pre-initialize and resolve modules if Metro map is available
+  const CANDIDATE_MODULE_IDS = [3986, 3993, 3999, 4006, 4007, 4117];
+  for (const candId of CANDIDATE_MODULE_IDS) {
+    if (mapRef.has(candId)) {
+      try {
+        req(candId);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  for (const [id, mod] of mapRef.entries()) {
+    if (mod && !mod.isInitialized && typeof mod.factory === "function") {
+      try {
+        const fnSource = Function.prototype.toString.call(mod.factory);
+        if (
+          fnSource.includes("KaTeXRenderer") ||
+          fnSource.includes("loadKaTeX") ||
+          fnSource.includes("parseMarkdownSync") ||
+          fnSource.includes("EnrichedMarkdownText") ||
+          fnSource.includes("normalizeMarkdownHtml") ||
+          fnSource.includes("katex-mathml")
+        ) {
+          req(id);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   for (const [, mod] of mapRef.entries()) {
     const exp = mod?.publicModule?.exports;
@@ -460,6 +572,41 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       }
     }
 
+    // 1. Hook EnrichedMarkdownText (Module 3986): force latexMath: true
+    if (
+      typeof exp.EnrichedMarkdownText === "function" &&
+      !(exp.EnrichedMarkdownText as { __vecMathHooked?: boolean }).__vecMathHooked
+    ) {
+      const origEnriched = exp.EnrichedMarkdownText as (props: Record<string, unknown>) => unknown;
+      const wrappedEnriched = function (props: Record<string, unknown>): unknown {
+        if (!currentPrefs.enabled || !currentPrefs.renderLatexMath) {
+          return origEnriched(props);
+        }
+        const existingFlags = (props?.md4cFlags as Record<string, unknown>) ?? {};
+        if (existingFlags.latexMath !== true) {
+          return origEnriched({
+            ...props,
+            md4cFlags: {
+              ...existingFlags,
+              latexMath: true,
+            },
+          });
+        }
+        return origEnriched(props);
+      };
+      (wrappedEnriched as { __vecMathHooked?: boolean }).__vecMathHooked = true;
+      try {
+        exp.EnrichedMarkdownText = wrappedEnriched;
+        if (exp.default === origEnriched) {
+          exp.default = wrappedEnriched;
+        }
+        hookedExportsSet.add("EnrichedMarkdownText");
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. Hook KaTeXRenderer (Module 3999): supplies KaTeX engine if missing
     if (
       typeof exp.KaTeXRenderer === "function" &&
       !(exp.KaTeXRenderer as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked
@@ -494,6 +641,7 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       }
     }
 
+    // 3. Hook loadKaTeX (Module 4006): caches loaded KaTeX
     if (
       typeof exp.loadKaTeX === "function" &&
       !(exp.loadKaTeX as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked
@@ -509,13 +657,13 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       try {
         exp.loadKaTeX = wrappedLoadKaTeX;
         hookedExportsSet.add("loadKaTeX");
-        // Pre-warm KaTeX asynchronously so it is ready before first render
         wrappedLoadKaTeX().catch(() => {});
       } catch {
         // ignore read-only export
       }
     }
 
+    // 4. Hook normalizeMarkdownHtml (Module 4117): table cell <br> preservation
     if (
       typeof exp.normalizeMarkdownHtml === "function" &&
       !(exp.normalizeMarkdownHtml as { __vecTableHooked?: boolean }).__vecTableHooked
@@ -569,6 +717,7 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       }
     }
 
+    // 5. Hook parseMarkdownSync (Module 3993): force latexMath: true and heal tables in AST
     if (
       typeof exp.parseMarkdownSync === "function" &&
       !(exp.parseMarkdownSync as { __vecTableHooked?: boolean }).__vecTableHooked
@@ -613,6 +762,7 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       }
     }
 
+    // 6. Hook parseMarkdown (Module 3993): force latexMath: true in async parse
     if (
       typeof exp.parseMarkdown === "function" &&
       !(exp.parseMarkdown as { __vecTableHooked?: boolean }).__vecTableHooked
@@ -738,6 +888,32 @@ function replaceTextLineBreaksInElement(rootEl: HTMLElement, doc: Document): num
   return converted;
 }
 
+function isInsideMathOrPre(el: HTMLElement, target: "pre" | "math"): boolean {
+  if (typeof el.closest === "function") {
+    try {
+      if (target === "pre" && el.closest("pre")) return true;
+      if (target === "math" && el.closest('span[role="math"], .paseo-finder-math-rendered')) return true;
+    } catch {
+      // ignore
+    }
+  }
+  let cur: HTMLElement | null = el.parentElement;
+  while (cur) {
+    const tag = (cur.tagName ?? "").toLowerCase();
+    const role = cur.getAttribute?.("role") ?? "";
+    const cls = cur.getAttribute?.("class") ?? "";
+    if (target === "pre" && tag === "pre") return true;
+    if (
+      target === "math" &&
+      (role === "math" || cls.includes("paseo-finder-math-rendered") || tag === "math")
+    ) {
+      return true;
+    }
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
 export function repairRenderedDomMath(root?: ParentNode): {
   mathNodesScanned: number;
   mathNodesHealed: number;
@@ -776,18 +952,22 @@ export function repairRenderedDomMath(root?: ParentNode): {
 
     let displayMode = false;
     let formula = "";
-    if (raw.startsWith("$$") && raw.endsWith("$$") && raw.length >= 4) {
+    const aria = span.getAttribute?.("aria-label")?.trim();
+    if (aria) {
+      formula = aria;
+      displayMode =
+        raw.startsWith("$$") ||
+        (span.style && span.style.display === "block") ||
+        raw.includes("\n");
+    } else if (raw.startsWith("$$") && raw.endsWith("$$") && raw.length >= 4) {
       displayMode = true;
       formula = raw.slice(2, -2).trim();
     } else if (raw.startsWith("$") && raw.endsWith("$") && raw.length >= 2) {
       displayMode = false;
       formula = raw.slice(1, -1).trim();
     } else {
-      const aria = span.getAttribute?.("aria-label");
-      if (aria && aria.trim()) {
-        formula = aria.trim();
-        displayMode = (span.style && span.style.display === "block") || raw.includes("\n");
-      }
+      formula = raw;
+      displayMode = raw.includes("\n") || (span.style && span.style.display === "block");
     }
 
     if (!formula) continue;
@@ -806,6 +986,12 @@ export function repairRenderedDomMath(root?: ParentNode): {
         if (span.className && !span.className.includes("paseo-finder-math-rendered")) {
           span.className += " paseo-finder-math-rendered";
         }
+        if (span.style) {
+          span.style.whiteSpace = "normal";
+          if (displayMode) {
+            span.style.display = "block";
+          }
+        }
         healed++;
       }
     } catch {
@@ -814,43 +1000,97 @@ export function repairRenderedDomMath(root?: ParentNode): {
   }
 
   // Pass 2: Code blocks / pre elements with $$...$$ that escaped WASM md4c parser
-  if (doc) {
-    const rawCodeBlocks = Array.from(
-      queryRoot.querySelectorAll<HTMLElement>(
-        ".enrm-text pre, .enrm-text code, pre, code",
-      ),
-    );
-    for (const block of rawCodeBlocks) {
-      if (block.closest?.('span[role="math"]')) continue;
-      const txt = (block.textContent ?? "").trim();
-      if (txt.startsWith("$$") && txt.endsWith("$$") && txt.length >= 4) {
-        scanned++;
-        const formula = txt.slice(2, -2).trim();
-        try {
-          const renderedHtml = katex.renderToString(formula, {
-            output: "mathml",
-            displayMode: true,
-            throwOnError: false,
-            trust: false,
-          });
-          if (renderedHtml && renderedHtml.includes("<math")) {
-            const wrapper = doc.createElement("span");
-            wrapper.setAttribute?.("role", "math");
-            wrapper.setAttribute?.("aria-label", formula);
-            wrapper.setAttribute?.("data-paseo-math-healed", "true");
-            wrapper.className = "paseo-finder-math-rendered";
-            if (wrapper.style) wrapper.style.display = "block";
-            wrapper.innerHTML = renderedHtml;
-            const parent =
-              block.parentNode ??
-              (block as unknown as { parentElement?: Node }).parentElement;
-            parent?.replaceChild?.(wrapper, block);
-            healed++;
+  const targetDoc =
+    doc ??
+    ((queryRoot as { ownerDocument?: Document })?.ownerDocument) ??
+    (typeof document !== "undefined" ? document : null);
+
+  const rawCodeBlocks = Array.from(
+    queryRoot.querySelectorAll<HTMLElement>(
+      ".enrm-text pre, .enrm-text code, pre, code",
+    ),
+  );
+  for (const block of rawCodeBlocks) {
+    if (block.isConnected === false) continue;
+    if (!block.parentNode && !block.parentElement) continue;
+    if (isInsideMathOrPre(block, "math")) continue;
+    if ((block.tagName ?? "").toLowerCase() === "code" && isInsideMathOrPre(block, "pre")) {
+      continue;
+    }
+    const txt = (block.textContent ?? "").trim();
+    if (!txt) continue;
+
+    let formula = "";
+    let displayMode = false;
+
+    const className = block.className || "";
+    const isMathLang =
+      className.includes("language-math") ||
+      className.includes("language-latex") ||
+      className.includes("lang-math") ||
+      block.getAttribute?.("data-language") === "math";
+
+    if (txt.startsWith("$$") && txt.endsWith("$$") && txt.length >= 4) {
+      displayMode = true;
+      formula = txt.slice(2, -2).trim();
+    } else if (isMathLang) {
+      displayMode = true;
+      formula = txt.replace(/^\$\$|\$\$$/g, "").trim();
+    } else if (
+      block.tagName?.toLowerCase() === "code" &&
+      txt.startsWith("$") &&
+      txt.endsWith("$") &&
+      txt.length >= 2 &&
+      !txt.startsWith("$$")
+    ) {
+      displayMode = false;
+      formula = txt.slice(1, -1).trim();
+    }
+
+    if (!formula) continue;
+    scanned++;
+    try {
+      const renderedHtml = katex.renderToString(formula, {
+        output: "mathml",
+        displayMode,
+        throwOnError: false,
+        trust: false,
+      });
+      if (renderedHtml && renderedHtml.includes("<math")) {
+        const createSpanNode = (): HTMLElement => {
+          if (targetDoc && typeof targetDoc.createElement === "function") {
+            return targetDoc.createElement("span");
           }
-        } catch {
-          // ignore
+          const makeNode = (globalThis as unknown as { __testMakeInteractiveDomNode?: (t: string) => HTMLElement }).__testMakeInteractiveDomNode;
+          if (typeof makeNode === "function") {
+            return makeNode("span");
+          }
+          return {
+            tagName: "SPAN",
+            setAttribute: () => {},
+            getAttribute: () => null,
+            style: {},
+            classList: { add: () => {} },
+          } as unknown as HTMLElement;
+        };
+        const wrapper = createSpanNode();
+        wrapper.setAttribute?.("role", "math");
+        wrapper.setAttribute?.("aria-label", formula);
+        wrapper.setAttribute?.("data-paseo-math-healed", "true");
+        wrapper.className = "paseo-finder-math-rendered";
+        if (wrapper.style) {
+          wrapper.style.display = displayMode ? "block" : "inline-block";
+          wrapper.style.whiteSpace = "normal";
         }
+        wrapper.innerHTML = renderedHtml;
+        const parent =
+          block.parentNode ??
+          (block as unknown as { parentElement?: Node }).parentElement;
+        parent?.replaceChild?.(wrapper, block);
+        healed++;
       }
+    } catch {
+      // ignore
     }
   }
 
@@ -1122,12 +1362,18 @@ export function injectMarkdownTableStyles(doc?: Document): void {
 .enrm-text span[role="math"],
 .paseo-finder-math-rendered {
   line-height: 1.45 !important;
+  white-space: normal !important;
+}
+.enrm-text span[role="math"].paseo-finder-math-rendered,
+span[role="math"].paseo-finder-math-rendered {
+  background-color: transparent !important;
+  border: none !important;
 }
 .enrm-text span[role="math"] math[display="block"],
 .paseo-finder-math-rendered math[display="block"] {
   display: block !important;
-  margin: 10px 0 !important;
-  padding: 8px 12px !important;
+  margin: 8px auto !important;
+  padding: 4px 8px !important;
   overflow-x: auto !important;
   overflow-y: hidden !important;
   text-align: center !important;
@@ -1145,11 +1391,24 @@ export function injectMarkdownTableStyles(doc?: Document): void {
 
 export function syncMarkdownTablePreferences(
   prefs: Partial<MarkdownTablePreferences>,
+  storage?: StorageLike | null,
 ): MarkdownTablePreferences {
   currentPrefs = {
     ...currentPrefs,
     ...prefs,
   };
+  const store =
+    storage ??
+    (typeof window !== "undefined" && window.localStorage
+      ? window.localStorage
+      : null);
+  if (store) {
+    try {
+      store.setItem(MARKDOWN_TABLE_PREFS_KEY, JSON.stringify(currentPrefs));
+    } catch {
+      // ignore storage errors
+    }
+  }
   injectMarkdownTableStyles();
   if (currentPrefs.enabled && typeof document !== "undefined") {
     installMetroMarkdownTableHooks();
@@ -1324,6 +1583,7 @@ export function registerMarkdownTableEnhancer(): () => void {
     return () => {};
   }
 
+  readMarkdownTablePreferences();
   injectMarkdownTableStyles(document);
   installMetroMarkdownTableHooks(window as Window & { __r?: unknown });
   repairRenderedDomTables(document);

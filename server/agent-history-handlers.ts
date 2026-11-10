@@ -1098,6 +1098,273 @@ function normalizeFlatSubagentNode(raw: unknown): FlatSubagentNode | null {
   };
 }
 
+interface AgentSubagentIndexEntry {
+  agentId: string;
+  workspaceId: string;
+  provider: string;
+  conversationId: string | null;
+}
+
+let AGENT_SUBAGENT_INDEX_CACHE: {
+  builtAtMs: number;
+  byAgentId: Map<string, AgentSubagentIndexEntry>;
+  byWorkspaceId: Map<string, AgentSubagentIndexEntry[]>;
+} | null = null;
+
+const TRANSCRIPT_ACTIVITY_CACHE = new Map<
+  string,
+  { mtimeMs: number; size: number; hasActivity: boolean }
+>();
+
+const SUBAGENT_RPC_CACHE = new Map<
+  string,
+  {
+    fetchedAtMs: number;
+    hasRunning: boolean;
+    payload: Awaited<ReturnType<typeof executeManageSubagentsCli>>;
+    inFlight?: Promise<Awaited<ReturnType<typeof executeManageSubagentsCli>>>;
+  }
+>();
+
+function normalizeServerWorkspaceKey(raw?: string | null): string {
+  return (raw ?? "").trim().replace(/^[^:]+:/, "").trim();
+}
+
+async function getAgentSubagentIndex(): Promise<{
+  byAgentId: Map<string, AgentSubagentIndexEntry>;
+  byWorkspaceId: Map<string, AgentSubagentIndexEntry[]>;
+}> {
+  const now = Date.now();
+  if (AGENT_SUBAGENT_INDEX_CACHE && now - AGENT_SUBAGENT_INDEX_CACHE.builtAtMs < 2_500) {
+    return AGENT_SUBAGENT_INDEX_CACHE;
+  }
+  const byAgentId = new Map<string, AgentSubagentIndexEntry>();
+  const byWorkspaceId = new Map<string, AgentSubagentIndexEntry[]>();
+  const agentsRoot = path.join(os.homedir(), ".paseo", "agents");
+  try {
+    const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
+    for (const bucket of buckets) {
+      if (!bucket.isDirectory() || bucket.name === "archived") continue;
+      const bPath = path.join(agentsRoot, bucket.name);
+      const files = await fs.readdir(bPath);
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        try {
+          const rec = JSON.parse(
+            await fs.readFile(path.join(bPath, f), "utf8"),
+          ) as FullRawAgentRecord;
+          const aid = (rec.id ?? "").trim();
+          if (!aid || rec.archivedAt) continue;
+          const wsKey = normalizeServerWorkspaceKey(rec.workspaceId);
+          const cid = extractProviderSessionId(rec);
+          const entry: AgentSubagentIndexEntry = {
+            agentId: aid,
+            workspaceId: wsKey,
+            provider: String(rec.provider ?? ""),
+            conversationId: cid,
+          };
+          byAgentId.set(aid, entry);
+          if (wsKey) {
+            const list = byWorkspaceId.get(wsKey) ?? [];
+            list.push(entry);
+            byWorkspaceId.set(wsKey, list);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  AGENT_SUBAGENT_INDEX_CACHE = { builtAtMs: now, byAgentId, byWorkspaceId };
+  return AGENT_SUBAGENT_INDEX_CACHE;
+}
+
+async function hasTranscriptSubagentOrTimerActivity(conversationId: string): Promise<boolean> {
+  const cid = conversationId.trim();
+  if (!cid || !/^[A-Za-z0-9-]+$/.test(cid)) return false;
+  const home = os.homedir();
+  const candidates = [
+    path.join(
+      home,
+      ".gemini",
+      "antigravity-cli",
+      "brain",
+      cid,
+      ".system_generated",
+      "logs",
+      "transcript.jsonl",
+    ),
+    path.join(
+      home,
+      ".gemini",
+      "antigravity",
+      "brain",
+      cid,
+      ".system_generated",
+      "logs",
+      "transcript.jsonl",
+    ),
+  ];
+  for (const tPath of candidates) {
+    try {
+      const st = await fs.stat(tPath);
+      const cached = TRANSCRIPT_ACTIVITY_CACHE.get(tPath);
+      if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+        if (cached.hasActivity) return true;
+        continue;
+      }
+      const raw = await fs.readFile(tPath, "utf8");
+      const hasActivity =
+        raw.includes("invoke_subagent") ||
+        raw.includes('"schedule"') ||
+        raw.includes("manage_task");
+      TRANSCRIPT_ACTIVITY_CACHE.set(tPath, {
+        mtimeMs: st.mtimeMs,
+        size: st.size,
+        hasActivity,
+      });
+      if (hasActivity) return true;
+    } catch {
+      // file does not exist
+    }
+  }
+  return false;
+}
+
+async function canSmartSkipSubagentCli(input: RpcInput<typeof manageSubagentsRpc>): Promise<boolean> {
+  const action = input.action ?? "status";
+  if (action !== "tree" && action !== "status") return false;
+  if (input.conversationId && input.conversationId.trim()) return false;
+  const reqAgent = (input.agentId ?? "").trim();
+  const reqWs = normalizeServerWorkspaceKey(input.workspaceId);
+  if (!reqAgent && !reqWs) return false;
+
+  const idx = await getAgentSubagentIndex();
+  const candidates: AgentSubagentIndexEntry[] = [];
+  if (reqAgent) {
+    const exact = idx.byAgentId.get(reqAgent);
+    if (exact) {
+      candidates.push(exact);
+    } else {
+      for (const entry of idx.byAgentId.values()) {
+        if (entry.agentId.startsWith(reqAgent)) candidates.push(entry);
+      }
+    }
+  }
+  if (reqWs) {
+    const wsEntries = idx.byWorkspaceId.get(reqWs) ?? [];
+    for (const entry of wsEntries) {
+      if (!candidates.some((c) => c.agentId === entry.agentId)) {
+        candidates.push(entry);
+      }
+    }
+  }
+  if (candidates.length === 0) return false;
+  for (const cand of candidates) {
+    if (!cand.conversationId) continue;
+    if (await hasTranscriptSubagentOrTimerActivity(cand.conversationId)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function executeManageSubagentsCli(
+  input: RpcInput<typeof manageSubagentsRpc>,
+  startMs: number,
+) {
+  const action = input.action ?? "status";
+  const cliArgs = ["subagents", action, "--json"];
+  if (input.agentId && input.agentId.trim()) {
+    cliArgs.push("--agent", input.agentId.trim());
+  }
+  if (input.workspaceId && input.workspaceId.trim()) {
+    cliArgs.push("--workspace", input.workspaceId.trim());
+  }
+  if (input.conversationId && input.conversationId.trim()) {
+    cliArgs.push("--cid", input.conversationId.trim());
+  }
+  if (input.includeTimeline || action === "inspect" || action === "timeline") {
+    cliArgs.push("--timeline");
+  }
+  if (typeof input.limit === "number") {
+    cliArgs.push("--limit", String(input.limit));
+  }
+
+  const res = await execCommand(ANTIGRAVITY_OPS_BIN, cliArgs, { timeout: 20_000 });
+  const parsed = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
+  const summaryRaw = (parsed.summary ?? {}) as Record<string, unknown>;
+  const rawTrees = Array.isArray(parsed.trees) ? parsed.trees : [];
+  const trees: SubagentAgentTree[] = rawTrees.map((t) => {
+    const tr = (t ?? {}) as Record<string, unknown>;
+    const subSum = (tr.subagentSummary ?? {}) as Record<string, unknown>;
+    const rawFlat = Array.isArray(tr.flatSubagents) ? tr.flatSubagents : [];
+    const flatSubagents: FlatSubagentNode[] = [];
+    for (const item of rawFlat) {
+      const norm = normalizeFlatSubagentNode(item);
+      if (norm) flatSubagents.push(norm);
+    }
+    return {
+      agentId: String(tr.agentId ?? ""),
+      workspaceId: String(tr.workspaceId ?? ""),
+      workspaceName: String(tr.workspaceName ?? ""),
+      title: String(tr.title ?? ""),
+      cwd: String(tr.cwd ?? ""),
+      model: String(tr.model ?? "default"),
+      agentStatus: String(tr.agentStatus ?? "idle"),
+      archived: Boolean(tr.archived ?? false),
+      rootConversationId: String(tr.rootConversationId ?? ""),
+      rootStepCount: Number(tr.rootStepCount ?? 0),
+      rootToolCallCount: Number(tr.rootToolCallCount ?? 0),
+      rootLastMessagePreview: String(tr.rootLastMessagePreview ?? ""),
+      rootTimersAndTasks: normalizeTimersAndTasks(tr.rootTimersAndTasks),
+      updatedAt: String(tr.updatedAt ?? ""),
+      subagentSummary: {
+        total: Number(subSum.total ?? flatSubagents.length),
+        running: Number(subSum.running ?? 0),
+        completed: Number(subSum.completed ?? 0),
+        failed: Number(subSum.failed ?? 0),
+        maxDepth: Number(subSum.maxDepth ?? 0),
+        totalSubagentSteps: Number(subSum.totalSubagentSteps ?? 0),
+      },
+      flatSubagents,
+      rootTimeline: normalizeTimelineItems(tr.rootTimeline),
+    };
+  });
+
+  const singleConversation = normalizeFlatSubagentNode(
+    parsed.singleConversation ?? parsed.focusedConversation,
+  );
+  const totalSubagents = Number(summaryRaw.totalSubagents ?? 0);
+  const runningSubagents = Number(summaryRaw.runningSubagents ?? 0);
+  const completedSubagents = Number(summaryRaw.completedSubagents ?? 0);
+  const failedSubagents = Number(summaryRaw.failedSubagents ?? 0);
+  const durationMs = Date.now() - startMs;
+
+  return {
+    ok: Boolean(parsed.ok ?? true),
+    action,
+    targetAgentId: typeof parsed.targetAgentId === "string" ? parsed.targetAgentId : null,
+    targetWorkspaceId:
+      typeof parsed.targetWorkspaceId === "string" ? parsed.targetWorkspaceId : null,
+    targetConversationId:
+      typeof parsed.targetConversationId === "string" ? parsed.targetConversationId : null,
+    summary: {
+      agentsWithSubagents: Number(summaryRaw.agentsWithSubagents ?? trees.length),
+      totalSubagents,
+      runningSubagents,
+      completedSubagents,
+      failedSubagents,
+    },
+    trees,
+    singleConversation,
+    message: `Subagent Tree: ${trees.length} session(s) · ${totalSubagents} subagents (Running=${runningSubagents}, Done=${completedSubagents}, Failed=${failedSubagents})`,
+    durationMs,
+  };
+}
+
 export async function handleManageSubagents(
   input: RpcInput<typeof manageSubagentsRpc>,
   _context: PluginHandlerContext,
@@ -1105,93 +1372,130 @@ export async function handleManageSubagents(
   const startMs = Date.now();
   const action = input.action ?? "status";
   try {
-    const cliArgs = ["subagents", action, "--json"];
-    if (input.agentId && input.agentId.trim()) {
-      cliArgs.push("--agent", input.agentId.trim());
-    }
-    if (input.workspaceId && input.workspaceId.trim()) {
-      cliArgs.push("--workspace", input.workspaceId.trim());
-    }
-    if (input.conversationId && input.conversationId.trim()) {
-      cliArgs.push("--cid", input.conversationId.trim());
-    }
-    if (input.includeTimeline || action === "inspect" || action === "timeline") {
-      cliArgs.push("--timeline");
-    }
-    if (typeof input.limit === "number") {
-      cliArgs.push("--limit", String(input.limit));
+    // Pattern #6 Smart Skip: if querying `tree` or `status` for a specific workspace/agent whose
+    // transcript has zero `invoke_subagent` / `schedule` calls, return empty in <1ms without spawning Python.
+    if (await canSmartSkipSubagentCli(input)) {
+      const durationMs = Date.now() - startMs;
+      return {
+        ok: true,
+        action,
+        targetAgentId: input.agentId ?? null,
+        targetWorkspaceId: input.workspaceId ?? null,
+        targetConversationId: input.conversationId ?? null,
+        summary: {
+          agentsWithSubagents: 0,
+          totalSubagents: 0,
+          runningSubagents: 0,
+          completedSubagents: 0,
+          failedSubagents: 0,
+        },
+        trees: [],
+        singleConversation: null,
+        message: "Subagent Tree: 0 session(s) · 0 subagents (Smart-Skipped in <1ms)",
+        durationMs,
+      };
     }
 
-    const res = await execCommand(ANTIGRAVITY_OPS_BIN, cliArgs, { timeout: 20_000 });
-    const parsed = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
-    const summaryRaw = (parsed.summary ?? {}) as Record<string, unknown>;
-    const rawTrees = Array.isArray(parsed.trees) ? parsed.trees : [];
-    const trees: SubagentAgentTree[] = rawTrees.map((t) => {
-      const tr = (t ?? {}) as Record<string, unknown>;
-      const subSum = (tr.subagentSummary ?? {}) as Record<string, unknown>;
-      const rawFlat = Array.isArray(tr.flatSubagents) ? tr.flatSubagents : [];
-      const flatSubagents: FlatSubagentNode[] = [];
-      for (const item of rawFlat) {
-        const norm = normalizeFlatSubagentNode(item);
-        if (norm) flatSubagents.push(norm);
-      }
+    const cacheKey = `${action}:${(input.agentId ?? "").trim()}:${normalizeServerWorkspaceKey(
+      input.workspaceId,
+    )}:${(input.conversationId ?? "").trim()}:${Boolean(input.includeTimeline)}:${input.limit ?? ""}`;
+    const now = Date.now();
+    const cached = SUBAGENT_RPC_CACHE.get(cacheKey);
+    const ttlMs = cached?.hasRunning ? 2_000 : 6_000;
+    if (cached && now - cached.fetchedAtMs < ttlMs) {
       return {
-        agentId: String(tr.agentId ?? ""),
-        workspaceId: String(tr.workspaceId ?? ""),
-        workspaceName: String(tr.workspaceName ?? ""),
-        title: String(tr.title ?? ""),
-        cwd: String(tr.cwd ?? ""),
-        model: String(tr.model ?? "default"),
-        agentStatus: String(tr.agentStatus ?? "idle"),
-        archived: Boolean(tr.archived ?? false),
-        rootConversationId: String(tr.rootConversationId ?? ""),
-        rootStepCount: Number(tr.rootStepCount ?? 0),
-        rootToolCallCount: Number(tr.rootToolCallCount ?? 0),
-        rootLastMessagePreview: String(tr.rootLastMessagePreview ?? ""),
-        rootTimersAndTasks: normalizeTimersAndTasks(tr.rootTimersAndTasks),
-        updatedAt: String(tr.updatedAt ?? ""),
-        subagentSummary: {
-          total: Number(subSum.total ?? flatSubagents.length),
-          running: Number(subSum.running ?? 0),
-          completed: Number(subSum.completed ?? 0),
-          failed: Number(subSum.failed ?? 0),
-          maxDepth: Number(subSum.maxDepth ?? 0),
-          totalSubagentSteps: Number(subSum.totalSubagentSteps ?? 0),
-        },
-        flatSubagents,
-        rootTimeline: normalizeTimelineItems(tr.rootTimeline),
+        ...cached.payload,
+        durationMs: Date.now() - startMs,
       };
+    }
+    if (cached?.inFlight) {
+      return await cached.inFlight;
+    }
+
+    const inFlight = executeManageSubagentsCli(input, startMs).then((payload) => {
+      const finishedAt = Date.now();
+      SUBAGENT_RPC_CACHE.set(cacheKey, {
+        fetchedAtMs: finishedAt,
+        hasRunning: payload.summary.runningSubagents > 0,
+        payload,
+      });
+      // When a batch tree call completes without timeline, pre-populate per-workspace and per-agent cache keys
+      if (
+        action === "tree" &&
+        !input.includeTimeline &&
+        !input.agentId &&
+        !input.workspaceId &&
+        !input.conversationId
+      ) {
+        for (const tr of payload.trees) {
+          const singlePayload = {
+            ...payload,
+            targetAgentId: tr.agentId,
+            targetWorkspaceId: tr.workspaceId,
+            summary: {
+              agentsWithSubagents: 1,
+              totalSubagents: tr.subagentSummary.total,
+              runningSubagents: tr.subagentSummary.running,
+              completedSubagents: tr.subagentSummary.completed,
+              failedSubagents: tr.subagentSummary.failed,
+            },
+            trees: [tr],
+          };
+          const wsKey = normalizeServerWorkspaceKey(tr.workspaceId);
+          for (const lim of ["", "5", "20"]) {
+            if (tr.agentId) {
+              SUBAGENT_RPC_CACHE.set(`tree:${tr.agentId}::false:${lim}`, {
+                fetchedAtMs: finishedAt,
+                hasRunning: tr.subagentSummary.running > 0,
+                payload: singlePayload,
+              });
+            }
+            if (wsKey) {
+              SUBAGENT_RPC_CACHE.set(`tree::${wsKey}::false:${lim}`, {
+                fetchedAtMs: finishedAt,
+                hasRunning: tr.subagentSummary.running > 0,
+                payload: singlePayload,
+              });
+            }
+            if (tr.agentId && wsKey) {
+              SUBAGENT_RPC_CACHE.set(`tree:${tr.agentId}:${wsKey}::false:${lim}`, {
+                fetchedAtMs: finishedAt,
+                hasRunning: tr.subagentSummary.running > 0,
+                payload: singlePayload,
+              });
+            }
+          }
+        }
+      }
+      return payload;
     });
 
-    const singleConversation = normalizeFlatSubagentNode(
-      parsed.singleConversation ?? parsed.focusedConversation,
-    );
-    const totalSubagents = Number(summaryRaw.totalSubagents ?? 0);
-    const runningSubagents = Number(summaryRaw.runningSubagents ?? 0);
-    const completedSubagents = Number(summaryRaw.completedSubagents ?? 0);
-    const failedSubagents = Number(summaryRaw.failedSubagents ?? 0);
-    const durationMs = Date.now() - startMs;
+    SUBAGENT_RPC_CACHE.set(cacheKey, {
+      fetchedAtMs: cached?.fetchedAtMs ?? 0,
+      hasRunning: cached?.hasRunning ?? false,
+      payload:
+        cached?.payload ?? {
+          ok: true,
+          action,
+          targetAgentId: input.agentId ?? null,
+          targetWorkspaceId: input.workspaceId ?? null,
+          targetConversationId: input.conversationId ?? null,
+          summary: {
+            agentsWithSubagents: 0,
+            totalSubagents: 0,
+            runningSubagents: 0,
+            completedSubagents: 0,
+            failedSubagents: 0,
+          },
+          trees: [],
+          singleConversation: null,
+          message: "",
+          durationMs: 0,
+        },
+      inFlight,
+    });
 
-    return {
-      ok: Boolean(parsed.ok ?? true),
-      action,
-      targetAgentId: typeof parsed.targetAgentId === "string" ? parsed.targetAgentId : null,
-      targetWorkspaceId:
-        typeof parsed.targetWorkspaceId === "string" ? parsed.targetWorkspaceId : null,
-      targetConversationId:
-        typeof parsed.targetConversationId === "string" ? parsed.targetConversationId : null,
-      summary: {
-        agentsWithSubagents: Number(summaryRaw.agentsWithSubagents ?? trees.length),
-        totalSubagents,
-        runningSubagents,
-        completedSubagents,
-        failedSubagents,
-      },
-      trees,
-      singleConversation,
-      message: `Subagent Tree: ${trees.length} session(s) · ${totalSubagents} subagents (Running=${runningSubagents}, Done=${completedSubagents}, Failed=${failedSubagents})`,
-      durationMs,
-    };
+    return await inFlight;
   } catch (err) {
     const durationMs = Date.now() - startMs;
     const errMsg = err instanceof Error ? err.message : String(err);
