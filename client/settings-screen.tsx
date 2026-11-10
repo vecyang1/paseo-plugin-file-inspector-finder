@@ -98,6 +98,16 @@ import {
   syncSmartCopyPreferences,
 } from "./smart-copy-web";
 import {
+  QUOTE_REPLY_EVENT,
+  type QuoteReplySelfTestResult,
+  type QuoteReplyStatus,
+  clearQuoteTray,
+  getQuoteReplyStatus,
+  resetQuoteReplyPreferences,
+  runQuoteReplySelfTest,
+  syncQuoteReplyPreferences,
+} from "./quote-reply-web";
+import {
   DEFAULT_MARKDOWN_TABLE_SAMPLE,
   MARKDOWN_TABLE_EVENT,
   type MarkdownTableSelfTestResult,
@@ -220,6 +230,15 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     const onReceipt = () => setSmartCopyStatus(getSmartCopyStatus());
     window.addEventListener(SMART_COPY_EVENT, onReceipt);
     return () => window.removeEventListener(SMART_COPY_EVENT, onReceipt);
+  }, []);
+  const [quoteReplyStatus, setQuoteReplyStatus] = useState<QuoteReplyStatus | null>(null);
+  const [quoteReplySelfTest, setQuoteReplySelfTest] = useState<QuoteReplySelfTestResult | null>(null);
+  useEffect(() => {
+    setQuoteReplyStatus(getQuoteReplyStatus());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setQuoteReplyStatus(getQuoteReplyStatus());
+    window.addEventListener(QUOTE_REPLY_EVENT, onReceipt);
+    return () => window.removeEventListener(QUOTE_REPLY_EVENT, onReceipt);
   }, []);
   const [markdownTableStatus, setMarkdownTableStatus] = useState<MarkdownTableStatus | null>(null);
   const [markdownTableSampleInput, setMarkdownTableSampleInput] = useState(
@@ -1034,6 +1053,52 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             onValueChange={(next) => {
               syncSmartCopyPreferences({ defaultMode: next });
               void save({ ...values, defaultClipboardCopyMode: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={isZh ? "选中文字引用回复" : "Quote Selection as Reply Context"}
+            hint={
+              isZh
+                ? "在对话、子代理面板或文件预览里选中文字，点击浮出的「引用」或「评论」，引用会进入输入框上方的引用栏；每条引用可单独写评论。发送时按 Markdown 引用块写在消息前面，已发出的消息里可以看到完整内容。按键未发送时自动还原，引用未出现在已发消息中时自动恢复到引用栏。"
+                : "Select text in a chat, sub-agent panel, or file preview and press Quote or Comment. Quotes collect above the composer, each with its own optional comment, and are sent as Markdown blockquotes ahead of your message, visible in the sent bubble. A key press that does not send is reverted; if the quote is missing from the sent bubble the tray is restored."
+            }
+            value={quoteReplyStatus?.preferences.enabled ?? true}
+            onValueChange={(next) => {
+              setQuoteReplyStatus({ ...getQuoteReplyStatus(), preferences: syncQuoteReplyPreferences({ enabled: next }) });
+            }}
+          />
+
+          <SettingsAction
+            label={isZh ? "引用回复诊断" : "Quote Reply Diagnostics"}
+            hint={[
+              `${isZh ? "状态" : "Status"}: ${quoteReplyStatus?.installed ? (isZh ? "已安装" : "installed") : isZh ? "未安装" : "not installed"}`,
+              `${isZh ? "当前会话" : "Session"}: ${quoteReplyStatus?.sessionKey ?? "-"} · ${isZh ? "待发引用" : "pending quotes"}: ${quoteReplyStatus?.quotes.length ?? 0}`,
+              `${isZh ? "输入框" : "Composer"}: ${quoteReplyStatus?.composerFound ? (isZh ? "已定位" : "found") : isZh ? "未在屏幕上" : "not on screen"} · ${isZh ? "单条上限" : "max chars"}: ${quoteReplyStatus?.preferences.maxQuoteChars ?? 4000}`,
+              quoteReplySelfTest ? `${isZh ? "自检" : "Self-test"}: ${quoteReplySelfTest.ok ? "ok" : "fail"} · ${quoteReplySelfTest.summary}` : "",
+              ...(quoteReplyStatus?.receipts ?? []).slice(0, 6).map(
+                (r) => `${r.at.slice(11, 19)} ${r.trigger} ${r.ok ? "" : "[!] "}${r.outcome}`,
+              ),
+            ]
+              .filter(Boolean)
+              .join("\n")}
+            actionLabel={isZh ? "运行自检" : "Run Self-Test"}
+            onPress={() => {
+              const res = runQuoteReplySelfTest();
+              setQuoteReplySelfTest(res);
+              setQuoteReplyStatus(getQuoteReplyStatus());
+              toast.show(res.summary);
+            }}
+          />
+
+          <SettingsAction
+            label={isZh ? "清空引用栏 / 恢复默认" : "Clear Tray / Reset Defaults"}
+            hint={isZh ? "清空当前会话的待发引用，并把引用回复设置恢复为默认（开启、单条 4000 字）" : "Clear pending quotes for the current session and reset Quote Reply to defaults (on, 4000 chars per quote)"}
+            actionLabel={isZh ? "清空并重置" : "Clear & Reset"}
+            onPress={() => {
+              clearQuoteTray();
+              resetQuoteReplyPreferences();
+              setQuoteReplyStatus(getQuoteReplyStatus());
             }}
           />
 

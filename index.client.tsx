@@ -63,6 +63,7 @@ import {
   registerMarkdownTableEnhancer,
   syncMarkdownTablePreferences,
 } from "./client/markdown-table-web";
+import { installQuoteReply } from "./client/quote-reply-web";
 import {
   extractCurrentRouteAgentId,
   installDesktopSubagentsTreeEnhancer,
@@ -1576,6 +1577,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupMarkdownTableEnhancer = registerMarkdownTableEnhancer();
 
+  const cleanupQuoteReply = installQuoteReply({ getLocale: () => client.i18n.locale });
+
   const cleanupSubagentsTreeEnhancer = installDesktopSubagentsTreeEnhancer({
     call: (def, input) => client.rpc(def as never, input as never) as never,
     getLocale: () => client.i18n.locale,
@@ -1600,6 +1603,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSettingsSearch();
     cleanupSmartClipboardCopy();
     cleanupMarkdownTableEnhancer();
+    cleanupQuoteReply();
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
