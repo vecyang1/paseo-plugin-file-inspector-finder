@@ -109,6 +109,7 @@ import {
   recordExplicitTitleSync,
   resetExplicitTitleSyncForTesting,
   isMarkDoneKeyboardEvent,
+  repairClobberedProjectIconsInDoc,
   synchronizeWorkspaceTitleDom,
   toggleCurrentSessionDone,
   extractActiveWorkspaceHeaderProjectName,
@@ -8474,10 +8475,14 @@ test("58. Workspace Header & Sidebar Title Synchronization (Zero Timing Gap & Pr
   });
   const rowMain = createInteractiveDomNode("div");
   const leadingProjectIcon = createInteractiveDomNode("div", {
-    "data-testid": "project-status-indicator-running",
+    "data-testid": "sidebar-row-project-icon-local:wks_gozen_123",
+  });
+  const projectIconBox = createInteractiveDomNode("div", {
+    class: "projectIconBox",
   });
   const monogramInitial = createInteractiveDomNode("span", {}, "A");
-  leadingProjectIcon.appendChild?.(monogramInitial);
+  projectIconBox.appendChild?.(monogramInitial);
+  leadingProjectIcon.appendChild?.(projectIconBox);
 
   const contentCol = createInteractiveDomNode("div");
   const titleRow = createInteractiveDomNode("div");
@@ -8645,6 +8650,145 @@ test("58. Workspace Header & Sidebar Title Synchronization (Zero Timing Gap & Pr
   assert.equal(activeRecord?.workspaceKey, "wks_gozen_123");
   assert.equal(activeRecord?.title, "Go");
   resetExplicitTitleSyncForTesting();
+});
+
+test("59. Pinned / Done Sidebar Row Project Icon Monogram Regression & Self-Healing (⌘+⌥+P / ⌘+⇧+D)", async () => {
+  // Reproduces the exact Paseo v0.15.3 Pinned / Done section row where:
+  // - leadingProjectIcon has data-testid="sidebar-row-project-icon-local:wks_40d2c19d766bc707" (ends with :wks_40d2c19d766bc707!)
+  // - titleTextEl has NO data-testid attribute, only text "what? https://mailmate.jp/app/mails/232441/view_mail"
+  const wsId = "wks_40d2c19d766bc707";
+  const rowNode = createInteractiveDomNode("div", {
+    "data-testid": `sidebar-workspace-row-local:${wsId}`,
+    "aria-selected": "true",
+  });
+  const rowMain = createInteractiveDomNode("div");
+  const leadingProjectIcon = createInteractiveDomNode("div", {
+    "data-testid": `sidebar-row-project-icon-local:${wsId}`,
+  });
+  const projectIconBox = createInteractiveDomNode("div", { class: "projectIconBox" });
+  const monogramInitial = createInteractiveDomNode("span", {}, "A");
+  projectIconBox.appendChild?.(monogramInitial);
+  leadingProjectIcon.appendChild?.(projectIconBox);
+
+  const contentCol = createInteractiveDomNode("div");
+  const titleRow = createInteractiveDomNode("div");
+  const originalTitle = "what? https://mailmate.jp/app/mails/232441/view_mail";
+  const titleTextEl = createInteractiveDomNode("span", {}, originalTitle);
+  titleRow.appendChild?.(titleTextEl);
+
+  const metaRow = createInteractiveDomNode("div");
+  const projectMetaText = createInteractiveDomNode("span", {}, "Alpha Workspace");
+  const ageText = createInteractiveDomNode("span", {}, "9h");
+  metaRow.appendChild?.(projectMetaText);
+  metaRow.appendChild?.(ageText);
+
+  contentCol.appendChild?.(titleRow);
+  contentCol.appendChild?.(metaRow);
+  rowMain.appendChild?.(leadingProjectIcon);
+  rowMain.appendChild?.(contentCol);
+  rowNode.appendChild?.(rowMain);
+
+  // Add a custom querySelector on rowNode that also supports `[data-testid$="..."]` and `[data-testid^="..."]`
+  const origQuerySelector = rowNode.querySelector?.bind(rowNode);
+  rowNode.querySelector = (sel: string) => {
+    if (sel === `[data-testid$=":${wsId}"]`) {
+      // If someone ever used a bare suffix selector, it would match leadingProjectIcon!
+      return leadingProjectIcon;
+    }
+    return origQuerySelector ? origQuerySelector(sel) : null;
+  };
+
+  // 1. findSidebarRowTitleElement must NEVER return leadingProjectIcon or monogramInitial ("A")
+  const foundTitleEl = findSidebarRowTitleElement(rowNode, `local:${wsId}`);
+  assert.equal(
+    foundTitleEl,
+    titleTextEl,
+    "findSidebarRowTitleElement must return titleTextEl, NEVER sidebar-row-project-icon-local:*",
+  );
+  assert.notEqual(foundTitleEl, leadingProjectIcon);
+  assert.notEqual(foundTitleEl, monogramInitial);
+  assert.equal(foundTitleEl?.textContent, originalTitle);
+
+  // 2. toggleCurrentSessionDone must mark the real title with "d " and NEVER corrupt it into "d A"
+  const headerTitleEl = createInteractiveDomNode(
+    "div",
+    { "data-testid": "workspace-header-title" },
+    originalTitle,
+  );
+  let persistedTitle = "";
+  const mockDoc: MinimalDocument = {
+    body: createInteractiveDomNode("body"),
+    querySelector: (sel: string) => {
+      if (sel.includes("workspace-header-title")) return headerTitleEl;
+      if (sel.includes("sidebar-workspace-row-")) return rowNode;
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-")) return [rowNode];
+      if (sel.includes("sidebar-row-project-icon-")) return [leadingProjectIcon];
+      return [];
+    },
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  const mockWin: MinimalWindow = {
+    document: mockDoc,
+    location: { pathname: `/workspace/${wsId}` },
+    navigator: { language: "zh-CN" },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const doneRes = await toggleCurrentSessionDone({
+    workspaceId: wsId,
+    doc: mockDoc,
+    win: mockWin,
+    callbacks: {
+      onRenameThread: async (title) => {
+        persistedTitle = title ?? "";
+      },
+    },
+  });
+  assert.ok(doneRes);
+  assert.equal(doneRes.newTitle, `d ${originalTitle}`);
+  assert.equal(persistedTitle, `d ${originalTitle}`);
+  assert.equal(titleTextEl.textContent, `d ${originalTitle}`);
+  assert.equal(monogramInitial.textContent, "A", "Project monogram must stay 'A'");
+  assert.equal(leadingProjectIcon.children?.length, 1, "Project icon container children must remain intact");
+
+  // 3. Even if a row's title was previously corrupted to "d A" while header holds the real title,
+  // toggleCurrentSessionDone recovers the real title instead of toggling "d A" -> "A"!
+  titleTextEl.textContent = "d A";
+  headerTitleEl.textContent = originalTitle;
+  const recoveredRes = await toggleCurrentSessionDone({
+    workspaceId: wsId,
+    doc: mockDoc,
+    win: mockWin,
+  });
+  assert.ok(recoveredRes);
+  assert.equal(
+    recoveredRes.newTitle,
+    `d ${originalTitle}`,
+    "Must recover real title from header when row text was corrupted to 'd A'",
+  );
+
+  // 4. Verify repairClobberedProjectIconsInDoc self-heals a clobbered project icon element
+  const clobberedIcon = createInteractiveDomNode(
+    "div",
+    { "data-testid": "sidebar-row-project-icon-local:wks_clobbered" },
+    "d A",
+  );
+  const mockDocWithClobbered: MinimalDocument = {
+    ...mockDoc,
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-row-project-icon-")) return [clobberedIcon];
+      return [];
+    },
+  };
+  const repairedCount = repairClobberedProjectIconsInDoc(mockDocWithClobbered);
+  assert.equal(repairedCount, 1);
+  assert.equal(clobberedIcon.textContent, "A");
 });
 
 

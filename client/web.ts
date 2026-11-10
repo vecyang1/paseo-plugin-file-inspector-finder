@@ -770,7 +770,7 @@ export interface InlineRenameTarget {
 const SIDEBAR_ROW_RELATIVE_TIME_REGEX =
   /^(?:just now|\d+\s*(?:s|m|h|d|w|mo|y)|yesterday|today)$/i;
 
-function isSkippedRowElement(el: MinimalElement): boolean {
+function isSingleNodeSkippedInRow(el: MinimalElement): boolean {
   const tag = (el.tagName ?? "").toUpperCase();
   if (tag === "SVG" || tag === "PATH" || tag === "IMG" || tag === "INPUT") {
     return true;
@@ -818,6 +818,95 @@ function isSkippedRowElement(el: MinimalElement): boolean {
     return true;
   }
   return false;
+}
+
+function isSkippedRowElement(el: MinimalElement): boolean {
+  let curr: MinimalElement | null = el;
+  for (let depth = 0; curr && depth < 7; depth += 1) {
+    const tid = curr.getAttribute?.("data-testid") ?? "";
+    if (
+      depth > 0 &&
+      (tid.startsWith("sidebar-workspace-row-") || tid.startsWith("workspace-tab-agent_"))
+    ) {
+      break;
+    }
+    if (isSingleNodeSkippedInRow(curr)) {
+      return true;
+    }
+    curr = curr.parentElement ?? null;
+  }
+  return false;
+}
+
+export function repairClobberedProjectIconsInDoc(doc: MinimalDocument | null | undefined): number {
+  if (!doc?.querySelectorAll) return 0;
+  let repaired = 0;
+  try {
+    const icons = doc.querySelectorAll('[data-testid^="sidebar-row-project-icon-"]');
+    let healthyTemplate: MinimalElement | null = null;
+    for (let i = 0; i < icons.length; i += 1) {
+      const candidate = icons[i];
+      if (candidate?.children && candidate.children.length > 0) {
+        healthyTemplate = candidate;
+        break;
+      }
+    }
+    for (let i = 0; i < icons.length; i += 1) {
+      const iconEl = icons[i];
+      if (!iconEl) continue;
+      if (iconEl.children && iconEl.children.length > 0) continue;
+      const rawTxt = (iconEl.textContent ?? "").trim();
+      if (!rawTxt) continue;
+
+      // Determine the 1-character project initial from the row's WorkspaceMetaRow or fallback
+      let initial = "";
+      const row = iconEl.closest?.('[data-testid^="sidebar-workspace-row-"]') ?? iconEl.parentElement?.parentElement ?? null;
+      if (row) {
+        const leaves = collectRowCandidateTextLeaves(row);
+        // WorkspaceMetaRow typically holds the project display name as the last or second leaf
+        for (let j = leaves.length - 1; j >= 1; j -= 1) {
+          const leafTxt = (leaves[j]?.textContent ?? "").trim();
+          if (leafTxt && !SIDEBAR_ROW_RELATIVE_TIME_REGEX.test(leafTxt)) {
+            initial = leafTxt.charAt(0).toUpperCase();
+            break;
+          }
+        }
+      }
+      if (!initial) {
+        const stripped = rawTxt.replace(/^(?:d\s+)+/i, "").trim();
+        initial = (stripped.charAt(0) || "A").toUpperCase();
+      }
+
+      const domIcon = iconEl as unknown as {
+        firstElementChild?: Element | null;
+        appendChild?: (node: Node) => void;
+      };
+      const domTemplate = healthyTemplate as unknown as {
+        firstElementChild?: { cloneNode?: (deep: boolean) => Element } | null;
+      } | null;
+
+      if (
+        domTemplate?.firstElementChild &&
+        typeof domTemplate.firstElementChild.cloneNode === "function" &&
+        typeof domIcon.appendChild === "function"
+      ) {
+        const clonedBox = domTemplate.firstElementChild.cloneNode(true);
+        iconEl.textContent = "";
+        domIcon.appendChild(clonedBox as unknown as Node);
+        const leaf = findFirstTextLeafElement(iconEl);
+        if (leaf) {
+          leaf.textContent = initial;
+        }
+        repaired += 1;
+      } else if (rawTxt !== initial) {
+        iconEl.textContent = initial;
+        repaired += 1;
+      }
+    }
+  } catch {
+    // Ignore DOM repair errors
+  }
+  return repaired;
 }
 
 function findFirstTextLeafElement(root: MinimalElement): MinimalElement | null {
@@ -870,7 +959,9 @@ export function findSidebarRowTitleElement(
   const fullKey = parsed?.workspaceKey ?? workspaceKey;
   const cleanWsId = (parsed?.workspaceId ?? workspaceKey).replace(/^(?:local|srv_[^:]+):/, "").trim();
 
-  // 1. Precise explicit data-testid lookup matching all permutations of compound and bare keys
+  // 1. Precise explicit data-testid lookup matching ONLY sidebar-workspace-title-* keys
+  // NEVER use a bare `[data-testid$=":${cleanWsId}"]` suffix selector because Paseo renders
+  // `data-testid="sidebar-row-project-icon-local:${cleanWsId}"` on the 1-letter Project Monogram box!
   const explicit =
     (fullKey ? rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${fullKey}"]`) : null) ??
     (workspaceKey && workspaceKey !== fullKey
@@ -883,11 +974,13 @@ export function findSidebarRowTitleElement(
       ? rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${cleanWsId}"]`)
       : null) ??
     (cleanWsId
-      ? rowEl.querySelector?.(`[data-testid$=":${cleanWsId}"]`)
+      ? rowEl.querySelector?.(
+          `[data-testid^="sidebar-workspace-title-"][data-testid$=":${cleanWsId}"]`,
+        )
       : null) ??
     rowEl.querySelector?.('[data-testid^="sidebar-workspace-title-"]');
 
-  if (explicit) {
+  if (explicit && !isSkippedRowElement(explicit)) {
     return explicit;
   }
 
@@ -985,12 +1078,17 @@ export function synchronizeWorkspaceTitleDom(
   }
 
   // 2. Update left sidebar workspace row title
+  repairClobberedProjectIconsInDoc(doc);
   const row = findSidebarWorkspaceRow(doc, targetWs || cleanWsId);
   if (row) {
     const rowTid = row.getAttribute?.("data-testid") ?? "";
     const parsed = parseSidebarWorkspaceRowTestId(rowTid);
     const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? targetWs ?? cleanWsId);
-    if (sbTitleEl) {
+    if (
+      sbTitleEl &&
+      !isSkippedRowElement(sbTitleEl) &&
+      (!sbTitleEl.children || sbTitleEl.children.length === 0)
+    ) {
       sbTitleEl.textContent = newTitle;
       result.sidebarUpdated = true;
       result.sidebarTitleEl = sbTitleEl;
@@ -3115,8 +3213,13 @@ export function getPaseoRuntimeClient(win?: MinimalWindow | null): {
     } | null;
     if (store?.controllers instanceof Map) {
       for (const ctrl of store.controllers.values()) {
-        if (typeof ctrl?.activeClient?.setWorkspacePinned === "function") {
-          return ctrl.activeClient;
+        const candidate =
+          ctrl?.activeClient ??
+          (typeof (ctrl as { getClient?: () => unknown })?.getClient === "function"
+            ? ((ctrl as { getClient: () => { setWorkspacePinned?: (id: string, pinned: boolean) => Promise<{ pinnedAt?: string | number | null }> } }).getClient())
+            : undefined);
+        if (typeof candidate?.setWorkspacePinned === "function") {
+          return candidate;
         }
       }
     }
@@ -3707,14 +3810,25 @@ export async function toggleCurrentSessionDone(
     ""
   ).trim();
 
-  if (!currentTitle && callbacks?.onFetchThreadMetadata && effectiveWsId) {
+  // Guard against a 1-char project monogram ("A", "2") or corrupted monogram ("d A", "d 2")
+  // being mistaken for the session title when a real title is available in header or metadata
+  const looksLikeCorruptedMonogram = /^(?:d\s+)*[A-Za-z0-9]$/.test(currentTitle);
+  if (looksLikeCorruptedMonogram) {
+    const headerTxt = (headerTitleEl?.textContent ?? "").trim();
+    if (headerTxt.length > 3 && !/^(?:d\s+)*[A-Za-z0-9]$/.test(headerTxt)) {
+      currentTitle = headerTxt;
+    }
+  }
+
+  if ((!currentTitle || looksLikeCorruptedMonogram) && callbacks?.onFetchThreadMetadata && effectiveWsId) {
     try {
       const snap = await callbacks.onFetchThreadMetadata(effectiveWsId);
-      if (snap?.workspaceTitle) {
-        currentTitle = snap.workspaceTitle.trim();
+      const snapTitle = (snap?.workspaceTitle ?? "").trim();
+      if (snapTitle && (!looksLikeCorruptedMonogram || snapTitle.length > currentTitle.length)) {
+        currentTitle = snapTitle;
       }
     } catch {
-      // Fallback to empty
+      // Fallback to existing currentTitle
     }
   }
 
@@ -3727,10 +3841,19 @@ export async function toggleCurrentSessionDone(
 
   // Immediate optimistic DOM updates — synchronized across BOTH header and sidebar simultaneously
   synchronizeWorkspaceTitleDom(doc, win, effectiveWsId, newTitle);
-  if (f2Target?.titleEl) {
+  if (
+    f2Target?.titleEl &&
+    !isSkippedRowElement(f2Target.titleEl) &&
+    (!f2Target.titleEl.children || f2Target.titleEl.children.length === 0)
+  ) {
     f2Target.titleEl.textContent = newTitle;
   }
-  if (sidebarTitleEl && sidebarTitleEl.textContent !== newTitle) {
+  if (
+    sidebarTitleEl &&
+    !isSkippedRowElement(sidebarTitleEl) &&
+    (!sidebarTitleEl.children || sidebarTitleEl.children.length === 0) &&
+    sidebarTitleEl.textContent !== newTitle
+  ) {
     sidebarTitleEl.textContent = newTitle;
   }
   if (headerTitleEl && headerTitleEl.textContent !== newTitle) {
@@ -6772,13 +6895,19 @@ export function installDesktopRevealHelpers(
             const rowTid = row.getAttribute?.("data-testid") ?? "";
             const parsed = parseSidebarWorkspaceRowTestId(rowTid);
             const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? activeWsId ?? "");
-            if (sbTitleEl && sbTitleEl.textContent !== syncTitle) {
+            if (
+              sbTitleEl &&
+              !isSkippedRowElement(sbTitleEl) &&
+              (!sbTitleEl.children || sbTitleEl.children.length === 0) &&
+              sbTitleEl.textContent !== syncTitle
+            ) {
               sbTitleEl.textContent = syncTitle;
             }
           }
         }
       }
     }
+    repairClobberedProjectIconsInDoc(doc);
 
     const renamePrefs = readInlineRenamePreferences(win.localStorage);
     const count =

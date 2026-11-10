@@ -1087,7 +1087,23 @@ export async function handleToggleWorkspacePin(
       const res = await paseo.daemonClient.setWorkspacePinned(workspaceId, nextPinned);
       pinnedAt = res?.pinnedAt ?? (nextPinned ? Date.now() : null);
     } else {
-      pinnedAt = nextPinned ? Date.now() : null;
+      try {
+        const res = await withLocalDaemonBridge(async (bridge) => {
+          const pinBridge = bridge as unknown as {
+            setWorkspacePinned?: (
+              id: string,
+              pinned: boolean,
+            ) => Promise<{ pinnedAt?: string | number | null }>;
+          };
+          if (typeof pinBridge.setWorkspacePinned === "function") {
+            return await pinBridge.setWorkspacePinned(workspaceId, nextPinned);
+          }
+          return null;
+        });
+        pinnedAt = res?.pinnedAt ?? (nextPinned ? Date.now() : null);
+      } catch {
+        pinnedAt = nextPinned ? Date.now() : null;
+      }
     }
 
     recordActionLog({
