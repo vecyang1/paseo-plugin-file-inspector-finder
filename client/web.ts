@@ -23,6 +23,7 @@ import {
   triggerRunScheduleNow,
   CADENCE_TIMER_SVG,
 } from "./schedule-runs-web";
+import { type MetroWindow, getMetroModuleMap, requireMetroExport } from "./metro-registry";
 
 export const LABEL_COLOR_HEX: Record<WorkspaceLabelColor, string> = PASEO_IDENTITY_BG_HEX;
 
@@ -2223,7 +2224,7 @@ export function isNextThreadKeyboardEvent(ke?: MinimalKeyboardEvent | null): boo
   const keyCode = ke.keyCode ?? 0;
   const which = ke.which ?? 0;
 
-  // Single quote variants:
+  // Single quote variants across international layouts & macOS Smart Punctuation:
   // - "'" (U+0027 straight apostrophe)
   // - "’" (U+2019 right single quotation mark / typographic curly apostrophe - macOS default)
   // - "‘" (U+2018 left single quotation mark)
@@ -2358,23 +2359,61 @@ export function healWorkspaceBubblesAfterShift(
         );
       });
 
+      const currentPath = w?.location?.pathname ?? "";
+      const isRouteAtTarget =
+        !currentPath ||
+        currentPath.includes(`/workspace/${cleanWs}`) ||
+        currentPath.includes(`/workspace/${encodeURIComponent(cleanWs)}`);
+
       if (tabs.length > 0) {
         const activeTab = tabs.find(
           (t) =>
             t.getAttribute?.("aria-selected") === "true" ||
             t.getAttribute?.("data-state") === "active",
         );
-        if (activeTab) return true;
+        // If route has settled on target workspace and an active tab is selected with bubbles/input rendered
+        if (isRouteAtTarget && activeTab) {
+          const hasBubbles = Boolean(
+            d.querySelector?.(
+              '[data-testid*="message-bubble"], [data-testid*="turn-bubble"], [data-testid*="message-item"], [data-testid="message-input-root"], [data-composer-input]',
+            ),
+          );
+          if (hasBubbles) return true;
+        }
 
-        const firstTab = tabs[0];
-        if (firstTab) {
-          simulateReactNativePress(firstTab, w as unknown as MinimalWindow);
-          return true;
+        const tabToPress = activeTab ?? tabs[0];
+        if (tabToPress) {
+          simulateReactNativePress(tabToPress, w as unknown as MinimalWindow);
+          if (isRouteAtTarget) return true;
         }
       }
 
-      // If tabs not yet mounted in DOM or workspace has no open tab, try opening the workspace's agent via Metro
+      // If tabs not yet mounted in DOM or workspace has no open tab, activate via Metro modules
       if (w) {
+        type SessionStoreType = {
+          getState?: () => { sessions?: Record<string, unknown> };
+        };
+        type NavToAgentType = (arg: {
+          serverId: string;
+          agentId: string;
+          workspaceId?: string;
+        }) => unknown;
+        type LayoutStoreType = {
+          getState?: () => {
+            openTab?: (opts: unknown) => unknown;
+            revealTab?: (workspaceKey: string, tabId: unknown) => unknown;
+          };
+        };
+
+        let sessionStore: SessionStoreType | null = null;
+        let navToAgent: NavToAgentType | null = null;
+        let layoutStore: LayoutStoreType | null = null;
+
+        // 1. Production Metro registry lookup
+        const metroMap = getMetroModuleMap(w as unknown as MetroWindow);
+        const mapRecords = metroMap ? Array.from(metroMap.values()) : [];
+
+        // 2. Unit test mock fallback (support win.__r.getModules or win.__metroModules)
         const anyW = w as unknown as {
           __r?: {
             getModules?: () => Record<
@@ -2393,87 +2432,107 @@ export function healWorkspaceBubblesAfterShift(
             }
           >;
         };
-        const mods = anyW.__r?.getModules?.() ?? anyW.__metroModules;
-        if (mods) {
-          type SessionStoreType = {
-            getState?: () => { sessions?: Record<string, unknown> };
-          };
-          type NavToAgentType = (arg: {
-            serverId: string;
-            agentId: string;
-            workspaceId?: string;
-          }) => unknown;
-          type LayoutStoreType = {
-            getState?: () => { openTab?: (opts: unknown) => unknown };
-          };
+        const mockMods = anyW.__r?.getModules?.() ?? anyW.__metroModules;
+        const mockRecords = mockMods ? Object.values(mockMods) : [];
 
-          let sessionStore: SessionStoreType | null = null;
-          let navToAgent: NavToAgentType | null = null;
-          let layoutStore: LayoutStoreType | null = null;
+        const allRecords = mapRecords.length > 0 ? mapRecords : mockRecords;
 
-          for (const m of Object.values(mods)) {
-            if (!m?.isInitialized) continue;
-            const exp = m.publicModule?.exports;
-            if (
-              !sessionStore &&
-              typeof (exp?.useSessionStore as { getState?: unknown })?.getState ===
-                "function"
-            ) {
-              sessionStore = exp!.useSessionStore as unknown as SessionStoreType;
-            }
-            if (!navToAgent && typeof exp?.navigateToAgent === "function") {
-              navToAgent = exp!.navigateToAgent as unknown as NavToAgentType;
-            }
-            if (
-              !layoutStore &&
-              typeof (exp?.useWorkspaceLayoutStore as { getState?: unknown })
-                ?.getState === "function"
-            ) {
-              layoutStore = exp!.useWorkspaceLayoutStore as unknown as LayoutStoreType;
+        for (const m of allRecords) {
+          if (!m?.isInitialized) continue;
+          const exp = m.publicModule?.exports;
+          if (
+            !sessionStore &&
+            typeof (exp?.useSessionStore as { getState?: unknown })?.getState === "function"
+          ) {
+            sessionStore = exp!.useSessionStore as unknown as SessionStoreType;
+          }
+          if (!navToAgent && typeof exp?.navigateToAgent === "function") {
+            navToAgent = exp!.navigateToAgent as unknown as NavToAgentType;
+          }
+          if (
+            !layoutStore &&
+            typeof (exp?.useWorkspaceLayoutStore as { getState?: unknown })?.getState ===
+              "function"
+          ) {
+            layoutStore = exp!.useWorkspaceLayoutStore as unknown as LayoutStoreType;
+          }
+        }
+
+        // 3. Fallback to requireMetroExport if not yet initialized
+        if (!navToAgent) {
+          const hit = requireMetroExport("navigateToAgent", w as unknown as MetroWindow);
+          if (typeof hit?.exports?.navigateToAgent === "function") {
+            navToAgent = hit.exports.navigateToAgent as NavToAgentType;
+          }
+        }
+        if (!sessionStore) {
+          const hit = requireMetroExport("useSessionStore", w as unknown as MetroWindow);
+          const store = hit?.exports?.useSessionStore;
+          if (typeof (store as { getState?: unknown })?.getState === "function") {
+            sessionStore = store as SessionStoreType;
+          }
+        }
+        if (!layoutStore) {
+          const hit = requireMetroExport("useWorkspaceLayoutStore", w as unknown as MetroWindow);
+          const store = hit?.exports?.useWorkspaceLayoutStore;
+          if (typeof (store as { getState?: unknown })?.getState === "function") {
+            layoutStore = store as LayoutStoreType;
+          }
+        }
+
+        if (sessionStore && typeof sessionStore.getState === "function") {
+          const sessions = sessionStore.getState()?.sessions ?? {};
+          const matchingAgents: Array<{ serverId: string; agentId: string; lastActivityAt: number }> = [];
+
+          for (const [serverId, session] of Object.entries(sessions)) {
+            const rawAgents = (session as Record<string, unknown> | undefined)?.agents;
+            const agents = rawAgents
+              ? rawAgents instanceof Map
+                ? Array.from(rawAgents.values())
+                : Object.values(rawAgents)
+              : [];
+            for (const a of agents as Array<Record<string, unknown>>) {
+              if (!a) continue;
+              const aWid = String(a.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+              if (cleanWs && (aWid === cleanWs || aWid.endsWith(`:${cleanWs}`))) {
+                const agentId = String(a.id ?? "").trim();
+                if (agentId) {
+                  const activity = Number(
+                    a.lastActivityAt instanceof Date
+                      ? a.lastActivityAt.getTime()
+                      : typeof a.lastActivityAt === "number"
+                        ? a.lastActivityAt
+                        : typeof a.lastActivityAt === "string"
+                          ? Date.parse(a.lastActivityAt) || 0
+                          : 0,
+                  );
+                  matchingAgents.push({ serverId, agentId, lastActivityAt: activity });
+                }
+              }
             }
           }
 
-          const activeSessionStore = sessionStore as SessionStoreType | null;
-          const activeNavToAgent = navToAgent as NavToAgentType | null;
-          const activeLayoutStore = layoutStore as LayoutStoreType | null;
-
-          if (activeSessionStore && typeof activeSessionStore.getState === "function") {
-            const sessions = activeSessionStore.getState()?.sessions ?? {};
-            for (const [serverId, session] of Object.entries(sessions)) {
-              const rawAgents = (session as Record<string, unknown> | undefined)
-                ?.agents;
-              const agents = rawAgents
-                ? rawAgents instanceof Map
-                  ? Array.from(rawAgents.values())
-                  : Object.values(rawAgents)
-                : [];
-              for (const a of agents as Array<Record<string, unknown>>) {
-                if (!a) continue;
-                const aWid = String(a.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
-                if (cleanWs && (aWid === cleanWs || aWid.endsWith(`:${cleanWs}`))) {
-                  const agentId = String(a.id ?? "").trim();
-                  if (agentId) {
-                    if (typeof activeNavToAgent === "function") {
-                      try {
-                        activeNavToAgent({ serverId, agentId, workspaceId: cleanWs });
-                        return true;
-                      } catch {
-                        // ignore
-                      }
-                    }
-                    if (activeLayoutStore && typeof activeLayoutStore.getState === "function") {
-                      try {
-                        activeLayoutStore.getState()?.openTab?.({
-                          workspaceKey: `${serverId}:${cleanWs}`,
-                          target: { kind: "agent", agentId },
-                        });
-                        return true;
-                      } catch {
-                        // ignore
-                      }
-                    }
-                  }
-                }
+          if (matchingAgents.length > 0) {
+            matchingAgents.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+            const best = matchingAgents[0];
+            if (typeof navToAgent === "function") {
+              try {
+                navToAgent({ serverId: best.serverId, agentId: best.agentId, workspaceId: cleanWs });
+                return true;
+              } catch {
+                // ignore
+              }
+            }
+            if (layoutStore && typeof layoutStore.getState === "function") {
+              try {
+                layoutStore.getState()?.openTab?.({
+                  workspaceKey: `${best.serverId}:${cleanWs}`,
+                  target: { kind: "agent", agentId: best.agentId },
+                  intent: "reveal",
+                });
+                return true;
+              } catch {
+                // ignore
               }
             }
           }
@@ -2485,13 +2544,12 @@ export function healWorkspaceBubblesAfterShift(
     return false;
   };
 
-  if (!tryActivateTab()) {
-    const delays = [30, 80, 160, 320, 600];
-    for (const delay of delays) {
-      setTimeout(() => {
-        tryActivateTab();
-      }, delay);
-    }
+  tryActivateTab();
+  const delays = [40, 100, 200, 400];
+  for (const delay of delays) {
+    setTimeout(() => {
+      tryActivateTab();
+    }, delay);
   }
 }
 
@@ -2501,11 +2559,35 @@ export function isBlockedFromThreadNavigation(
   doc?: MinimalDocument | null,
 ): boolean {
   if (doc?.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]')) return true;
-  if (doc?.querySelector?.('[data-testid*="command-center"]')) return true;
-  if (doc?.querySelector?.('[role="dialog"]')) return true;
+  if (
+    doc?.querySelector?.(
+      '[data-testid="command-center-panel"], [data-testid="command-center-input"]',
+    )
+  ) {
+    return true;
+  }
+  // True modal dialog open (settings dialog, confirmation modal, rename modal)
+  if (
+    doc?.querySelector?.(
+      '[role="dialog"][aria-modal="true"], [data-testid*="rename-modal"]:not([aria-hidden="true"])',
+    )
+  ) {
+    return true;
+  }
 
   for (const el of [target, activeEl]) {
     if (!el) continue;
+    // Inside modal dialog container
+    if (el.closest?.('[role="dialog"][aria-modal="true"], dialog, [data-testid*="modal"]')) {
+      return true;
+    }
+    // Message composer textarea is explicitly allowed for quick thread switching
+    if (
+      el.closest?.('[data-testid="message-input-root"], [data-composer-input]') &&
+      !el.closest?.("input")
+    ) {
+      continue;
+    }
     // Inside active code editor (CodeMirror, Monaco) or rich text editable container
     if (
       el.closest?.(
@@ -2514,7 +2596,7 @@ export function isBlockedFromThreadNavigation(
     ) {
       return true;
     }
-    // Inside single-line text input (rename field, search field, settings input)
+    // Inside single-line text input (search field, settings input, rename field)
     const inputEl = el.closest?.("input");
     if (inputEl) {
       const type = (inputEl.getAttribute?.("type") ?? "text").toLowerCase();
@@ -2656,27 +2738,26 @@ export function navigateSidebarThreadRelative(options?: {
 
       lastNavigatedWorkspaceKey = targetWsKey;
 
-      if (!nativeHandled) {
-        const anchor = targetRow.querySelector?.("a") ?? targetRow;
-        simulateReactNativePress(anchor, win);
+      // Always press the target row Pressable to activate React Native Web state
+      const anchor = targetRow.querySelector?.("a") ?? targetRow;
+      simulateReactNativePress(anchor, win);
 
-        // Also ensure route is updated if anchor click alone didn't update it
-        if (cleanTargetWsId && win?.location && win?.history?.pushState) {
-          const currentPath = win.location.pathname ?? "";
-          if (
-            !currentPath.endsWith(`/workspace/${cleanTargetWsId}`) &&
-            !currentPath.endsWith(`/workspace/${encodeURIComponent(cleanTargetWsId)}`)
-          ) {
-            const serverId = parsedWs?.serverId ?? "local";
-            const targetRoute = `/h/${encodeURIComponent(serverId)}/workspace/${encodeURIComponent(cleanTargetWsId)}`;
-            try {
-              win.history.pushState({}, "", targetRoute);
-              if (win.PopStateEvent) {
-                win.dispatchEvent?.(new win.PopStateEvent("popstate"));
-              }
-            } catch {
-              // Ignore
+      // Also ensure route is updated if anchor click alone didn't update it
+      if (cleanTargetWsId && win?.location && win?.history?.pushState) {
+        const currentPath = win.location.pathname ?? "";
+        if (
+          !currentPath.endsWith(`/workspace/${cleanTargetWsId}`) &&
+          !currentPath.endsWith(`/workspace/${encodeURIComponent(cleanTargetWsId)}`)
+        ) {
+          const serverId = parsedWs?.serverId ?? "local";
+          const targetRoute = `/h/${encodeURIComponent(serverId)}/workspace/${encodeURIComponent(cleanTargetWsId)}`;
+          try {
+            win.history.pushState({}, "", targetRoute);
+            if (win.PopStateEvent) {
+              win.dispatchEvent?.(new win.PopStateEvent("popstate"));
             }
+          } catch {
+            // Ignore
           }
         }
       }
@@ -6254,6 +6335,8 @@ export function installDesktopRevealHelpers(
       if (tid.startsWith("sidebar-workspace-row-")) {
         clearSidebarJumpFlashes(doc);
         const parsed = parseSidebarWorkspaceRowTestId(tid);
+        lastNavigatedWorkspaceKey =
+          parsed?.workspaceKey ?? tid.replace(/^sidebar-workspace-row-/, "");
         if (parsed?.workspaceId) {
           lastSidebarDirectClickWsId = parsed.workspaceId;
           lastSidebarDirectClickAtMs = Date.now();

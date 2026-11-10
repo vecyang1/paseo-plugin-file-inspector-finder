@@ -828,14 +828,17 @@ test("Thread Shortcuts 10: isBlockedFromThreadNavigation allows chat composer te
           const tag = (cur.tagName ?? "").toLowerCase();
           const cls = (typeof cur.className === "string" ? cur.className : "") || "";
           const ce = cur.getAttribute?.("contenteditable") ?? "";
+          const dt = cur.getAttribute?.("data-testid") ?? "";
           if (sel.includes(".cm-editor") && cls.includes("cm-editor")) return cur;
           if (sel.includes(".cm-content") && cls.includes("cm-content")) return cur;
           if (sel.includes(".cm-line") && cls.includes("cm-line")) return cur;
           if (sel.includes(".monaco-editor") && cls.includes("monaco-editor")) return cur;
           if (sel.includes('[contenteditable="true"]') && ce === "true") return cur;
           if (sel.includes('[contenteditable="plaintext-only"]') && ce === "plaintext-only") return cur;
-          if (sel.includes("input") && tag === "input") return cur;
-          if (sel.includes("textarea") && tag === "textarea") return cur;
+          if (sel.includes("[data-composer-input]") && cur.getAttribute?.("data-composer-input") === "true") return cur;
+          if (sel.includes('[data-testid="message-input-root"]') && dt === "message-input-root") return cur;
+          if ((sel === "input" || sel.split(",").map((s) => s.trim()).includes("input")) && tag === "input") return cur;
+          if ((sel === "textarea" || sel.split(",").map((s) => s.trim()).includes("textarea")) && tag === "textarea") return cur;
           cur = cur.parentElement ?? null;
         }
         return null;
@@ -902,6 +905,19 @@ test("Thread Shortcuts 10: isBlockedFromThreadNavigation allows chat composer te
       sel.includes('[role="dialog"]') ? makeMockEl({ tagName: "DIV" }) : null,
   };
   assert.equal(isBlockedFromThreadNavigation(chatTextarea, chatTextarea, docWithDialog), true);
+
+  // 6b. Passive non-modal hovercard (token counter) or sheet tab without aria-modal="true": NOT blocked
+  const docWithPassiveDialog: MinimalDocument = {
+    ...dummyDoc,
+    querySelector: (sel: string) => {
+      if (sel.includes('[aria-modal="true"]')) return null;
+      if (sel.includes('[role="dialog"]')) {
+        return makeMockEl({ tagName: "DIV", attrs: { role: "dialog", testID: "context-window-details" } });
+      }
+      return null;
+    },
+  };
+  assert.equal(isBlockedFromThreadNavigation(chatTextarea, chatTextarea, docWithPassiveDialog), false);
 });
 
 test("Thread Shortcuts 11: Bidirectional roundtrip navigation (Cmd+; followed by Cmd+') preserves active workspace key across async react re-renders", () => {
