@@ -28,9 +28,10 @@ export function cleanPromptTextPure(input: string, systemPrompt?: string): strin
     }
   }
   text = text.replace(
-    /(?:\r?\n)*<system starter prompt in paseo>[\s\S]*?(?:-----------------[\s\S]*?<user prompt>:\s*|-----------------|$)/gi,
+    /(?:\r?\n)*<system starter prompt in paseo>[\s\S]*?(?:-----------------[\s\S]*?<user prompt>:\s*|-----------------)/gi,
     "",
   );
+  text = text.replace(/(?:\r?\n)*<system starter prompt in paseo>(?:\r?\n)*/gi, "");
   text = text.replace(
     /(?:\r?\n)*<!-- paseo-peers:start v\d+ -->[\s\S]*?(?:<!-- paseo-peers:end -->|(?=https?:\/\/|\n\n\S|$))/g,
     "",
