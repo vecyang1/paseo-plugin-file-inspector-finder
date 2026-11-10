@@ -163,6 +163,7 @@ import {
   TABLE_CELL_BR_SENTINEL,
   getCachedOrLoadedKaTeX,
   installMetroMarkdownTableHooks,
+  normalizeLatexFormulaForKaTeX,
   normalizeMarkdownTablesForPaseo,
   repairMarkdownAstTables,
   repairRenderedDomMath,
@@ -4283,6 +4284,38 @@ test("44b. LaTeX Math formula rendering (KaTeX MathML), Metro AST options overri
   });
   assert.ok(renderedHtml2.includes("批发杠杆倍数"));
   assert.ok(renderedHtml2.includes("<mfrac>"));
+
+  // 2b. Test normalizeLatexFormulaForKaTeX on LLM text-mode math macros, unescaped % / &, and \t / \f control-char collisions
+  const textMacroFormula =
+    "\\text{操盘手单笔毛利} = \\text{标品锚定售价} - \\text{私有重型工具链边际交付成本 (\\approx 0)}";
+  const normTextMacro = normalizeLatexFormulaForKaTeX(textMacroFormula);
+  assert.ok(normTextMacro.includes("$\\approx$"), "Math macro inside \\text{...} must be wrapped in $...$");
+  const renderedTextMacro = activeKatex.renderToString(textMacroFormula, {
+    output: "mathml",
+    displayMode: true,
+    throwOnError: false,
+    trust: false,
+  });
+  assert.ok(renderedTextMacro.includes("<math"), "Formula with \\approx inside \\text{} must render MathML");
+  assert.equal(
+    renderedTextMacro.includes("#cc0000"),
+    false,
+    "Formula with \\approx inside \\text{} must have zero red #cc0000 KaTeX parse errors",
+  );
+
+  const tabAndPercentFormula =
+    "ext{综合 FX 汇损} = \text{Visa 基准牌价点差 (~1%)} + \text{Fluent & Native}";
+  const renderedTabPercent = activeKatex.renderToString(tabAndPercentFormula, {
+    output: "mathml",
+    displayMode: true,
+    throwOnError: false,
+    trust: false,
+  });
+  assert.equal(
+    renderedTabPercent.includes("#cc0000"),
+    false,
+    "Formula with control-char \\t, unescaped %, and unescaped & inside \\text{} must render with zero #cc0000 errors",
+  );
 
   // 3. Test Metro module 3999 (KaTeXRenderer) hook: injects KaTeX when Paseo passes katex: null
   type MockKaTeXRendererProps = {

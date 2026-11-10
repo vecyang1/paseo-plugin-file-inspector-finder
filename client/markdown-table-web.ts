@@ -1,5 +1,6 @@
 import bundledKaTeX from "katex";
 import { getMetroModuleMap } from "./metro-registry";
+import { syncPaseoThemeCssVariables } from "./theme-web";
 
 export interface MarkdownTablePreferences {
   enabled: boolean;
@@ -59,12 +60,235 @@ export interface KaTeXLike {
       displayMode?: boolean;
       throwOnError?: boolean;
       trust?: boolean;
+      strict?: boolean | "ignore" | "warn" | "error";
       errorColor?: string;
       macros?: Record<string, string>;
     },
   ): string;
   version?: string;
   ParseError?: unknown;
+  __vecNormalizedKaTeX?: boolean;
+}
+
+const ALLOWED_KATEX_TEXT_MODE_COMMANDS = new Set<string>([
+  "text",
+  "textbf",
+  "textit",
+  "textrm",
+  "textsf",
+  "texttt",
+  "textnormal",
+  "textup",
+  "textmd",
+  "textsc",
+  "emph",
+  "rm",
+  "sf",
+  "tt",
+  "bf",
+  "it",
+  "sl",
+  "sc",
+  "tiny",
+  "scriptsize",
+  "footnotesize",
+  "small",
+  "normalsize",
+  "large",
+  "Large",
+  "LARGE",
+  "huge",
+  "Huge",
+  "underline",
+  "overline",
+  "sout",
+  "AA",
+  "aa",
+  "ae",
+  "AE",
+  "oe",
+  "OE",
+  "o",
+  "O",
+  "ss",
+  "i",
+  "j",
+  "L",
+  "l",
+  "dag",
+  "ddag",
+  "S",
+  "P",
+  "copyright",
+  "pounds",
+  "textasciitilde",
+  "textasciicircum",
+  "textbackslash",
+  "textbar",
+  "textless",
+  "textgreater",
+  "textunderscore",
+  "textbraceleft",
+  "textbraceright",
+  "textdollar",
+  "textsterling",
+  "textregistered",
+  "texttrademark",
+  "textdegree",
+  "char",
+  "kern",
+  "mkern",
+  "mskip",
+  "hspace",
+  "phantom",
+  "hphantom",
+  "vphantom",
+  "smash",
+  "llap",
+  "rlap",
+  "clap",
+  "raisebox",
+  "colorbox",
+  "fcolorbox",
+  "textcolor",
+  "color",
+  "rule",
+  "verb",
+  "href",
+  "url",
+  "includegraphics",
+  "htmlClass",
+  "htmlId",
+  "htmlStyle",
+  "htmlData",
+  "newline",
+  "cr",
+  "space",
+  "enspace",
+  "quad",
+  "qquad",
+  "thinspace",
+  "medspace",
+  "thickspace",
+  "negthinspace",
+  "negmedspace",
+  "negthickspace",
+  "TeX",
+  "LaTeX",
+  "KaTeX",
+]);
+
+function sanitizeTextModeSegmentForKaTeX(seg: string): string {
+  const parts = seg.split(/(\$[^$]+\$)/g);
+  for (let i = 0; i < parts.length; i += 2) {
+    let s = parts[i]!;
+    s = s.replace(/(?<!\\)%/g, "\\%");
+    s = s.replace(/(?<!\\)&/g, "\\&");
+    s = s.replace(/(?<!\\)#/g, "\\#");
+    s = s.replace(/\\([a-zA-Z]+)(\s*)/g, (full, cmd: string, trailingWs: string) => {
+      if (ALLOWED_KATEX_TEXT_MODE_COMMANDS.has(cmd)) return full;
+      return `$\\${cmd}$${trailingWs}`;
+    });
+    parts[i] = s;
+  }
+  return parts.join("");
+}
+
+/**
+ * Normalizes LLM-generated LaTeX formulas before KaTeX rendering:
+ * 1. Recovers JSON/Python control-char escape collisions (\t -> \text/\times, \f -> \frac, \b -> \beta/\begin)
+ *    and stripped leading \t ("ext{...}" -> "\\text{...}").
+ * 2. Inside \text{...} / \textbf{...} / \textit{...} / \textrm{...} / \mbox{...}:
+ *    - wraps math-mode-only macros (e.g. \approx, \sim, \times, \le, \ge, \to, \infty) in $...$
+ *      so KaTeX does not fail with red #cc0000 "Can't use function '\approx' in text mode";
+ *    - escapes unescaped %, &, # so they do not comment out the closing brace or break text mode.
+ * 3. Outside \text{...}: escapes unescaped % so percentages like 25% do not discard the rest of the formula,
+ *    and converts numeric range tildes (1.0\%~1.5\%) into \sim.
+ */
+export function normalizeLatexFormulaForKaTeX(tex: string): string {
+  if (typeof tex !== "string" || !tex) return tex;
+  let out = tex;
+  out = out.replace(
+    /\x09(?=(?:ext(?:bf|it|rm|sf|tt)?|imes|o|ilde|au|heta|riangle|anh|an|op|frac|binom)\b)/g,
+    "\\t",
+  );
+  out = out.replace(/\x0c(?=(?:rac|orall|lat)\b)/g, "\\f");
+  out = out.replace(
+    /\x08(?=(?:eta|egin|ar|ig|inom|oxed|ullet|oldsymbol|ackslash)\b)/g,
+    "\\b",
+  );
+  out = out.replace(/(^|[\s=+\-*/,([{"'])ext(bf|it|rm|sf|tt)?(\s*\{)/g, "$1\\text$2$3");
+
+  const textMacroRe = /\\(?:text(?:bf|it|rm|sf|tt)?|mbox)\s*\{/g;
+  let match: RegExpExecArray | null;
+  let cursor = 0;
+  let built = "";
+  while ((match = textMacroRe.exec(out)) !== null) {
+    const startIdx = match.index;
+    const braceOpenIdx = startIdx + match[0].length - 1;
+    if (startIdx < cursor) continue;
+    let outside = out.slice(cursor, startIdx);
+    outside = outside.replace(/(?<!\\)%/g, "\\%");
+    outside = outside.replace(
+      /(\d(?:\.\d+)?(?:\s*\\%)?)\s*~\s*(?=[+\-]?\d|\\\$)/g,
+      "$1 \\sim ",
+    );
+    built += outside + match[0];
+
+    let depth = 1;
+    let j = braceOpenIdx + 1;
+    while (j < out.length && depth > 0) {
+      if (out[j] === "\\" && j + 1 < out.length) {
+        j += 2;
+        continue;
+      }
+      if (out[j] === "{") depth++;
+      else if (out[j] === "}") depth--;
+      j++;
+    }
+    if (depth === 0) {
+      const inner = out.slice(braceOpenIdx + 1, j - 1);
+      built += `${sanitizeTextModeSegmentForKaTeX(inner)}}`;
+      cursor = j;
+      textMacroRe.lastIndex = j;
+    } else {
+      cursor = braceOpenIdx + 1;
+    }
+  }
+  let tail = out.slice(cursor);
+  tail = tail.replace(/(?<!\\)%/g, "\\%");
+  tail = tail.replace(
+    /(\d(?:\.\d+)?(?:\s*\\%)?)\s*~\s*(?=[+\-]?\d|\\\$)/g,
+    "$1 \\sim ",
+  );
+  built += tail;
+  return built;
+}
+
+function wrapKaTeXWithFormulaNormalizer(instance: KaTeXLike): KaTeXLike {
+  if (instance.__vecNormalizedKaTeX) return instance;
+  const origRender = instance.renderToString.bind(instance);
+  const wrappedRender: KaTeXLike["renderToString"] = (tex, options) => {
+    const normalizedTex =
+      currentPrefs.enabled && currentPrefs.renderLatexMath && typeof tex === "string"
+        ? normalizeLatexFormulaForKaTeX(tex)
+        : tex;
+    return origRender(normalizedTex, {
+      strict: false,
+      ...(options ?? {}),
+    });
+  };
+  try {
+    instance.renderToString = wrappedRender;
+    instance.__vecNormalizedKaTeX = true;
+    return instance;
+  } catch {
+    return {
+      ...instance,
+      renderToString: wrappedRender,
+      __vecNormalizedKaTeX: true,
+    };
+  }
 }
 
 export interface StorageLike {
@@ -80,7 +304,8 @@ const STYLE_ELEMENT_ID = "paseo-finder-markdown-table-style";
 
 export const DEFAULT_MARKDOWN_MATH_SAMPLE = [
   "$$\\text{算力杠杆倍数} = \\frac{\\$500 \\sim \\$600 \\text{ USD 真实 API 额度}}{\\$20 \\text{ USD 实际月支出}} \\approx \\mathbf{25 \\times \\sim 30 \\times}$$",
-  "$$\\text{批发杠杆倍数} = \\frac{\\$500 \\sim \\$600 \\text{ USD}}{\\$2 \\sim \\$3 \\text{ USD}} \\approx \\mathbf{150 \\times \\sim 250 \\times}$$",
+  "$$\\text{客户支付意愿上限} = \\min(\\text{自建试错成本} + \\text{归因黑洞广告漏损成本},\\ \\text{全职高级工程师年薪}) \\times \\text{信任状系数}$$",
+  "$$\\text{操盘手单笔毛利} = \\text{标品锚定售价} - \\text{私有重型工具链边际交付成本 (\\approx 0)}$$",
 ].join("\n\n");
 
 export const DEFAULT_MARKDOWN_TABLE_SAMPLE = [
@@ -105,7 +330,7 @@ let currentPrefs: MarkdownTablePreferences = {
 
 let cachedKaTeX: KaTeXLike | null =
   typeof (bundledKaTeX as unknown as KaTeXLike)?.renderToString === "function"
-    ? (bundledKaTeX as unknown as KaTeXLike)
+    ? wrapKaTeXWithFormulaNormalizer(bundledKaTeX as unknown as KaTeXLike)
     : null;
 let mathFormulasHealedTotal = 0;
 
@@ -159,7 +384,7 @@ export function setCachedKaTeX(instance: unknown): void {
     (instance as { default?: unknown }).default ?? instance
   ) as KaTeXLike;
   if (typeof candidate?.renderToString === "function") {
-    cachedKaTeX = candidate;
+    cachedKaTeX = wrapKaTeXWithFormulaNormalizer(candidate);
     emitStatusUpdate();
   }
 }
@@ -483,7 +708,7 @@ export function installMetroMarkdownTableHooks(
   if (!mapRef) return false;
 
   // Pre-initialize and resolve modules if Metro map is available
-  const CANDIDATE_MODULE_IDS = [3986, 3993, 3999, 4006, 4007, 4117];
+  const CANDIDATE_MODULE_IDS = [3986, 3987, 3993, 3999, 4006, 4007, 4117, 4213];
   for (const candId of CANDIDATE_MODULE_IDS) {
     if (mapRef.has(candId)) {
       try {
@@ -504,6 +729,7 @@ export function installMetroMarkdownTableHooks(
           fnSource.includes("parseMarkdownSync") ||
           fnSource.includes("EnrichedMarkdownText") ||
           fnSource.includes("normalizeMarkdownHtml") ||
+          fnSource.includes("createMarkdownStyles") ||
           fnSource.includes("katex-mathml")
         ) {
           req(id);
@@ -565,7 +791,7 @@ export function installMetroMarkdownTableHooks(
       }
     }
 
-    // 2. Hook KaTeXRenderer (Module 3999): supplies KaTeX engine if missing
+    // 2. Hook KaTeXRenderer (Module 3999): supplies normalized KaTeX engine, normalizes LaTeX content, and replaces light-only default math styles with host-native tokens
     if (
       typeof exp.KaTeXRenderer === "function" &&
       !(exp.KaTeXRenderer as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked
@@ -582,13 +808,56 @@ export function installMetroMarkdownTableHooks(
         displayMode?: boolean;
         style?: unknown;
       }): unknown {
-        let effectiveKatex = props.katex;
-        if (!effectiveKatex && currentPrefs.enabled && currentPrefs.renderLatexMath) {
-          effectiveKatex = getCachedOrLoadedKaTeX();
+        const mathEnabled = currentPrefs.enabled && currentPrefs.renderLatexMath;
+        let effectiveKatex = props.katex as KaTeXLike | undefined;
+        if (mathEnabled) {
+          if (!effectiveKatex || typeof effectiveKatex.renderToString !== "function") {
+            effectiveKatex = getCachedOrLoadedKaTeX() ?? undefined;
+          } else {
+            effectiveKatex = wrapKaTeXWithFormulaNormalizer(effectiveKatex);
+          }
+        }
+        const normalizedContent =
+          mathEnabled && typeof props.content === "string"
+            ? normalizeLatexFormulaForKaTeX(props.content)
+            : props.content;
+        let effectiveStyle = props.style;
+        if (currentPrefs.enabled && currentPrefs.enhanceLatexMathTypographyCss) {
+          const baseStyle =
+            typeof props.style === "object" && props.style !== null
+              ? (props.style as Record<string, unknown>)
+              : {};
+          if (props.displayMode) {
+            effectiveStyle = {
+              ...baseStyle,
+              fontSize: "0.98em",
+              lineHeight: 1.55,
+              color: "var(--paseo-finder-fg, inherit)",
+              backgroundColor: "var(--paseo-finder-surface-1, rgba(128, 128, 128, 0.06))",
+              border: "1px solid var(--paseo-finder-border, rgba(128, 128, 128, 0.16))",
+              borderRadius: "8px",
+              padding: "10px 14px",
+              marginTop: "6px",
+              marginBottom: "12px",
+              textAlign: "left",
+              overflowX: "auto",
+              overflowY: "hidden",
+              maxWidth: "100%",
+              boxSizing: "border-box",
+            };
+          } else {
+            effectiveStyle = {
+              ...baseStyle,
+              color: "var(--paseo-finder-fg, inherit)",
+              backgroundColor: "transparent",
+            };
+          }
         }
         return origKaTeXRenderer({
           ...props,
+          content: normalizedContent,
           katex: effectiveKatex,
+          style: effectiveStyle,
         });
       };
       (wrappedKaTeXRenderer as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked = true;
@@ -597,6 +866,49 @@ export function installMetroMarkdownTableHooks(
         hookedExportsSet.add("KaTeXRenderer");
       } catch {
         // ignore read-only export
+      }
+    }
+
+    // 2b. Hook createMarkdownStyles (Module 4213): inject theme-native math & inlineMath tokens
+    if (
+      typeof exp.createMarkdownStyles === "function" &&
+      !(exp.createMarkdownStyles as { __vecMathStyleHooked?: boolean }).__vecMathStyleHooked
+    ) {
+      const origCreateStyles = exp.createMarkdownStyles as (
+        theme: Record<string, any>,
+        opts: Record<string, any>,
+      ) => Record<string, any>;
+      const wrappedCreateStyles = function (
+        theme: Record<string, any>,
+        opts: Record<string, any>,
+      ): Record<string, any> {
+        const res = origCreateStyles(theme, opts);
+        if (res && typeof res.markdownStyle === "object" && res.markdownStyle) {
+          const para = res.markdownStyle.paragraph ?? {};
+          const fg = para.color ?? theme?.colors?.foreground;
+          const surf = theme?.colors?.surface1 ?? "transparent";
+          const fontSize = typeof para.fontSize === "number" ? para.fontSize : 15;
+          res.markdownStyle.math = {
+            fontSize,
+            color: fg,
+            backgroundColor: surf,
+            padding: 10,
+            marginTop: 6,
+            marginBottom: para.marginBottom ?? 12,
+            textAlign: "left",
+          };
+          res.markdownStyle.inlineMath = {
+            color: fg,
+          };
+        }
+        return res;
+      };
+      (wrappedCreateStyles as { __vecMathStyleHooked?: boolean }).__vecMathStyleHooked = true;
+      try {
+        exp.createMarkdownStyles = wrappedCreateStyles;
+        hookedExportsSet.add("createMarkdownStyles");
+      } catch {
+        // ignore
       }
     }
 
@@ -873,6 +1185,39 @@ function isInsideMathOrPre(el: HTMLElement, target: "pre" | "math"): boolean {
   return false;
 }
 
+function applyHostNativeMathSpanStyle(span: HTMLElement, displayMode: boolean): void {
+  span.setAttribute?.("data-paseo-math-mode", displayMode ? "display" : "inline");
+  span.classList?.add?.("paseo-finder-math-rendered");
+  if (typeof span.className === "string" && !span.className.includes("paseo-finder-math-rendered")) {
+    span.className = `${span.className} paseo-finder-math-rendered`.trim();
+  }
+  if (!span.style || !currentPrefs.enhanceLatexMathTypographyCss) return;
+  span.style.whiteSpace = "normal";
+  span.style.color = "var(--paseo-finder-fg, inherit)";
+  if (displayMode) {
+    span.style.display = "block";
+    span.style.fontSize = "0.98em";
+    span.style.lineHeight = "1.55";
+    span.style.backgroundColor = "var(--paseo-finder-surface-1, rgba(128, 128, 128, 0.06))";
+    span.style.border = "1px solid var(--paseo-finder-border, rgba(128, 128, 128, 0.16))";
+    span.style.borderRadius = "8px";
+    span.style.padding = "10px 14px";
+    span.style.marginTop = "6px";
+    span.style.marginBottom = "12px";
+    span.style.textAlign = "left";
+    span.style.overflowX = "auto";
+    span.style.overflowY = "hidden";
+    span.style.maxWidth = "100%";
+    span.style.boxSizing = "border-box";
+  } else {
+    span.style.display = "inline";
+    span.style.fontSize = "1em";
+    span.style.backgroundColor = "transparent";
+    span.style.border = "none";
+    span.style.padding = "0 1px";
+  }
+}
+
 export function repairRenderedDomMath(root?: ParentNode): {
   mathNodesScanned: number;
   mathNodesHealed: number;
@@ -896,7 +1241,7 @@ export function repairRenderedDomMath(root?: ParentNode): {
   let scanned = 0;
   let healed = 0;
 
-  // Pass 1: Unrendered span[role="math"] (from Paseo KaTeXRenderer fallback `${p}${n}${p}`)
+  // Pass 1: span[role="math"] (both unrendered fallback and already-rendered spans with broken light-island styles or #cc0000 text-mode errors)
   const mathSpans = Array.from(
     queryRoot.querySelectorAll<HTMLElement>(
       'span[role="math"], .enrm-text span[role="math"]',
@@ -904,7 +1249,38 @@ export function repairRenderedDomMath(root?: ParentNode): {
   );
   for (const span of mathSpans) {
     scanned++;
-    if (span.querySelector?.("math, .katex, .katex-html")) continue;
+    const existingMath = span.querySelector?.("math, .katex, .katex-html");
+    if (existingMath) {
+      const isDisplay =
+        Boolean(span.querySelector?.('math[display="block"]')) ||
+        Boolean(span.style && span.style.display === "block");
+      applyHostNativeMathSpanStyle(span, isDisplay);
+
+      const currentHtml = span.innerHTML ?? "";
+      if (currentHtml.includes("#cc0000")) {
+        const aria = span.getAttribute?.("aria-label")?.trim();
+        if (aria) {
+          try {
+            const norm = normalizeLatexFormulaForKaTeX(aria);
+            const rerendered = katex.renderToString(norm, {
+              output: "mathml",
+              displayMode: isDisplay,
+              throwOnError: false,
+              trust: false,
+              strict: false,
+            });
+            if (rerendered && rerendered.includes("<math") && !rerendered.includes("#cc0000")) {
+              span.innerHTML = rerendered;
+              span.setAttribute?.("data-paseo-math-healed", "true");
+              healed++;
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+      continue;
+    }
 
     const raw = (span.textContent ?? "").trim();
     if (!raw) continue;
@@ -916,7 +1292,7 @@ export function repairRenderedDomMath(root?: ParentNode): {
       formula = aria;
       displayMode =
         raw.startsWith("$$") ||
-        (span.style && span.style.display === "block") ||
+        Boolean(span.style && span.style.display === "block") ||
         raw.includes("\n");
     } else if (raw.startsWith("$$") && raw.endsWith("$$") && raw.length >= 4) {
       displayMode = true;
@@ -926,31 +1302,24 @@ export function repairRenderedDomMath(root?: ParentNode): {
       formula = raw.slice(1, -1).trim();
     } else {
       formula = raw;
-      displayMode = raw.includes("\n") || (span.style && span.style.display === "block");
+      displayMode = raw.includes("\n") || Boolean(span.style && span.style.display === "block");
     }
 
     if (!formula) continue;
 
     try {
-      const renderedHtml = katex.renderToString(formula, {
+      const normFormula = normalizeLatexFormulaForKaTeX(formula);
+      const renderedHtml = katex.renderToString(normFormula, {
         output: "mathml",
         displayMode,
         throwOnError: false,
         trust: false,
+        strict: false,
       });
       if (renderedHtml && renderedHtml.includes("<math")) {
         span.innerHTML = renderedHtml;
         span.setAttribute?.("data-paseo-math-healed", "true");
-        span.classList?.add?.("paseo-finder-math-rendered");
-        if (span.className && !span.className.includes("paseo-finder-math-rendered")) {
-          span.className += " paseo-finder-math-rendered";
-        }
-        if (span.style) {
-          span.style.whiteSpace = "normal";
-          if (displayMode) {
-            span.style.display = "block";
-          }
-        }
+        applyHostNativeMathSpanStyle(span, displayMode);
         healed++;
       }
     } catch {
@@ -1009,11 +1378,13 @@ export function repairRenderedDomMath(root?: ParentNode): {
     if (!formula) continue;
     scanned++;
     try {
-      const renderedHtml = katex.renderToString(formula, {
+      const normFormula = normalizeLatexFormulaForKaTeX(formula);
+      const renderedHtml = katex.renderToString(normFormula, {
         output: "mathml",
         displayMode,
         throwOnError: false,
         trust: false,
+        strict: false,
       });
       if (renderedHtml && renderedHtml.includes("<math")) {
         const createSpanNode = (): HTMLElement => {
@@ -1036,7 +1407,7 @@ export function repairRenderedDomMath(root?: ParentNode): {
         wrapper.setAttribute?.("role", "math");
         wrapper.setAttribute?.("aria-label", formula);
         wrapper.setAttribute?.("data-paseo-math-healed", "true");
-        wrapper.className = "paseo-finder-math-rendered";
+        applyHostNativeMathSpanStyle(wrapper, displayMode);
         if (wrapper.style) {
           wrapper.style.display = displayMode ? "block" : "inline-block";
           wrapper.style.whiteSpace = "normal";
@@ -1265,6 +1636,12 @@ export function injectMarkdownTableStyles(doc?: Document): void {
   const targetDoc = doc ?? (typeof document !== "undefined" ? document : null);
   if (!targetDoc || !targetDoc.head) return;
 
+  try {
+    syncPaseoThemeCssVariables(targetDoc);
+  } catch {
+    // ignore theme sync error in minimal test mocks
+  }
+
   const existing = targetDoc.getElementById(STYLE_ELEMENT_ID);
   if (!currentPrefs.enabled || !currentPrefs.enhanceTableTypographyCss) {
     if (existing) existing.remove();
@@ -1317,32 +1694,53 @@ export function injectMarkdownTableStyles(doc?: Document): void {
   margin-top: 4px;
 }
 
-/* Paseo LaTeX MathML Readability & Layout Guard (file-inspector-finder) */
+/* Paseo LaTeX MathML Readability, Theme Parity & Overflow Guard (file-inspector-finder) */
 .enrm-text span[role="math"],
-.paseo-finder-math-rendered {
-  line-height: 1.45 !important;
-  white-space: normal !important;
-}
-.enrm-text span[role="math"].paseo-finder-math-rendered,
 span[role="math"].paseo-finder-math-rendered {
+  color: var(--paseo-finder-fg, inherit) !important;
+  line-height: 1.55 !important;
+  white-space: normal !important;
+  box-sizing: border-box !important;
+}
+.enrm-text span[role="math"][data-paseo-math-mode="display"],
+.enrm-text span[role="math"]:has(math[display="block"]),
+span[role="math"].paseo-finder-math-rendered[data-paseo-math-mode="display"] {
+  display: block !important;
+  font-size: 0.98em !important;
+  color: var(--paseo-finder-fg, inherit) !important;
+  background-color: var(--paseo-finder-surface-1, rgba(128, 128, 128, 0.06)) !important;
+  border: 1px solid var(--paseo-finder-border, rgba(128, 128, 128, 0.16)) !important;
+  border-radius: 8px !important;
+  padding: 10px 14px !important;
+  margin: 6px 0 12px 0 !important;
+  text-align: left !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  max-width: 100% !important;
+}
+.enrm-text span[role="math"][data-paseo-math-mode="inline"],
+.enrm-text span[role="math"]:not(:has(math[display="block"])):not([data-paseo-math-mode="display"]),
+span[role="math"].paseo-finder-math-rendered[data-paseo-math-mode="inline"] {
+  display: inline !important;
+  font-size: 1em !important;
+  color: var(--paseo-finder-fg, inherit) !important;
   background-color: transparent !important;
   border: none !important;
+  padding: 0 1px !important;
 }
 .enrm-text span[role="math"] math[display="block"],
 .paseo-finder-math-rendered math[display="block"] {
-  display: block !important;
-  margin: 8px auto !important;
-  padding: 4px 8px !important;
-  overflow-x: auto !important;
-  overflow-y: hidden !important;
-  text-align: center !important;
-  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
+  color: inherit !important;
 }
 .enrm-text span[role="math"] math:not([display="block"]),
 .paseo-finder-math-rendered math:not([display="block"]) {
   display: inline-block !important;
-  vertical-align: -0.15em !important;
-  margin: 0 2px !important;
+  vertical-align: -0.12em !important;
+  margin: 0 1px !important;
+  color: inherit !important;
 }
 `;
   targetDoc.head.appendChild(style);
@@ -1478,21 +1876,31 @@ export function runMarkdownTableSelfTest(
     domRowsMerged = 3;
   }
 
-  // Test LaTeX Math Rendering
+  // Test LaTeX Math Rendering (including text-mode math macro normalization)
   const katex = getCachedOrLoadedKaTeX();
   let mathFormulaRendered = false;
   let mathFormulaOutput = "";
   if (katex) {
     try {
-      const firstFormula = inputMath.split(/\r?\n\r?\n/)[0]?.replace(/^\$\$|\$\$$/g, "").trim() || "";
-      const rendered = katex.renderToString(firstFormula, {
-        output: "mathml",
-        displayMode: true,
-        throwOnError: false,
-        trust: false,
-      });
-      mathFormulaRendered = typeof rendered === "string" && rendered.includes("<math");
-      mathFormulaOutput = rendered;
+      const formulas = inputMath
+        .split(/\r?\n\r?\n/)
+        .map((f) => f.replace(/^\$\$|\$\$$/g, "").trim())
+        .filter(Boolean);
+      const outputs = formulas.map((f) =>
+        katex.renderToString(normalizeLatexFormulaForKaTeX(f), {
+          output: "mathml",
+          displayMode: true,
+          throwOnError: false,
+          trust: false,
+          strict: false,
+        }),
+      );
+      mathFormulaRendered =
+        outputs.length > 0 &&
+        outputs.every(
+          (out) => typeof out === "string" && out.includes("<math") && !out.includes("#cc0000"),
+        );
+      mathFormulaOutput = outputs.join("\n");
     } catch {
       mathFormulaRendered = false;
     }
