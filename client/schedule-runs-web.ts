@@ -426,6 +426,19 @@ export function matchScheduleTitleOrSlug(
   const rawT = cleanTitle.trim().toLowerCase();
   if (!rawT) return false;
 
+  // Immediately reject user intake / chat sessions unless explicit CAD/standby
+  const hasExplicitCadenceMarker = /\[ag-standby\s+slug=|CAD-\d{8}/i.test(cleanTitle);
+  if (!hasExplicitCadenceMarker) {
+    const strippedPrefix = rawT.replace(/^(?:d|done:?|✓)\s+/i, "");
+    if (
+      strippedPrefix.startsWith("intake ·") ||
+      strippedPrefix.startsWith("intake:") ||
+      strippedPrefix.startsWith("intake ")
+    ) {
+      return false;
+    }
+  }
+
   // 1. Normalize workspace title: strip status / action prefixes
   // e.g. "d ", "done: ", "✓ ", "Run ", "Running ", "Execute ", "AG · ", "AG: "
   const t = rawT
@@ -437,18 +450,31 @@ export function matchScheduleTitleOrSlug(
 
   // 2. Extract Cadence Card ID if present (e.g. "CAD-20260925-mac-morning-speed-watch" or "CAD-20260925")
   const cadIdMatch = /(?:CAD-\d{8}-[a-z0-9-]+|CAD-\d{8})/i.exec(cleanTitle);
-  if (cadIdMatch && (prompt || standbySlug || scheduleName)) {
+  if (cadIdMatch && (standbySlug || scheduleName)) {
     const cadId = cadIdMatch[0].toLowerCase();
     if (
-      (prompt && prompt.toLowerCase().includes(cadId)) ||
-      (standbySlug && (cadId.includes(standbySlug.toLowerCase()) || standbySlug.toLowerCase().includes(cadId))) ||
+      (standbySlug &&
+        (cadId.includes(standbySlug.toLowerCase()) ||
+          standbySlug.toLowerCase().includes(cadId))) ||
       (scheduleName && scheduleName.toLowerCase().includes(cadId))
     ) {
       return true;
     }
   }
 
-  // 3. Normalize schedule name
+  // 3. Standby slug explicit in title: [ag-standby slug=xxx]
+  if (standbySlug) {
+    const slug = standbySlug.trim().toLowerCase();
+    const explicitStandbyMatch = /\[ag-standby\s+slug=([^\s\]]+)/i.exec(cleanTitle);
+    if (explicitStandbyMatch && explicitStandbyMatch[1]?.toLowerCase() === slug) {
+      return true;
+    }
+    if (t === slug || rawT === slug) {
+      return true;
+    }
+  }
+
+  // 4. Normalize schedule name
   if (scheduleName) {
     const rawS = scheduleName.trim().toLowerCase();
     const s = rawS
@@ -474,78 +500,42 @@ export function matchScheduleTitleOrSlug(
     // Stem matching with ellipsis
     if (t.endsWith("…") || t.endsWith("...")) {
       const stem = t.replace(/\.{3}$|…$/, "").trim();
-      if (stem.length >= 8 && (s.startsWith(stem) || sBeforeParen.startsWith(stem))) {
+      if (stem.length >= 10 && (s.startsWith(stem) || sBeforeParen.startsWith(stem))) {
         return true;
       }
     }
 
-    // Strip common cadence suffixes from title:
-    // "scheduled check", "cadence check", "health check", "standby check", "diagnosis and clean", "check", "sentinel"
-    const tCore = tBeforeParen
-      .replace(
-        /\s+(?:scheduled\s+check|cadence\s+check|health\s+check|standby\s+check|scheduled\s+health\s+check|diagnosis(?:\s+and\s+(?:clean(?:up)?|self-heal))?|check|sentinel|watch|cadence)\b.*$/i,
-        "",
-      )
-      .trim();
-    const sCore = sBeforeParen
-      .replace(
-        /\s+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
-        "",
-      )
-      .trim();
-
-    if (tCore.length >= 5 && sCore.length >= 5) {
-      if (tCore === sCore || sCore.includes(tCore) || tCore.includes(sCore)) {
-        return true;
-      }
-    }
-
-    // Token overlap: significant keywords (length >= 3, excluding common stop words)
-    const STOP_WORDS = new Set([
-      "and", "the", "for", "with", "from", "check", "run", "scheduled", "sentinel",
-      "every", "minutes", "hours", "daily", "weekly", "auto", "sync",
-    ]);
-    const tTokens = tBeforeParen
-      .split(/[\s·•:_-]+/)
-      .filter((w) => w.length >= 3 && !STOP_WORDS.has(w));
-    const sTokens = sBeforeParen
-      .split(/[\s·•:_-]+/)
-      .filter((w) => w.length >= 3 && !STOP_WORDS.has(w));
-    if (tTokens.length >= 2 && sTokens.length >= 2) {
-      const sTokenSet = new Set(sTokens);
-      const overlap = tTokens.filter((tok) => sTokenSet.has(tok));
-      if (
-        overlap.length >= 2 ||
-        (tTokens.length > 0 && overlap.length / tTokens.length >= 0.6)
-      ) {
-        return true;
-      }
-    }
-  }
-
-  // 4. Standby slug matching
-  if (standbySlug) {
-    const slug = standbySlug.trim().toLowerCase();
-    const slugNorm = slug.replace(/[-_]/g, " ");
-    const slugTokens = slug.split(/[-_]/).filter((w) => w.length >= 3);
-    const tNorm = t.replace(/[-_]/g, " ");
-
-    if (
-      slug === t ||
-      slugNorm === t ||
-      slugNorm === tNorm ||
-      t.includes(slug) ||
-      t.includes(slugNorm) ||
-      rawT.includes(slug)
-    ) {
-      return true;
-    }
-
-    if (slugTokens.length >= 2) {
-      const tWords = new Set(tNorm.split(/\s+/));
-      const overlap = slugTokens.filter((tok) => tWords.has(tok));
-      if (overlap.length >= 2) {
-        return true;
+    // Explicit "Run <ScheduleName> [scheduled|cadence|health] check"
+    if (rawT.startsWith("run ") || rawT.startsWith("running ") || rawT.startsWith("execute ")) {
+      const tCheck = tBeforeParen
+        .replace(/\s+mac-speed$/, "")
+        .replace(
+          /\s+(?:scheduled\s+check|cadence\s+check|health\s+check|standby\s+check|scheduled\s+health\s+check|diagnosis(?:\s+and\s+(?:clean(?:up)?|self-heal))?|check)\b.*$/i,
+          "",
+        )
+        .replace(/\s+mac-speed$/, "")
+        .trim();
+      const tCore = tCheck
+        .replace(
+          /\s+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
+          "",
+        )
+        .trim();
+      const sCheck = sBeforeParen
+        .replace(
+          /\s+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
+          "",
+        )
+        .trim();
+      if (tCore.length >= 6 && sCheck.length >= 6) {
+        if (
+          tCheck === sCheck ||
+          tCore === sCheck ||
+          (sCheck.startsWith(tCore) && tCore.length >= 6) ||
+          (tCheck.startsWith(sCheck) && sCheck.length >= 6)
+        ) {
+          return true;
+        }
       }
     }
   }
@@ -593,6 +583,7 @@ export function findCadenceScheduleForWorkspace(
   const sessionStore = findSessionStore(win);
   if (sessionStore && typeof sessionStore.getState === "function") {
     try {
+      let foundNonCadenceAgentInStore = false;
       const sessions = sessionStore.getState()?.sessions ?? {};
       for (const session of Object.values(sessions)) {
         const rawAgents = (session as Record<string, unknown> | undefined)?.agents;
@@ -658,8 +649,16 @@ export function findCadenceScheduleForWorkspace(
                 }
               }
             }
+            // If this agent exists in sessionStore and has no schedule id and no standby slug,
+            // or is an intake-routed session: mark as non-cadence session.
+            if (labels?.["relation-kind"] === "intake-routed" || (!schedId && !standbyMatch)) {
+              foundNonCadenceAgentInStore = true;
+            }
           }
         }
+      }
+      if (foundNonCadenceAgentInStore) {
+        return null;
       }
     } catch {
       // Ignore store read error
@@ -1381,7 +1380,7 @@ export function decorateSchedulesDomOnDocument(
           userSelect: "none",
           transformOrigin: "center",
           color: isRunning
-            ? (theme?.primary ?? "#10b981")
+            ? ((theme?.colorScheme ?? "light") === "light" ? "#059669" : "#10b981")
             : (theme?.foregroundMuted ?? "#9ca3af"),
           opacity: isRunning ? "1" : "0.75",
           animation: isRunning
@@ -1566,7 +1565,7 @@ export function decorateSchedulesDomOnDocument(
           userSelect: "none",
           transformOrigin: "center",
           color: isRunning
-            ? (theme?.primary ?? "#10b981")
+            ? ((theme?.colorScheme ?? "light") === "light" ? "#059669" : "#10b981")
             : (theme?.foregroundMuted ?? "#9ca3af"),
           opacity: isRunning ? "1" : "0.85",
           animation: isRunning

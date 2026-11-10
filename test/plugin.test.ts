@@ -7750,6 +7750,46 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
     false,
     "Unrelated workspace title must not match cadence schedule",
   );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Intake · cadance of stitch changelog, missing",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    false,
+    "User intake session must not match cadence schedule",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "d Intake · cadance in paseo. Added with timer icon in sidebar",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    false,
+    "Intake session with 'd ' prefix must not match cadence schedule",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "a new session init by me seems got timer icon",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    false,
+    "New user chat session must not match cadence schedule",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Explain Paseo /goal slash commands in Chinese",
+      "Paseo cadence doctor",
+      null,
+      null,
+    ),
+    false,
+    "General session mentioning Paseo must not match cadence doctor",
+  );
 
   // 2. Cache & O(1) workspaceScheduleMap resolution
   resetScheduleRunsCacheForTesting();
@@ -8185,6 +8225,7 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
   assert.ok(liveBadge, "Must mount cadence badge on real Paseo 0.15.3 row with running group & leaf text");
   assert.equal(liveBadge.getAttribute("data-running"), "true");
   assert.equal(liveBadge.style.alignSelf, "center");
+  assert.equal(liveBadge.style.color, "#059669", "Running badge in light theme must use vivid emerald green (#059669) rather than black");
 
   // Verify dynamic mouseleave listener does not suffer from stale closure
   liveBadge.setAttribute("data-running", "false");

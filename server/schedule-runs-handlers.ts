@@ -388,14 +388,23 @@ async function resolveProjectLastActiveByKey(
   return out;
 }
 
+interface ScannedScheduleAgent {
+  scheduleId: string;
+  agentId: string;
+  workspaceId: string;
+  isRunning: boolean;
+  status: string;
+  createdAt?: string;
+}
+
 async function scanActiveScheduleAgents(
   paseoDir: string,
-): Promise<Array<{ scheduleId: string; agentId: string; workspaceId: string; createdAt?: string }>> {
+): Promise<ScannedScheduleAgent[]> {
   const agentsRoot = path.join(paseoDir, "agents");
-  const out: Array<{ scheduleId: string; agentId: string; workspaceId: string; createdAt?: string }> = [];
+  const out: ScannedScheduleAgent[] = [];
   try {
     const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
-    const cutoff = Date.now() - 4 * 3600 * 1000; // last 4 hours
+    const cutoff = Date.now() - 48 * 3600 * 1000; // last 48 hours
     for (const b of buckets) {
       if (!b.isDirectory()) continue;
       const bPath = path.join(agentsRoot, b.name);
@@ -421,16 +430,19 @@ async function scanActiveScheduleAgents(
             createdAt?: string;
           };
           const schedId = rec.labels?.["paseo.schedule-id"];
-          if (
-            schedId &&
-            rec.workspaceId &&
-            !rec.archivedAt &&
-            (rec.lastStatus === "running" || rec.lastStatus === "busy" || rec.lastStatus === "open" || !rec.lastStatus)
-          ) {
+          if (schedId && rec.workspaceId) {
+            const isRunning =
+              !rec.archivedAt &&
+              (rec.lastStatus === "running" ||
+                rec.lastStatus === "busy" ||
+                rec.lastStatus === "open" ||
+                !rec.lastStatus);
             out.push({
               scheduleId: schedId,
               agentId: rec.id ?? f.replace(/\.json$/, ""),
               workspaceId: rec.workspaceId,
+              isRunning,
+              status: isRunning ? "running" : rec.lastStatus || "succeeded",
               createdAt: rec.createdAt,
             });
           }
@@ -722,66 +734,73 @@ export async function handleInspectScheduleRuns(
     const s = summaries.find((x) => x.id === active.scheduleId);
     if (s) {
       const cleanWid = active.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim();
-      const existingMatchingRun = (s.runs ?? []).find(
-        (r) =>
-          r.agentId === active.agentId ||
-          (cleanWid && r.workspaceId?.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanWid),
-      );
-      const wasAlreadyCountedRunning = existingMatchingRun?.status === "running";
+      if (active.isRunning) {
+        const existingMatchingRun = (s.runs ?? []).find(
+          (r) =>
+            r.agentId === active.agentId ||
+            (cleanWid && r.workspaceId?.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanWid),
+        );
+        const wasAlreadyCountedRunning = existingMatchingRun?.status === "running";
 
-      if (!wasAlreadyCountedRunning) {
-        s.runningRuns = (s.runningRuns ?? 0) + 1;
-        runningRuns += 1;
-      }
-      s.lastRunStatus = "running";
+        if (!wasAlreadyCountedRunning) {
+          s.runningRuns = (s.runningRuns ?? 0) + 1;
+          runningRuns += 1;
+        }
+        s.lastRunStatus = "running";
 
-      if (cleanWid) {
+        if (cleanWid) {
+          workspaceScheduleMap[cleanWid] = {
+            scheduleId: s.id,
+            scheduleName: s.name,
+            isRunning: true,
+            runStatus: "running",
+          };
+        }
+        if (!existingMatchingRun) {
+          const inFlightRun: ScheduleRunEntry = {
+            id: `in-flight-${active.agentId}`,
+            scheduleId: s.id,
+            scheduleName: s.name,
+            status: "running",
+            scheduledFor: active.createdAt ?? new Date().toISOString(),
+            startedAt: active.createdAt ?? new Date().toISOString(),
+            endedAt: null,
+            durationMs: null,
+            durationFormatted: "running…",
+            agentId: active.agentId,
+            workspaceId: active.workspaceId,
+            workspaceName: activeWorkspacesMap.get(active.workspaceId) ?? null,
+            isArchived: false,
+            output: "",
+            outputPreview: "Running…",
+            error: null,
+          };
+          s.runs = [inFlightRun, ...(s.runs ?? [])];
+          s.totalRuns = (s.totalRuns ?? 0) + 1;
+          totalRuns += 1;
+          allRecentRuns.unshift(inFlightRun);
+        }
+      } else if (cleanWid && !workspaceScheduleMap[cleanWid]) {
         workspaceScheduleMap[cleanWid] = {
           scheduleId: s.id,
           scheduleName: s.name,
-          isRunning: true,
-          runStatus: "running",
+          isRunning: false,
+          runStatus: active.status,
         };
-      }
-      if (!existingMatchingRun) {
-        const inFlightRun: ScheduleRunEntry = {
-          id: `in-flight-${active.agentId}`,
-          scheduleId: s.id,
-          scheduleName: s.name,
-          status: "running",
-          scheduledFor: active.createdAt ?? new Date().toISOString(),
-          startedAt: active.createdAt ?? new Date().toISOString(),
-          endedAt: null,
-          durationMs: null,
-          durationFormatted: "running…",
-          agentId: active.agentId,
-          workspaceId: active.workspaceId,
-          workspaceName: activeWorkspacesMap.get(active.workspaceId) ?? null,
-          isArchived: false,
-          output: "",
-          outputPreview: "Running…",
-          error: null,
-        };
-        s.runs = [inFlightRun, ...(s.runs ?? [])];
-        s.totalRuns = (s.totalRuns ?? 0) + 1;
-        totalRuns += 1;
-        allRecentRuns.unshift(inFlightRun);
       }
     }
   }
 
-  for (const s of summaries) {
-    for (const r of s.runs ?? []) {
-      if (r.workspaceId) {
-        const cleanWid = r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim();
-        if (cleanWid && !workspaceScheduleMap[cleanWid]) {
-          workspaceScheduleMap[cleanWid] = {
-            scheduleId: s.id,
-            scheduleName: s.name,
-            isRunning: r.status === "running",
-            runStatus: r.status,
-          };
-        }
+  for (const r of allRecentRuns) {
+    if (r.workspaceId) {
+      const cleanWid = r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim();
+      if (cleanWid && !workspaceScheduleMap[cleanWid]) {
+        workspaceScheduleMap[cleanWid] = {
+          scheduleId: r.scheduleId,
+          scheduleName: r.scheduleName,
+          isRunning: r.status === "running",
+          runStatus: r.status,
+        };
       }
     }
   }
