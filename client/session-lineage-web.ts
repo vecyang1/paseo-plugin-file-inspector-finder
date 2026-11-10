@@ -2065,8 +2065,8 @@ export function openSystemPromptViewer(
   title.style.fontWeight = "600";
   title.style.fontSize = "15px";
   title.textContent = zh
-    ? "⚡ 系统起始提示词与全局环境指令"
-    : "⚡ Active System Starter Prompt & Instructions";
+    ? "系统起始提示词与全局环境指令"
+    : "Active System Starter Prompt & Instructions";
 
   const subtitle = doc.createElement("div");
   subtitle.style.fontSize = "12px";
@@ -3031,7 +3031,7 @@ export function installDesktopSessionLineageEnhancer(
     const promptBtn = document.createElement("button");
     promptBtn.type = "button";
     promptBtn.setAttribute("data-testid", "paseo-finder-lineage-system-prompt-btn");
-    promptBtn.textContent = zh ? "⚡ 提示词" : "⚡ Prompt";
+    promptBtn.textContent = zh ? "系统提示词" : "System Prompt";
     promptBtn.title = zh
       ? "查看当前生效的系统起始提示词与全局环境指令 (~/.paseo/config.json)"
       : "Inspect active system starter prompt & daemon instructions (~/.paseo/config.json)";

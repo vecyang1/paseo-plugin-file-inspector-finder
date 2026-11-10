@@ -3957,13 +3957,13 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       <SettingsSection
         title={
           isZh
-            ? "系统起始提示词与全局环境指令对账 (System Starter Prompt & Instructions)"
-            : "System Starter Prompt & Instructions Inspector"
+            ? "系统起始提示词与全局环境指令"
+            : "System Starter Prompt & Instructions"
         }
       >
         <View style={styles.diagBox}>
           <Text style={styles.detail}>
-            • {isZh ? "配置文件路径 (能读)" : "Config Path (Read)"}:{" "}
+            • {isZh ? "配置文件路径" : "Config Path"}:{" "}
             {systemPromptSnap?.configPath ?? "~/.paseo/config.json"} (
             {systemPromptSnap?.charCount ?? 0} {isZh ? "字符" : "chars"} · ~
             {systemPromptSnap?.estimatedTokens ?? 0} tokens ·{" "}
@@ -3985,8 +3985,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               <TextInput
                 placeholder={
                   isZh
-                    ? "输入模拟转录本文本测试 cleanPromptText 气泡清洗..."
-                    : "Enter transcript text to test cleanPromptText sanitization..."
+                    ? "粘贴转录文本测试气泡清洗..."
+                    : "Paste transcript text to test bubble sanitization..."
                 }
                 value={testCleanInput}
                 onChangeText={setTestCleanInput}
@@ -4013,7 +4013,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               style={styles.btn}
             >
               <Text style={styles.btnText}>
-                {isZh ? "能试 (测试清洗)" : "Test Sanitization"}
+                {isZh ? "测试清洗" : "Test Sanitization"}
               </Text>
             </Pressable>
             <Pressable
@@ -4029,7 +4029,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               style={styles.btn}
             >
               <Text style={styles.btnText}>
-                {isZh ? "能调 (打开配置文件)" : "Edit in Editor"}
+                {isZh ? "打开配置文件" : "Open Config File"}
               </Text>
             </Pressable>
           </View>
