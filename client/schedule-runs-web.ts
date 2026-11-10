@@ -1005,6 +1005,9 @@ function resolveCadenceSchedule(
     const custom = options.findCadenceForWorkspace(cleanWorkspaceId, rowTitle);
     if (custom) return custom;
   }
+  const fromCacheOrStore = findCadenceScheduleForWorkspace(cleanWorkspaceId, rowTitle);
+  if (fromCacheOrStore) return fromCacheOrStore;
+
   const cleanTitle = rowTitle.trim().toLowerCase();
   for (const [id, sched] of options.schedulesById.entries()) {
     const fullSched = sched as Partial<ScheduleRunsSummary>;
@@ -1031,7 +1034,7 @@ function resolveCadenceSchedule(
       return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
     }
   }
-  return findCadenceScheduleForWorkspace(cleanWorkspaceId, rowTitle);
+  return null;
 }
 
 export function ensurePaseoSidebarTimestampSetting(

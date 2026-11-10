@@ -5,6 +5,11 @@ import {
   isNextThreadKeyboardEvent,
   isPinWorkspaceKeyboardEvent,
   isEditableInput,
+  isBlockedFromThreadNavigation,
+  healWorkspaceBubblesAfterShift,
+  resetThreadNavigationStateForTests,
+  matchesWorkspaceRowTestId,
+  simulateReactNativePress,
   navigateSidebarThreadRelative,
   toggleActiveWorkspacePin,
   annotateNativeWorkspaceMenusWithShortcuts,
@@ -720,4 +725,341 @@ test("Thread Shortcuts 8: Settings schema and preference synchronization", () =>
   const restoredPrefs = readInlineRenamePreferences(fakeStorage);
   assert.equal(restoredPrefs.enableThreadNavigationShortcuts, true);
   assert.equal(restoredPrefs.enablePinWorkspaceShortcut, true);
+});
+
+test("Thread Shortcuts 9: CJK semicolon, macOS smart curly quotes, Dead keys and which code coverage", () => {
+  // Previous thread: CJK fullwidth semicolon '；' (U+FF1B)
+  assert.equal(
+    isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, key: "；" })),
+    true,
+  );
+  // Previous thread: keyCode / which 186 or 59
+  assert.equal(
+    isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, keyCode: 186 })),
+    true,
+  );
+  assert.equal(
+    isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, which: 186 })),
+    true,
+  );
+  assert.equal(
+    isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, keyCode: 59 })),
+    true,
+  );
+  assert.equal(
+    isPreviousThreadKeyboardEvent(fakeKe({ metaKey: true, which: 59 })),
+    true,
+  );
+
+  // Next thread: macOS typographic curly apostrophe '’' (U+2019)
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "’" })),
+    true,
+  );
+  // Next thread: left curly apostrophe '‘' (U+2018)
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "‘" })),
+    true,
+  );
+  // Next thread: modifier letters turned comma 'ʻ' (U+02BB) and apostrophe 'ʼ' (U+02BC)
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "ʻ" })),
+    true,
+  );
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "ʼ" })),
+    true,
+  );
+  // Next thread: prime '′' (U+2032) and acute accent '´' (U+00B4)
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "′" })),
+    true,
+  );
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "´" })),
+    true,
+  );
+  // Next thread: Dead key on international/European layouts
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "Dead", code: "Quote" })),
+    true,
+  );
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "Dead", keyCode: 222 })),
+    true,
+  );
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "Dead", which: 222 })),
+    true,
+  );
+  // Next thread: which 222
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, which: 222 })),
+    true,
+  );
+  // Next thread: curly double quotes
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "”" })),
+    true,
+  );
+  assert.equal(
+    isNextThreadKeyboardEvent(fakeKe({ metaKey: true, key: "“" })),
+    true,
+  );
+});
+
+test("Thread Shortcuts 10: isBlockedFromThreadNavigation allows chat composer textarea while blocking code editors, dialogs, command center, and single-line inputs", () => {
+  function makeMockEl(opts: {
+    tagName: string;
+    attrs?: Record<string, string>;
+    className?: string;
+    parent?: MinimalElement | null;
+  }): MinimalElement {
+    const attrs = new Map<string, string>(Object.entries(opts.attrs ?? {}));
+    const el: MinimalElement = {
+      tagName: opts.tagName,
+      className: opts.className ?? "",
+      parentElement: opts.parent ?? null,
+      getAttribute: (n: string) => attrs.get(n) ?? null,
+      setAttribute: (n: string, v: string) => attrs.set(n, v),
+      closest: (sel: string) => {
+        let cur: MinimalElement | null = el;
+        while (cur) {
+          const tag = (cur.tagName ?? "").toLowerCase();
+          const cls = (typeof cur.className === "string" ? cur.className : "") || "";
+          const ce = cur.getAttribute?.("contenteditable") ?? "";
+          if (sel.includes(".cm-editor") && cls.includes("cm-editor")) return cur;
+          if (sel.includes(".cm-content") && cls.includes("cm-content")) return cur;
+          if (sel.includes(".cm-line") && cls.includes("cm-line")) return cur;
+          if (sel.includes(".monaco-editor") && cls.includes("monaco-editor")) return cur;
+          if (sel.includes('[contenteditable="true"]') && ce === "true") return cur;
+          if (sel.includes('[contenteditable="plaintext-only"]') && ce === "plaintext-only") return cur;
+          if (sel.includes("input") && tag === "input") return cur;
+          if (sel.includes("textarea") && tag === "textarea") return cur;
+          cur = cur.parentElement ?? null;
+        }
+        return null;
+      },
+    };
+    return el;
+  }
+
+  const dummyDoc = {
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    createElement: (tag: string) => ({ tagName: tag.toUpperCase() } as unknown as MinimalElement),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as MinimalDocument;
+
+  // 1. Chat composer textarea: NOT blocked
+  const chatTextarea = makeMockEl({
+    tagName: "TEXTAREA",
+    attrs: { "data-composer-input": "true" },
+  });
+  assert.equal(isBlockedFromThreadNavigation(chatTextarea, chatTextarea, dummyDoc), false);
+
+  // 2. CodeMirror / Monaco editor: BLOCKED
+  const cmEditor = makeMockEl({ tagName: "DIV", className: "cm-editor" });
+  const cmContent = makeMockEl({ tagName: "DIV", className: "cm-content", parent: cmEditor });
+  assert.equal(isBlockedFromThreadNavigation(cmContent, cmContent, dummyDoc), true);
+
+  const monacoEditor = makeMockEl({ tagName: "DIV", className: "monaco-editor" });
+  const monacoSpan = makeMockEl({ tagName: "SPAN", parent: monacoEditor });
+  assert.equal(isBlockedFromThreadNavigation(monacoSpan, monacoSpan, dummyDoc), true);
+
+  // 3. Single-line text inputs (search bar, rename field): BLOCKED
+  const textInput = makeMockEl({ tagName: "INPUT", attrs: { type: "text" } });
+  assert.equal(isBlockedFromThreadNavigation(textInput, textInput, dummyDoc), true);
+
+  const searchInput = makeMockEl({ tagName: "INPUT", attrs: { type: "search" } });
+  assert.equal(isBlockedFromThreadNavigation(searchInput, searchInput, dummyDoc), true);
+
+  // Button input: NOT blocked
+  const buttonInput = makeMockEl({ tagName: "INPUT", attrs: { type: "button" } });
+  assert.equal(isBlockedFromThreadNavigation(buttonInput, buttonInput, dummyDoc), false);
+
+  // 4. Command center open in doc: BLOCKED
+  const docWithCC: MinimalDocument = {
+    ...dummyDoc,
+    querySelector: (sel: string) =>
+      sel.includes("command-center") ? makeMockEl({ tagName: "DIV" }) : null,
+  };
+  assert.equal(isBlockedFromThreadNavigation(chatTextarea, chatTextarea, docWithCC), true);
+
+  // 5. Inline rename open in doc: BLOCKED
+  const docWithRename: MinimalDocument = {
+    ...dummyDoc,
+    querySelector: (sel: string) =>
+      sel.includes("paseo-finder-inline-rename-input") ? makeMockEl({ tagName: "INPUT" }) : null,
+  };
+  assert.equal(isBlockedFromThreadNavigation(chatTextarea, chatTextarea, docWithRename), true);
+
+  // 6. Dialog / modal open in doc: BLOCKED
+  const docWithDialog: MinimalDocument = {
+    ...dummyDoc,
+    querySelector: (sel: string) =>
+      sel.includes('[role="dialog"]') ? makeMockEl({ tagName: "DIV" }) : null,
+  };
+  assert.equal(isBlockedFromThreadNavigation(chatTextarea, chatTextarea, docWithDialog), true);
+});
+
+test("Thread Shortcuts 11: Bidirectional roundtrip navigation (Cmd+; followed by Cmd+') preserves active workspace key across async react re-renders", () => {
+  resetThreadNavigationStateForTests();
+
+  let activePathname = "/workspace/local:wks_beta";
+  let activeSelectedRow = "sidebar-workspace-row-local:wks_beta";
+
+  const rows = [
+    {
+      getAttribute: (k: string) => {
+        if (k === "data-testid") return "sidebar-workspace-row-local:wks_alpha";
+        if (k === "aria-selected") return activeSelectedRow === "sidebar-workspace-row-local:wks_alpha" ? "true" : null;
+        return null;
+      },
+      textContent: "Alpha Thread",
+      click: () => {},
+    },
+    {
+      getAttribute: (k: string) => {
+        if (k === "data-testid") return "sidebar-workspace-row-local:wks_beta";
+        if (k === "aria-selected") return activeSelectedRow === "sidebar-workspace-row-local:wks_beta" ? "true" : null;
+        return null;
+      },
+      textContent: "Beta Thread",
+      click: () => {},
+    },
+    {
+      getAttribute: (k: string) => {
+        if (k === "data-testid") return "sidebar-workspace-row-local:wks_gamma";
+        if (k === "aria-selected") return activeSelectedRow === "sidebar-workspace-row-local:wks_gamma" ? "true" : null;
+        return null;
+      },
+      textContent: "Gamma Thread",
+      click: () => {},
+    },
+  ];
+
+  const mockDoc = {
+    querySelectorAll: (sel: string) => (sel.includes("sidebar-workspace-row-") ? (rows as unknown as MinimalElement[]) : []),
+    querySelector: () => null,
+    createElement: (tag: string) => ({ tagName: tag.toUpperCase() } as unknown as MinimalElement),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as MinimalDocument;
+
+  const mockWin: MinimalWindow = {
+    navigator: { platform: "MacIntel", language: "en-US" },
+    location: {
+      get pathname() {
+        return activePathname;
+      },
+      set pathname(val: string) {
+        activePathname = val;
+      },
+    },
+    history: {
+      pushState: (_state: unknown, _title: string, url: string) => {
+        activePathname = url;
+      },
+    },
+    dispatchEvent: () => true, // unhandled natively -> falls back to DOM navigation
+  } as unknown as MinimalWindow;
+
+  // 1. Starting at Beta (index 1), press Cmd+; (delta -1) to jump to Alpha (index 0)
+  const jump1 = navigateSidebarThreadRelative({
+    delta: -1,
+    doc: mockDoc,
+    win: mockWin,
+  });
+  assert.equal(jump1.ok, true);
+  assert.equal(jump1.targetTitle, "Alpha Thread");
+  assert.equal(jump1.targetWorkspaceId, "local:wks_alpha");
+  // Route was synchronized
+  assert.equal(activePathname, "/h/local/workspace/wks_alpha");
+
+  // Even if React has NOT yet updated aria-selected="true" in the DOM (it still points to Beta):
+  assert.equal(activeSelectedRow, "sidebar-workspace-row-local:wks_beta");
+
+  // 2. Press Cmd+' (delta +1) to jump back to Beta (index 1)
+  const jump2 = navigateSidebarThreadRelative({
+    delta: 1,
+    doc: mockDoc,
+    win: mockWin,
+  });
+  assert.equal(jump2.ok, true);
+  assert.equal(jump2.targetTitle, "Beta Thread");
+  assert.equal(jump2.targetWorkspaceId, "local:wks_beta");
+  assert.equal(activePathname, "/h/local/workspace/wks_beta");
+});
+
+test("Thread Shortcuts 12: healWorkspaceBubblesAfterShift activates unselected agent tabs and restores bubbles", () => {
+  let clickedTabId: string | null = null;
+  const dispatchedEvents: string[] = [];
+
+  const tab1: MinimalElement = {
+    tagName: "DIV",
+    getAttribute: (k: string) => {
+      if (k === "data-testid") return "workspace-tab-agent_agent_123";
+      if (k === "aria-selected") return "false";
+      return null;
+    },
+    click: () => {
+      clickedTabId = "agent_123";
+    },
+    dispatchEvent: (ev: unknown) => {
+      dispatchedEvents.push((ev as { type: string }).type);
+      return true;
+    },
+  };
+
+  const mockDoc = {
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("workspace-tab-agent_")) {
+        return [tab1];
+      }
+      return [];
+    },
+    querySelector: () => null,
+    createElement: (tag: string) => ({ tagName: tag.toUpperCase() } as unknown as MinimalElement),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as MinimalDocument;
+
+  const mockWin: MinimalWindow = {
+    MouseEvent: class {
+      type: string;
+      constructor(type: string) {
+        this.type = type;
+      }
+    } as unknown as typeof MouseEvent,
+  } as unknown as MinimalWindow;
+
+  healWorkspaceBubblesAfterShift("wks_test", mockDoc, mockWin);
+
+  assert.equal(clickedTabId, "agent_123");
+  assert.ok(dispatchedEvents.includes("pointerdown") || dispatchedEvents.includes("click") || clickedTabId === "agent_123");
+});
+
+test("Thread Shortcuts 13: matchesWorkspaceRowTestId handles all testId variations and serverId prefixes", () => {
+  assert.equal(
+    matchesWorkspaceRowTestId("sidebar-workspace-row-local:wks_alpha", "local:wks_alpha"),
+    true,
+  );
+  assert.equal(
+    matchesWorkspaceRowTestId("sidebar-workspace-row-local:wks_alpha", "wks_alpha"),
+    true,
+  );
+  assert.equal(
+    matchesWorkspaceRowTestId("sidebar-workspace-row-srv_123:wks_alpha", "wks_alpha"),
+    true,
+  );
+  assert.equal(
+    matchesWorkspaceRowTestId("sidebar-workspace-row-wks_alpha", "wks_alpha"),
+    true,
+  );
+  assert.equal(
+    matchesWorkspaceRowTestId("sidebar-workspace-row-local:wks_alpha", "wks_beta"),
+    false,
+  );
 });

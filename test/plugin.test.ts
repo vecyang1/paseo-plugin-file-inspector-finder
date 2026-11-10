@@ -129,9 +129,11 @@ import {
   formatAntigravityRunTimestamp,
   formatCompactSidebarAge,
   findCadenceScheduleForWorkspace,
+  matchScheduleTitleOrSlug,
   showDefaultCadenceToast,
   isSelfInjectedMutationBatch,
   readScheduleRunsPreferences,
+  resetScheduleRunsCacheForTesting,
   runScheduleRunsDomIdempotencySelfTest,
   setCachedSchedulesForTesting,
   setTextContentIfChanged,
@@ -2744,6 +2746,12 @@ test("24. Schedules screen anti-freeze guard: W3C textContent MutationObserver i
       parentElement: null,
       get firstChild() {
         return n.childrenList[0] ?? null;
+      },
+      get title(): string {
+        return map.get("title") ?? "";
+      },
+      set title(v: string) {
+        map.set("title", v);
       },
       getAttribute: (k) => (k === "id" ? n.id ?? null : map.get(k) ?? null),
       setAttribute: (k, v) => {
@@ -6209,6 +6217,12 @@ test("51. Sidebar Cadence Timer Badge: mounts SVG stopwatch on cadence workspace
       get firstChild() {
         return n.childrenList[0] ?? null;
       },
+      get title(): string {
+        return map.get("title") ?? "";
+      },
+      set title(v: string) {
+        map.set("title", v);
+      },
       getAttribute: (k) => (k === "id" ? n.id ?? null : map.get(k) ?? null),
       setAttribute: (k, v) => {
         if (k === "id") n.id = v;
@@ -7580,6 +7594,331 @@ test("56. Left sidebar subagents zero-shrink & zero-delay: hidden provider_subag
     `Expected warm Smart Skip on second workspace without spawning Python (got ${warmElapsed}ms, Python takes >1200ms)`,
   );
 });
+
+test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization, O(1) map, useSessionStore fallback, and header mounting", async () => {
+  resetScheduleRunsCacheForTesting();
+  // 1. matchScheduleTitleOrSlug invariant checks
+  const schedName = "AG · Mac Speed & Health Sentinel (Every 30 Minutes)";
+  const standbySlug = "mac-morning-speed-watch";
+  const prompt = 'Paseo schedule for "Mac Speed & Health Sentinel (Every 30 Minutes)" (CAD-20260925-mac-morning-speed-watch)';
+
+  // Exact and prefix-stripped matches
+  assert.ok(
+    matchScheduleTitleOrSlug(
+      "Run Mac speed sentinel scheduled check mac-speed",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    "Workspace title 'Run Mac speed sentinel scheduled check mac-speed' must match schedule",
+  );
+
+  assert.ok(
+    matchScheduleTitleOrSlug(
+      "Run Mac speed sentinel scheduled check",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    "Workspace title 'Run Mac speed sentinel scheduled check' must match schedule",
+  );
+
+  assert.ok(
+    matchScheduleTitleOrSlug(
+      "Running Mac speed sentinel cadence check",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    "Title with 'Running' prefix and 'cadence check' suffix must match",
+  );
+
+  assert.ok(
+    matchScheduleTitleOrSlug(
+      "CAD-20260925-mac-morning-speed-watch",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    "Cadence Card ID in title must match via prompt or slug",
+  );
+
+  // Negative invariant: unrelated titles must never match
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Build React Native Auth Flow",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    false,
+    "Unrelated workspace title must not match cadence schedule",
+  );
+
+  // 2. Cache & O(1) workspaceScheduleMap resolution
+  resetScheduleRunsCacheForTesting();
+  const testMap = new Map<string, any>();
+  testMap.set("0180dc31", {
+    id: "0180dc31",
+    name: schedName,
+    standbySlug,
+    prompt,
+    status: "active",
+    runningRuns: 0,
+    lastRunStatus: "succeeded",
+    runs: [],
+  });
+
+  setCachedSchedulesForTesting(testMap, {
+    wks_9cbc8202e08713ae: {
+      scheduleId: "0180dc31",
+      scheduleName: schedName,
+      isRunning: true,
+      runStatus: "running",
+    },
+  });
+
+  const resolvedFromMap = findCadenceScheduleForWorkspace(
+    "wks_9cbc8202e08713ae",
+    "Run Mac speed sentinel scheduled check",
+  );
+  assert.ok(resolvedFromMap, "Must resolve cadence via cachedWorkspaceScheduleMap");
+  assert.equal(resolvedFromMap.id, "0180dc31");
+  assert.equal(resolvedFromMap.lastRunStatus, "running");
+  assert.ok((resolvedFromMap.runningRuns ?? 0) >= 1);
+
+  // 3. Real-time in-memory useSessionStore lookup fallback
+  const mockWinStore = {
+    __r: {
+      getModules: () => ({
+        "store-mod-1": {
+          isInitialized: true,
+          publicModule: {
+            exports: {
+              useSessionStore: {
+                getState: () => ({
+                  sessions: {
+                    sess_1: {
+                      agents: [
+                        {
+                          workspaceId: "local:wks_session_store_live",
+                          status: "running",
+                          turn: { phase: "open" },
+                          labels: {
+                            "paseo.schedule-id": "0180dc31",
+                          },
+                        },
+                      ],
+                    },
+                  },
+                }),
+              },
+            },
+          },
+        },
+      }),
+    },
+  } as unknown as Window;
+
+  const resolvedFromStore = findCadenceScheduleForWorkspace(
+    "wks_session_store_live",
+    "Custom Title",
+    mockWinStore,
+  );
+  assert.ok(resolvedFromStore, "Must resolve schedule from live useSessionStore");
+  assert.equal(resolvedFromStore.id, "0180dc31");
+  assert.equal(resolvedFromStore.lastRunStatus, "running");
+
+  // 4. Header title badge DOM mounting & interaction
+  type CadenceTestNode = {
+    id?: string;
+    title?: string;
+    style: Record<string, string>;
+    childrenList: CadenceTestNode[];
+    parentElement: CadenceTestNode | null;
+    listeners: Map<string, Array<(ev: unknown) => void>>;
+    textContent: string;
+    firstChild: CadenceTestNode | null;
+    getAttribute: (k: string) => string | null;
+    setAttribute: (k: string, v: string) => void;
+    hasAttribute: (k: string) => boolean;
+    appendChild: (c: unknown) => void;
+    insertBefore: (newNode: unknown, refNode: unknown) => void;
+    remove: () => void;
+    addEventListener: (type: string, fn: (ev: unknown) => void) => void;
+    dispatchEvent: (ev: unknown) => boolean;
+    querySelector: (sel: string) => CadenceTestNode | null;
+    querySelectorAll: (sel: string) => CadenceTestNode[];
+  };
+
+  const makeScheduleTestNode = (
+    tag: string,
+    attrs: Record<string, string> = {},
+  ): CadenceTestNode => {
+    const map = new Map<string, string>(Object.entries(attrs));
+    const listeners = new Map<string, Array<(ev: unknown) => void>>();
+    let rawText = "";
+    const n: CadenceTestNode = {
+      id: attrs.id,
+      style: {},
+      childrenList: [],
+      parentElement: null,
+      listeners,
+      get textContent(): string {
+        if (n.childrenList.length > 0) {
+          return n.childrenList.map((c) => c.textContent ?? "").join("");
+        }
+        return rawText;
+      },
+      set textContent(v: string) {
+        rawText = v;
+        n.childrenList = [];
+      },
+      get firstChild() {
+        return n.childrenList[0] ?? null;
+      },
+      get title(): string {
+        return map.get("title") ?? "";
+      },
+      set title(v: string) {
+        map.set("title", v);
+      },
+      getAttribute: (k) => (k === "id" ? n.id ?? null : map.get(k) ?? null),
+      setAttribute: (k, v) => {
+        if (k === "id") n.id = v;
+        map.set(k, v);
+      },
+      hasAttribute: (k) => (k === "id" ? Boolean(n.id) : map.has(k)),
+      appendChild: (c) => {
+        const child = c as CadenceTestNode;
+        child.parentElement = n;
+        n.childrenList.push(child);
+      },
+      insertBefore: (newNode, refNode) => {
+        const child = newNode as CadenceTestNode;
+        child.parentElement = n;
+        const idx = refNode ? n.childrenList.indexOf(refNode as CadenceTestNode) : -1;
+        if (idx >= 0) n.childrenList.splice(idx, 0, child);
+        else n.childrenList.push(child);
+      },
+      remove: () => {
+        if (n.parentElement) {
+          const list = (n.parentElement as CadenceTestNode).childrenList;
+          const idx = list.indexOf(n);
+          if (idx >= 0) list.splice(idx, 1);
+          n.parentElement = null;
+        }
+      },
+      addEventListener: (type, fn) => {
+        const list = listeners.get(type) ?? [];
+        list.push(fn);
+        listeners.set(type, list);
+      },
+      dispatchEvent: (ev) => {
+        const type = (ev as { type?: string })?.type ?? "";
+        for (const fn of listeners.get(type) ?? []) fn(ev);
+        return true;
+      },
+      querySelector: (sel) => {
+        const check = (node: CadenceTestNode): CadenceTestNode | null => {
+          if (sel.startsWith("[data-testid=")) {
+            const val = sel.slice(14, -2);
+            if (node.getAttribute("data-testid") === val) return node;
+          }
+          if (sel.startsWith("#") && node.id === sel.slice(1)) return node;
+          for (const ch of node.childrenList) {
+            const found = check(ch);
+            if (found) return found;
+          }
+          return null;
+        };
+        return check(n);
+      },
+      querySelectorAll: (sel) => {
+        const out: CadenceTestNode[] = [];
+        const scan = (node: CadenceTestNode) => {
+          if (sel.startsWith("[data-testid^=")) {
+            const prefix = sel.slice(15, -2);
+            if ((node.getAttribute("data-testid") ?? "").startsWith(prefix)) out.push(node);
+          }
+          for (const ch of node.childrenList) scan(ch);
+        };
+        scan(n);
+        return out;
+      },
+    };
+    return n;
+  };
+
+  const headerContainer = makeScheduleTestNode("div");
+  const headerTitleEl = makeScheduleTestNode("h1", {
+    "data-testid": "workspace-header-title",
+  });
+  headerTitleEl.textContent = "Run Mac speed sentinel scheduled check mac-speed";
+  headerContainer.appendChild(headerTitleEl);
+
+  const selectedRowEl = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_9cbc8202e08713ae",
+    "aria-selected": "true",
+  });
+
+  const mockHeaderDoc = {
+    body: makeScheduleTestNode("body"),
+    querySelector: (sel: string) => {
+      if (sel === '[data-testid="workspace-header-title"]') return headerTitleEl;
+      if (sel.includes('[aria-selected="true"]')) return selectedRowEl;
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid^="schedule-row-"]') return [];
+      if (sel === '[data-testid^="sidebar-project-row-"]') return [];
+      if (sel === '[data-testid^="sidebar-workspace-row-"]') return [];
+      return [];
+    },
+    getElementById: (id: string) => null,
+    createElement: (tag: string) => makeScheduleTestNode(tag),
+  };
+
+  let runNowTriggeredId: string | null = null;
+  testMap.get("0180dc31")!.lastRunStatus = "running";
+  testMap.get("0180dc31")!.runningRuns = 1;
+  const result = decorateSchedulesDomOnDocument(
+    mockHeaderDoc as unknown as MinimalScheduleDomDocument,
+    {
+      schedulesById: testMap,
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 1 },
+      isZh: true,
+      onOpenDrawer: () => {},
+      onRunNow: (id) => {
+        runNowTriggeredId = id;
+      },
+    },
+  );
+
+  const headerBadge = headerContainer.querySelector(
+    '[data-testid="workspace-header-cadence-badge-0180dc31"]',
+  );
+  assert.ok(headerBadge, "Workspace header must receive cadence badge");
+  assert.equal(headerBadge.getAttribute("data-running"), "true");
+  assert.ok(headerBadge.getAttribute("title")?.includes("运行中"));
+
+  // Verify Alt+Click triggers onRunNow
+  headerBadge.dispatchEvent?.({
+    type: "click",
+    altKey: true,
+    stopPropagation: () => {},
+    preventDefault: () => {},
+  });
+  assert.equal(
+    runNowTriggeredId,
+    "0180dc31",
+    "Alt+Click on header badge must trigger onRunNow for schedule 0180dc31",
+  );
+
+  // Clean up cache
+  resetScheduleRunsCacheForTesting();
+});
+
 
 
 

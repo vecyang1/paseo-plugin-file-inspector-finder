@@ -1,4 +1,5 @@
 import bundledKaTeX from "katex";
+import { getMetroModuleMap } from "./metro-registry";
 
 export interface MarkdownTablePreferences {
   enabled: boolean;
@@ -478,49 +479,7 @@ export function installMetroMarkdownTableHooks(
 
   const req = targetWin.__r as (id: number) => unknown;
 
-  type MetroModuleMap = Map<
-    number,
-    {
-      isInitialized?: boolean;
-      factory?: unknown;
-      dependencyMap?: unknown[];
-      publicModule?: { exports?: Record<string, unknown> };
-    }
-  >;
-
-  const holder: { map: MetroModuleMap | null } = { map: null };
-
-  if (typeof targetWin.__c === "function") {
-    try {
-      const res = (targetWin.__c as () => unknown)();
-      if (res instanceof Map) {
-        holder.map = res as unknown as MetroModuleMap;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  if (!holder.map) {
-    const origMapGet = Map.prototype.get;
-    try {
-      Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) {
-        if (key === 0 && !holder.map && this instanceof Map && this.size > 50) {
-          holder.map = this as unknown as MetroModuleMap;
-        }
-        return origMapGet.call(this, key);
-      };
-      try {
-        req(0);
-      } catch {
-        // ignore
-      }
-    } finally {
-      Map.prototype.get = origMapGet;
-    }
-  }
-
-  const mapRef = holder.map;
+  const mapRef = getMetroModuleMap(targetWin);
   if (!mapRef) return false;
 
   // Pre-initialize and resolve modules if Metro map is available

@@ -785,7 +785,9 @@ function findFirstTextLeafElement(root: MinimalElement): MinimalElement | null {
       tid.startsWith("sidebar-row-project-icon-") ||
       tid.startsWith("sidebar-workspace-kebab-") ||
       tid.startsWith("sidebar-workspace-archive-") ||
-      tid === "sidebar-workspace-trailing-scrim"
+      tid === "sidebar-workspace-trailing-scrim" ||
+      tid.startsWith("sidebar-workspace-cadence-badge-") ||
+      tid.startsWith("workspace-header-cadence-badge-")
     ) {
       continue;
     }
@@ -2196,21 +2198,62 @@ export function isPreviousThreadKeyboardEvent(ke?: MinimalKeyboardEvent | null):
   if (ke.isComposing || ke.keyCode === 229) return false;
   const hasMod = Boolean(ke.metaKey || ke.ctrlKey);
   if (!hasMod || ke.altKey || ke.shiftKey) return false;
-  const key = ke.key;
-  const code = ke.code;
-  const keyCode = ke.keyCode;
-  return key === ";" || code === "Semicolon" || keyCode === 186 || keyCode === 59;
+  const key = ke.key ?? "";
+  const code = ke.code ?? "";
+  const keyCode = ke.keyCode ?? 0;
+  const which = ke.which ?? 0;
+  return (
+    key === ";" ||
+    key === "；" || // CJK fullwidth semicolon
+    code === "Semicolon" ||
+    keyCode === 186 ||
+    keyCode === 59 ||
+    which === 186 ||
+    which === 59
+  );
 }
 
 export function isNextThreadKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
   if (!ke) return false;
   if (ke.isComposing || ke.keyCode === 229) return false;
   const hasMod = Boolean(ke.metaKey || ke.ctrlKey);
-  if (!hasMod || ke.altKey || ke.shiftKey) return false;
-  const key = ke.key;
-  const code = ke.code;
-  const keyCode = ke.keyCode;
-  return key === "'" || key === '"' || code === "Quote" || keyCode === 222;
+  if (!hasMod || ke.altKey) return false;
+  const key = ke.key ?? "";
+  const code = ke.code ?? "";
+  const keyCode = ke.keyCode ?? 0;
+  const which = ke.which ?? 0;
+
+  // Single quote variants:
+  // - "'" (U+0027 straight apostrophe)
+  // - "’" (U+2019 right single quotation mark / typographic curly apostrophe - macOS default)
+  // - "‘" (U+2018 left single quotation mark)
+  // - "ʻ" (U+02BB modifier letter turned comma)
+  // - "ʼ" (U+02BC modifier letter apostrophe)
+  // - "′" (U+2032 prime)
+  // - "´" (U+00B4 acute accent)
+  // - "Dead" with Quote code / keyCode / which 222 (international layout dead key)
+  const isQuoteKey =
+    key === "'" ||
+    key === "’" ||
+    key === "‘" ||
+    key === "ʻ" ||
+    key === "ʼ" ||
+    key === "′" ||
+    key === "´" ||
+    (key === "Dead" && (code === "Quote" || keyCode === 222 || which === 222)) ||
+    code === "Quote" ||
+    keyCode === 222 ||
+    which === 222;
+
+  // Double quote variants (with or without shift)
+  const isDoubleQuoteKey =
+    key === '"' ||
+    key === "”" ||
+    key === "“";
+
+  if (isQuoteKey && !ke.shiftKey) return true;
+  if (isDoubleQuoteKey) return true;
+  return false;
 }
 
 export function isPinWorkspaceKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
@@ -2223,6 +2266,270 @@ export function isPinWorkspaceKeyboardEvent(ke?: MinimalKeyboardEvent | null): b
   const keyCode = ke.keyCode;
   // On macOS Chromium, Option+P produces 'π'
   return code === "KeyP" || key === "p" || ke.key === "π" || keyCode === 80;
+}
+
+let lastNavigatedWorkspaceKey: string | null = null;
+
+export function resetThreadNavigationStateForTests(): void {
+  lastNavigatedWorkspaceKey = null;
+}
+
+export function matchesWorkspaceRowTestId(tid: string, wsId?: string | null): boolean {
+  if (!tid || !wsId) return false;
+  const cleanTarget = wsId
+    .replace(/^sidebar-workspace-row-/, "")
+    .replace(/^[^:]+:/, "")
+    .trim()
+    .toLowerCase();
+  const rawTarget = wsId.replace(/^sidebar-workspace-row-/, "").trim().toLowerCase();
+  const rowWsKey = tid.replace(/^sidebar-workspace-row-/, "").trim().toLowerCase();
+  const cleanRowWs = rowWsKey.replace(/^[^:]+:/, "").trim();
+
+  if (rowWsKey === rawTarget) return true;
+  if (cleanTarget && (rowWsKey === cleanTarget || cleanRowWs === cleanTarget)) return true;
+  if (cleanTarget && (rowWsKey.endsWith(`:${cleanTarget}`) || tid.endsWith(`:${cleanTarget}`))) {
+    return true;
+  }
+  return false;
+}
+
+export function simulateReactNativePress(
+  element: MinimalElement | null | undefined,
+  win?: MinimalWindow | null,
+): void {
+  if (!element) return;
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  try {
+    if (typeof element.click === "function") {
+      element.click();
+    }
+  } catch {
+    // Ignore click error
+  }
+  if (!w || !element.dispatchEvent) return;
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    try {
+      const PointerCtor = (w as unknown as { PointerEvent?: typeof PointerEvent }).PointerEvent;
+      const MouseCtor =
+        (w as unknown as { MouseEvent?: typeof MouseEvent }).MouseEvent ??
+        (globalThis as unknown as { MouseEvent?: typeof MouseEvent }).MouseEvent;
+      const Ctor = type.startsWith("pointer") && PointerCtor ? PointerCtor : MouseCtor;
+      if (Ctor) {
+        element.dispatchEvent(
+          new Ctor(type, {
+            bubbles: true,
+            cancelable: true,
+            view: w as unknown as Window,
+          }),
+        );
+      }
+    } catch {
+      // Ignore event dispatch errors
+    }
+  }
+}
+
+export function healWorkspaceBubblesAfterShift(
+  workspaceId: string,
+  doc?: MinimalDocument | null,
+  win?: MinimalWindow | null,
+): void {
+  const cleanWs = (workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+  const d = doc ?? (typeof document !== "undefined" ? document : null);
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  if (!d) return;
+
+  const tryActivateTab = (): boolean => {
+    try {
+      const rawTabs = d.querySelectorAll?.(
+        '[data-testid^="workspace-tab-agent_"], [data-testid^="workspace-tab-"]',
+      );
+      const allTabs: MinimalElement[] = rawTabs
+        ? (Array.from(rawTabs as unknown as ArrayLike<MinimalElement>) as MinimalElement[])
+        : [];
+      const tabs = allTabs.filter((t) => {
+        const tid = t.getAttribute?.("data-testid") ?? "";
+        return (
+          tid !== "workspace-tab-new" &&
+          tid !== "workspace-tab-close-current" &&
+          tid !== "workspace-tab-prev" &&
+          tid !== "workspace-tab-next" &&
+          !tid.includes("jump-index")
+        );
+      });
+
+      if (tabs.length > 0) {
+        const activeTab = tabs.find(
+          (t) =>
+            t.getAttribute?.("aria-selected") === "true" ||
+            t.getAttribute?.("data-state") === "active",
+        );
+        if (activeTab) return true;
+
+        const firstTab = tabs[0];
+        if (firstTab) {
+          simulateReactNativePress(firstTab, w as unknown as MinimalWindow);
+          return true;
+        }
+      }
+
+      // If tabs not yet mounted in DOM or workspace has no open tab, try opening the workspace's agent via Metro
+      if (w) {
+        const anyW = w as unknown as {
+          __r?: {
+            getModules?: () => Record<
+              string,
+              {
+                isInitialized?: boolean;
+                publicModule?: { exports?: Record<string, unknown> };
+              }
+            >;
+          };
+          __metroModules?: Record<
+            string,
+            {
+              isInitialized?: boolean;
+              publicModule?: { exports?: Record<string, unknown> };
+            }
+          >;
+        };
+        const mods = anyW.__r?.getModules?.() ?? anyW.__metroModules;
+        if (mods) {
+          type SessionStoreType = {
+            getState?: () => { sessions?: Record<string, unknown> };
+          };
+          type NavToAgentType = (arg: {
+            serverId: string;
+            agentId: string;
+            workspaceId?: string;
+          }) => unknown;
+          type LayoutStoreType = {
+            getState?: () => { openTab?: (opts: unknown) => unknown };
+          };
+
+          let sessionStore: SessionStoreType | null = null;
+          let navToAgent: NavToAgentType | null = null;
+          let layoutStore: LayoutStoreType | null = null;
+
+          for (const m of Object.values(mods)) {
+            if (!m?.isInitialized) continue;
+            const exp = m.publicModule?.exports;
+            if (
+              !sessionStore &&
+              typeof (exp?.useSessionStore as { getState?: unknown })?.getState ===
+                "function"
+            ) {
+              sessionStore = exp!.useSessionStore as unknown as SessionStoreType;
+            }
+            if (!navToAgent && typeof exp?.navigateToAgent === "function") {
+              navToAgent = exp!.navigateToAgent as unknown as NavToAgentType;
+            }
+            if (
+              !layoutStore &&
+              typeof (exp?.useWorkspaceLayoutStore as { getState?: unknown })
+                ?.getState === "function"
+            ) {
+              layoutStore = exp!.useWorkspaceLayoutStore as unknown as LayoutStoreType;
+            }
+          }
+
+          const activeSessionStore = sessionStore as SessionStoreType | null;
+          const activeNavToAgent = navToAgent as NavToAgentType | null;
+          const activeLayoutStore = layoutStore as LayoutStoreType | null;
+
+          if (activeSessionStore && typeof activeSessionStore.getState === "function") {
+            const sessions = activeSessionStore.getState()?.sessions ?? {};
+            for (const [serverId, session] of Object.entries(sessions)) {
+              const rawAgents = (session as Record<string, unknown> | undefined)
+                ?.agents;
+              const agents = rawAgents
+                ? rawAgents instanceof Map
+                  ? Array.from(rawAgents.values())
+                  : Object.values(rawAgents)
+                : [];
+              for (const a of agents as Array<Record<string, unknown>>) {
+                if (!a) continue;
+                const aWid = String(a.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+                if (cleanWs && (aWid === cleanWs || aWid.endsWith(`:${cleanWs}`))) {
+                  const agentId = String(a.id ?? "").trim();
+                  if (agentId) {
+                    if (typeof activeNavToAgent === "function") {
+                      try {
+                        activeNavToAgent({ serverId, agentId, workspaceId: cleanWs });
+                        return true;
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    if (activeLayoutStore && typeof activeLayoutStore.getState === "function") {
+                      try {
+                        activeLayoutStore.getState()?.openTab?.({
+                          workspaceKey: `${serverId}:${cleanWs}`,
+                          target: { kind: "agent", agentId },
+                        });
+                        return true;
+                      } catch {
+                        // ignore
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore in mock/non-DOM environments
+    }
+    return false;
+  };
+
+  if (!tryActivateTab()) {
+    const delays = [30, 80, 160, 320, 600];
+    for (const delay of delays) {
+      setTimeout(() => {
+        tryActivateTab();
+      }, delay);
+    }
+  }
+}
+
+export function isBlockedFromThreadNavigation(
+  target?: MinimalElement | null,
+  activeEl?: MinimalElement | null,
+  doc?: MinimalDocument | null,
+): boolean {
+  if (doc?.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]')) return true;
+  if (doc?.querySelector?.('[data-testid*="command-center"]')) return true;
+  if (doc?.querySelector?.('[role="dialog"]')) return true;
+
+  for (const el of [target, activeEl]) {
+    if (!el) continue;
+    // Inside active code editor (CodeMirror, Monaco) or rich text editable container
+    if (
+      el.closest?.(
+        '.cm-editor, .cm-content, .cm-line, .monaco-editor, [contenteditable="true"], [contenteditable="plaintext-only"]',
+      )
+    ) {
+      return true;
+    }
+    // Inside single-line text input (rename field, search field, settings input)
+    const inputEl = el.closest?.("input");
+    if (inputEl) {
+      const type = (inputEl.getAttribute?.("type") ?? "text").toLowerCase();
+      if (
+        type !== "button" &&
+        type !== "submit" &&
+        type !== "checkbox" &&
+        type !== "radio" &&
+        type !== "reset"
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function navigateSidebarThreadRelative(options?: {
@@ -2284,27 +2591,48 @@ export function navigateSidebarThreadRelative(options?: {
   const rawRows = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-row-"]');
   const rows = rawRows ? Array.from(rawRows) : [];
   if (rows.length > 0) {
-    const activeWsId = resolveCurrentActiveWorkspaceId(
+    const resolvedActiveId = resolveCurrentActiveWorkspaceId(
       doc,
       win,
       callbacks?.getFallbackWorkspaceId?.(),
     );
+    const activeWsId =
+      resolvedActiveId ??
+      (lastNavigatedWorkspaceKey &&
+      rows.some((r) =>
+        matchesWorkspaceRowTestId(
+          r.getAttribute?.("data-testid") ?? "",
+          lastNavigatedWorkspaceKey,
+        ),
+      )
+        ? lastNavigatedWorkspaceKey
+        : undefined);
+
     let activeIdx = -1;
-    for (let i = 0; i < rows.length; i += 1) {
-      const r = rows[i];
-      if (!r) continue;
-      const tid = r.getAttribute?.("data-testid") ?? "";
-      const isSelected =
-        r.getAttribute?.("aria-selected") === "true" ||
-        r.getAttribute?.("data-selected") === "true";
-      if (
-        isSelected ||
-        (activeWsId &&
-          (tid.endsWith(`:${activeWsId}`) ||
-            tid === `sidebar-workspace-row-${activeWsId}`))
-      ) {
-        activeIdx = i;
-        break;
+    // Priority 1: Match activeWsId (exact or suffix match)
+    if (activeWsId) {
+      for (let i = 0; i < rows.length; i += 1) {
+        const r = rows[i];
+        if (!r) continue;
+        const tid = r.getAttribute?.("data-testid") ?? "";
+        if (matchesWorkspaceRowTestId(tid, activeWsId)) {
+          activeIdx = i;
+          break;
+        }
+      }
+    }
+    // Priority 2: Fall back to aria-selected or data-selected row
+    if (activeIdx < 0) {
+      for (let i = 0; i < rows.length; i += 1) {
+        const r = rows[i];
+        if (!r) continue;
+        const isSelected =
+          r.getAttribute?.("aria-selected") === "true" ||
+          r.getAttribute?.("data-selected") === "true";
+        if (isSelected) {
+          activeIdx = i;
+          break;
+        }
       }
     }
 
@@ -2319,37 +2647,48 @@ export function navigateSidebarThreadRelative(options?: {
     if (targetRow) {
       const targetTid = targetRow.getAttribute?.("data-testid") ?? "";
       const parsedWs = parseSidebarWorkspaceRowTestId(targetTid);
+      const targetWsKey =
+        parsedWs?.workspaceKey ?? targetTid.replace(/^sidebar-workspace-row-/, "");
+      const cleanTargetWsId = parsedWs?.workspaceId ?? targetWsKey.replace(/^[^:]+:/, "");
       const titleEl = findSidebarRowTitleElement(targetRow, parsedWs?.workspaceKey ?? "");
       const targetTitle =
         titleEl?.textContent?.trim() || parsedWs?.workspaceKey || undefined;
 
+      lastNavigatedWorkspaceKey = targetWsKey;
+
       if (!nativeHandled) {
         const anchor = targetRow.querySelector?.("a") ?? targetRow;
-        try {
-          if (typeof anchor.click === "function") {
-            anchor.click();
-          } else if (anchor.dispatchEvent && win) {
-            const MouseCtor =
-              (win as unknown as { MouseEvent?: typeof MouseEvent }).MouseEvent ??
-              (globalThis as unknown as { MouseEvent?: typeof MouseEvent }).MouseEvent;
-            if (MouseCtor) {
-              anchor.dispatchEvent(
-                new MouseCtor("click", { bubbles: true, cancelable: true }),
-              );
+        simulateReactNativePress(anchor, win);
+
+        // Also ensure route is updated if anchor click alone didn't update it
+        if (cleanTargetWsId && win?.location && win?.history?.pushState) {
+          const currentPath = win.location.pathname ?? "";
+          if (
+            !currentPath.endsWith(`/workspace/${cleanTargetWsId}`) &&
+            !currentPath.endsWith(`/workspace/${encodeURIComponent(cleanTargetWsId)}`)
+          ) {
+            const serverId = parsedWs?.serverId ?? "local";
+            const targetRoute = `/h/${encodeURIComponent(serverId)}/workspace/${encodeURIComponent(cleanTargetWsId)}`;
+            try {
+              win.history.pushState({}, "", targetRoute);
+              if (win.PopStateEvent) {
+                win.dispatchEvent?.(new win.PopStateEvent("popstate"));
+              }
+            } catch {
+              // Ignore
             }
           }
-        } catch {
-          // Ignore click error
         }
       }
 
       flashAndScrollWorkspaceRow(targetRow, doc, win ?? null, true);
+      healWorkspaceBubblesAfterShift(cleanTargetWsId, doc, win ?? null);
 
       return {
         ok: true,
         source: nativeHandled ? "native-shortcut" : "dom-click",
         targetTitle,
-        targetWorkspaceId: parsedWs?.workspaceKey,
+        targetWorkspaceId: targetWsKey,
       };
     }
   }
@@ -3746,11 +4085,15 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
         `sidebar-workspace-row-${workspaceKey}`,
       );
       const cleanWorkspaceId = parsed?.workspaceId ?? workspaceKey;
-      const titleEl = doc.querySelector?.(
-        `[data-testid="sidebar-workspace-title-${workspaceKey}"]`,
-      ) ?? doc.querySelector?.(
-        `[data-testid="sidebar-workspace-title-local:${cleanWorkspaceId}"]`,
-      );
+      const rowEl = findSidebarWorkspaceRow(doc, cleanWorkspaceId);
+      const titleEl =
+        (rowEl ? findSidebarRowTitleElement(rowEl, workspaceKey) : null) ??
+        doc.querySelector?.(
+          `[data-testid="sidebar-workspace-title-${workspaceKey}"]`,
+        ) ??
+        doc.querySelector?.(
+          `[data-testid="sidebar-workspace-title-local:${cleanWorkspaceId}"]`,
+        );
       const wsTitle = titleEl?.textContent?.trim() || null;
       const cadenceSched = findCadenceScheduleForWorkspace(cleanWorkspaceId, wsTitle);
       const existingCadenceItem = parentMenu.querySelector?.(
@@ -6238,11 +6581,7 @@ export function installDesktopRevealHelpers(
     if (
       prefs.enableThreadNavigationShortcuts !== false &&
       (isPreviousThreadKeyboardEvent(ke) || isNextThreadKeyboardEvent(ke)) &&
-      !isEditableInput(ke.target ?? null) &&
-      !isEditableInput(doc.activeElement ?? null) &&
-      !doc.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]') &&
-      !doc.querySelector?.('[data-testid*="command-center"]') &&
-      !doc.querySelector?.('[role="dialog"]')
+      !isBlockedFromThreadNavigation(ke.target ?? null, doc.activeElement ?? null, doc)
     ) {
       ke.preventDefault();
       ke.stopPropagation?.();

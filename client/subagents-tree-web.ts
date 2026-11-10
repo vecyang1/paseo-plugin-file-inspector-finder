@@ -4205,11 +4205,14 @@ export function installDesktopSubagentsTreeEnhancer(
       decorateActiveAgentSubagentsDom(null);
       return;
     }
-    const force = scope.scopeKey !== lastScopeKey;
     lastScopeKey = scope.scopeKey;
     const cached = getCachedTreeForScope(scope);
     decorateActiveAgentSubagentsDom(cached);
-    void fetchScopeTree(scope, force, false).then((tree) => {
+    void prefetchAllWorkspaceSubagentTrees(false).then(() => {
+      const latestScope = resolveActiveScope();
+      decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
+    });
+    void fetchScopeTree(scope, false, false).then((tree) => {
       const latestScope = resolveActiveScope();
       if (latestScope.scopeKey === scope.scopeKey) {
         decorateActiveAgentSubagentsDom(tree);
@@ -4231,6 +4234,15 @@ export function installDesktopSubagentsTreeEnhancer(
 
   pollIntervalId = setInterval(() => {
     const scope = resolveActiveScope();
+    const anySidebarWorkspaceRunning = Array.from(workspaceTreesByWsId.values()).some(
+      (t) => t.subagentSummary.running > 0,
+    );
+    if (anySidebarWorkspaceRunning) {
+      void prefetchAllWorkspaceSubagentTrees(true).then(() => {
+        const latestScope = resolveActiveScope();
+        decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
+      });
+    }
     if (!scope.scopeKey) return;
     const cached = getCachedTreeForScope(scope);
     const hasBadgeInDom = Boolean(document.querySelector('[data-testid="tool-call-badge"]'));
