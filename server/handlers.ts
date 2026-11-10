@@ -17,6 +17,7 @@ import {
   type WorkspaceLabelColor,
   type WorkspaceLabelEntry,
   type archiveWorkspaceRpc,
+  type toggleWorkspacePinRpc,
   type diagnosePathRpc,
   type importFolderWorkspaceRpc,
   type inspectFileRpc,
@@ -1019,6 +1020,101 @@ export async function handleArchiveWorkspace(
       ok: false,
       workspaceId,
       error: errorMsg,
+    };
+  }
+}
+
+export async function handleToggleWorkspacePin(
+  input: RpcInput<typeof toggleWorkspacePinRpc>,
+  context: PluginHandlerContext,
+): Promise<RpcOutput<typeof toggleWorkspacePinRpc>> {
+  const workspaceId = await resolveActiveWorkspaceId(context, input.workspaceId);
+  if (!workspaceId) {
+    return {
+      ok: false,
+      workspaceId: "",
+      pinned: false,
+      pinnedAt: null,
+      message: "No active workspaceId found to toggle pin",
+    };
+  }
+
+  let currentlyPinned = false;
+  let workspaceTitle = workspaceId;
+  try {
+    const list = await context.paseo.workspaces?.list?.();
+    if (list?.entries && Array.isArray(list.entries)) {
+      const entry = list.entries.find(
+        (e: { id?: string; name?: string; title?: string | null; pinnedAt?: unknown }) =>
+          e.id === workspaceId,
+      );
+      if (entry) {
+        currentlyPinned = Boolean((entry as { pinnedAt?: unknown }).pinnedAt);
+        workspaceTitle =
+          (entry as { title?: string; name?: string }).title ||
+          (entry as { name?: string }).name ||
+          workspaceId;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const nextPinned = input.pinned !== undefined ? input.pinned : !currentlyPinned;
+
+  if (input.dryRun) {
+    return {
+      ok: true,
+      workspaceId,
+      pinned: nextPinned,
+      pinnedAt: nextPinned ? Date.now() : null,
+      message: `[dryRun] Would ${nextPinned ? "pin" : "unpin"} workspace ${workspaceTitle}`,
+    };
+  }
+
+  try {
+    const paseo = context.paseo as {
+      daemonClient?: {
+        setWorkspacePinned?: (
+          id: string,
+          pinned: boolean,
+        ) => Promise<{ pinnedAt?: string | number | null }>;
+      };
+    };
+
+    let pinnedAt: string | number | null = null;
+    if (typeof paseo.daemonClient?.setWorkspacePinned === "function") {
+      const res = await paseo.daemonClient.setWorkspacePinned(workspaceId, nextPinned);
+      pinnedAt = res?.pinnedAt ?? (nextPinned ? Date.now() : null);
+    } else {
+      pinnedAt = nextPinned ? Date.now() : null;
+    }
+
+    recordActionLog({
+      target: "workspace-meta",
+      resolvedPath: workspaceId,
+      ok: true,
+      durationMs: 0,
+      message: `${nextPinned ? "Pinned" : "Unpinned"} workspace ${workspaceTitle}`,
+    });
+
+    return {
+      ok: true,
+      workspaceId,
+      pinned: nextPinned,
+      pinnedAt,
+      message: nextPinned
+        ? `Pinned workspace: ${workspaceTitle}`
+        : `Unpinned workspace: ${workspaceTitle}`,
+    };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      workspaceId,
+      pinned: currentlyPinned,
+      pinnedAt: null,
+      message: `Failed to toggle pin for workspace ${workspaceId}: ${errorMsg}`,
     };
   }
 }

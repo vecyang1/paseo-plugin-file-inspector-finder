@@ -15,6 +15,7 @@ import {
   quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
   archiveWorkspaceRpc,
+  toggleWorkspacePinRpc,
   inspectScheduleRunsRpc,
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
@@ -32,6 +33,7 @@ import { handleForkSession } from "./server/fork-session-handlers";
 import { handleInspectSystemPrompt } from "./server/system-prompt-handlers";
 import {
   handleArchiveWorkspace,
+  handleToggleWorkspacePin,
   handleDiagnosePath,
   handleImportFolderWorkspace,
   handleInspectFile,
@@ -80,6 +82,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(diagnosePathRpc, handleDiagnosePath);
   server.handle(renameWorkspaceOrAgentRpc, handleRenameThread);
   server.handle(archiveWorkspaceRpc, handleArchiveWorkspace);
+  server.handle(toggleWorkspacePinRpc, handleToggleWorkspacePin);
   server.handle(manageWorkspaceLabelsRpc, handleManageWorkspaceLabels);
   server.handle(importFolderWorkspaceRpc, (input, context) =>
     handleImportFolderWorkspace(input, context, {

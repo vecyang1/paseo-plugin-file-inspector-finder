@@ -791,7 +791,8 @@ function isSkippedRowElement(el: MinimalElement): boolean {
     tid === "sidebar-workspace-trailing-scrim" ||
     tid.startsWith("sidebar-workspace-cadence-badge-") ||
     tid.startsWith("workspace-header-cadence-badge-") ||
-    tid.startsWith("sidebar-workspace-shortcut-badge")
+    tid.startsWith("sidebar-workspace-shortcut-badge") ||
+    tid.startsWith("sidebar-workspace-timestamp")
   ) {
     return true;
   }
@@ -799,7 +800,20 @@ function isSkippedRowElement(el: MinimalElement): boolean {
     return true;
   }
   const role = el.getAttribute?.("role") ?? "";
-  if (role === "menuitem" || role === "button") {
+  if (role === "menuitem" || role === "button" || role === "img") {
+    return true;
+  }
+  if (el.getAttribute?.("aria-hidden") === "true") {
+    return true;
+  }
+  const className = el.getAttribute?.("class") ?? "";
+  if (
+    className.includes("projectLeadingVisualSlot") ||
+    className.includes("projectIconBox") ||
+    className.includes("workspaceStatusDot") ||
+    className.includes("statusDot") ||
+    className.includes("statusRing")
+  ) {
     return true;
   }
   return false;
@@ -832,7 +846,7 @@ function collectRowCandidateTextLeaves(
   const children = root.children;
   if (!children || children.length === 0) {
     const txt = (root.textContent ?? "").trim();
-    if (txt.length > 0) {
+    if (txt.length > 0 && txt !== "·" && txt !== "\xb7") {
       leaves.push(root);
     }
     return leaves;
@@ -889,19 +903,42 @@ export function findSidebarRowTitleElement(
     return true;
   });
 
-  if (titleCandidates.length === 0) {
-    return leaves[0] ?? null;
-  }
+  // In Paseo's layout, workspaceTitleRow precedes WorkspaceMetaRow (branch, time) in document order,
+  // and the leading project monogram/status indicator is fully excluded by isSkippedRowElement.
+  // Therefore, candidate 0 is unequivocally the title element, preserving short 1-2 char titles ("Go", "DB", "CI").
+  return titleCandidates[0] ?? leaves[0] ?? null;
+}
 
-  // If the first leaf is a 1-2 character initial/monogram (e.g. "A" or "2") and a longer text leaf exists, pick the real title
-  if (titleCandidates.length > 1) {
-    const firstTxt = (titleCandidates[0]?.textContent ?? "").trim();
-    if (firstTxt.length <= 2 && (titleCandidates[1]?.textContent ?? "").trim().length > 2) {
-      return titleCandidates[1];
-    }
-  }
+export interface ExplicitTitleSyncRecord {
+  workspaceKey: string;
+  title: string;
+  atMs: number;
+}
 
-  return titleCandidates[0] ?? null;
+let activeExplicitTitleSync: ExplicitTitleSyncRecord | null = null;
+
+export function recordExplicitTitleSync(workspaceId: string, title: string): void {
+  const clean = workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim().toLowerCase();
+  if (clean && title) {
+    activeExplicitTitleSync = {
+      workspaceKey: clean,
+      title,
+      atMs: Date.now(),
+    };
+  }
+}
+
+export function getActiveExplicitTitleSync(): ExplicitTitleSyncRecord | null {
+  if (!activeExplicitTitleSync) return null;
+  if (Date.now() - activeExplicitTitleSync.atMs > 3500) {
+    activeExplicitTitleSync = null;
+    return null;
+  }
+  return activeExplicitTitleSync;
+}
+
+export function resetExplicitTitleSyncForTesting(): void {
+  activeExplicitTitleSync = null;
 }
 
 export interface SynchronizeWorkspaceTitleResult {
@@ -925,11 +962,19 @@ export function synchronizeWorkspaceTitleDom(
   };
   if (!doc) return result;
 
-  const cleanWsId = (workspaceId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
-  const activeWsId = (resolveCurrentActiveWorkspaceId(doc, win) ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
+  const targetWs = (workspaceId ?? "").trim();
+  const cleanWsId = targetWs.replace(/^(?:local|srv_[^:]+):/, "").trim();
+  const activeWsRaw = resolveCurrentActiveWorkspaceId(doc, win) ?? "";
+  const cleanActiveWs = activeWsRaw.replace(/^(?:local|srv_[^:]+):/, "").trim();
+
+  // Record this explicit synchronization to prevent MutationObserver / React hydration from reverting it
+  const recordKey = cleanWsId || cleanActiveWs;
+  if (recordKey && newTitle) {
+    recordExplicitTitleSync(recordKey, newTitle);
+  }
 
   // 1. Update top workspace header title if this workspace is active
-  if (!cleanWsId || cleanWsId === activeWsId) {
+  if (!cleanWsId || !cleanActiveWs || cleanWsId === cleanActiveWs) {
     const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
     if (headerTitleEl) {
       headerTitleEl.textContent = newTitle;
@@ -939,11 +984,11 @@ export function synchronizeWorkspaceTitleDom(
   }
 
   // 2. Update left sidebar workspace row title
-  const row = findSidebarWorkspaceRow(doc, cleanWsId);
+  const row = findSidebarWorkspaceRow(doc, targetWs || cleanWsId);
   if (row) {
     const rowTid = row.getAttribute?.("data-testid") ?? "";
     const parsed = parseSidebarWorkspaceRowTestId(rowTid);
-    const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? cleanWsId);
+    const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? targetWs ?? cleanWsId);
     if (sbTitleEl) {
       sbTitleEl.textContent = newTitle;
       result.sidebarUpdated = true;
@@ -1635,6 +1680,10 @@ export interface DesktopRevealHelperCallbacks {
   onArchiveWorkspace?(
     workspaceId?: string,
   ): Promise<{ ok: boolean; archivedAt?: string | null } | void>;
+  onToggleWorkspacePin?(
+    workspaceId?: string,
+    pinned?: boolean,
+  ): Promise<{ ok: boolean; workspaceId?: string; pinned?: boolean; message?: string } | null | void>;
 }
 
 const PASEO_INTERNAL_FILE_DRAG_MIME = "application/x-paseo-workspace-file";
@@ -2087,28 +2136,42 @@ export interface RevealWorkspaceSidebarOptions {
   highlightFlash?: boolean;
 }
 
-function findSidebarWorkspaceRow(
+export function findSidebarWorkspaceRow(
   doc: MinimalDocument,
-  cleanWorkspaceId: string,
+  workspaceId?: string | null,
 ): MinimalElement | null {
-  if (!cleanWorkspaceId) {
-    return doc.querySelector(
-      '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
-    );
-  }
-  const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
-  for (let i = 0; i < rows.length; i += 1) {
-    const row = rows[i];
-    if (!row) continue;
-    const tid = row.getAttribute?.("data-testid") ?? "";
-    if (
-      tid.endsWith(`:${cleanWorkspaceId}`) ||
-      tid === `sidebar-workspace-row-${cleanWorkspaceId}`
-    ) {
-      return row;
+  const target = (workspaceId ?? "").trim();
+  if (target) {
+    const rows = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-row-"]') ?? [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row) continue;
+      const tid = row.getAttribute?.("data-testid") ?? "";
+      if (matchesWorkspaceRowTestId(tid, target)) {
+        return row;
+      }
     }
   }
-  return null;
+
+  // Fallback: active workspace resolved from document route / state
+  const activeWs = resolveCurrentActiveWorkspaceId(doc);
+  if (activeWs && activeWs !== target) {
+    const rows = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-row-"]') ?? [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row) continue;
+      const tid = row.getAttribute?.("data-testid") ?? "";
+      if (matchesWorkspaceRowTestId(tid, activeWs)) {
+        return row;
+      }
+    }
+  }
+
+  return (
+    doc.querySelector?.(
+      '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
+    ) ?? null
+  );
 }
 
 function flashAndScrollWorkspaceRow(
@@ -2967,7 +3030,7 @@ export function shouldTriggerPinWorkspaceShortcut(options: {
 
   // 2. Cursor is on the sidebar or user recently clicked/interacted with the sidebar
   if (options.isMouseInsideSidebar) return true;
-  if (options.hoveredElement && isInsideSidebarOrWorkspaceRow(options.hoveredElement)) {
+  if (options.hoveredElement && isInsideSidebarOrWorkspaceRow(options.hoveredElement, options.doc)) {
     return true;
   }
   if (hasOpenWorkspaceContextMenu(options.doc)) {
@@ -2987,7 +3050,7 @@ export function shouldTriggerPinWorkspaceShortcut(options: {
   for (const el of [target, activeEl]) {
     if (!el) continue;
     // Inside sidebar or workspace row
-    if (isInsideSidebarOrWorkspaceRow(el)) {
+    if (isInsideSidebarOrWorkspaceRow(el, options.doc)) {
       return true;
     }
     // Message composer textarea / input root: ALWAYS allowed (never blocks ⌘⌥P)
@@ -3028,6 +3091,66 @@ export function shouldTriggerPinWorkspaceShortcut(options: {
   return true;
 }
 
+export function getPaseoRuntimeClient(win?: MinimalWindow | null): {
+  setWorkspacePinned?: (
+    workspaceId: string,
+    pinned: boolean,
+  ) => Promise<{ pinnedAt?: string | number | null }>;
+} | null {
+  try {
+    const w = (win ?? getWebWindow()) as Record<string, unknown> | null;
+    const store = w?.__paseoHostRuntimeStore as {
+      controllers?: Map<
+        string,
+        {
+          activeClient?: {
+            setWorkspacePinned?: (
+              id: string,
+              pinned: boolean,
+            ) => Promise<{ pinnedAt?: string | number | null }>;
+          };
+        }
+      >;
+    } | null;
+    if (store?.controllers instanceof Map) {
+      for (const ctrl of store.controllers.values()) {
+        if (typeof ctrl?.activeClient?.setWorkspacePinned === "function") {
+          return ctrl.activeClient;
+        }
+      }
+    }
+  } catch {
+    // Ignore runtime store access errors
+  }
+  return null;
+}
+
+export function isWorkspacePinnedInDoc(
+  workspaceId: string,
+  doc?: MinimalDocument | null,
+): boolean {
+  if (!doc || !workspaceId) return false;
+  try {
+    const pinnedSection = doc.querySelector?.(
+      '[data-testid="sidebar-pinned-section"], [data-testid="sidebar-pinned-list"]',
+    );
+    if (!pinnedSection) return false;
+    const cleanId = workspaceId.replace(/^(srv_[^:]+:|local:)/, "");
+    if (typeof pinnedSection.querySelectorAll === "function") {
+      const rows = pinnedSection.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
+      for (const r of Array.from(rows)) {
+        const tid = r?.getAttribute?.("data-testid") ?? "";
+        if (matchesWorkspaceRowTestId(tid, cleanId)) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    // Ignore selector errors
+  }
+  return false;
+}
+
 export function toggleActiveWorkspacePin(options?: {
   doc?: MinimalDocument | null;
   win?: MinimalWindow | null;
@@ -3037,7 +3160,7 @@ export function toggleActiveWorkspacePin(options?: {
   hoveredRowEl?: MinimalElement | null;
 }): {
   ok: boolean;
-  source: "native-shortcut" | "context-menu" | "hovered-row" | "not-handled";
+  source: "native-shortcut" | "context-menu" | "hovered-row" | "runtime-client" | "rpc" | "not-handled";
   message: string;
 } {
   const win = options?.win ?? getWebWindow();
@@ -3052,7 +3175,7 @@ export function toggleActiveWorkspacePin(options?: {
   }
   const isMac = isMacPlatform(win ?? null);
 
-  // 1. Fallback: if context menu is open with pin item
+  // 1. Direct context menu item click if open
   const pinMenuItem = doc.querySelector?.(
     '[data-testid^="sidebar-workspace-menu-pin-"]',
   );
@@ -3071,7 +3194,7 @@ export function toggleActiveWorkspacePin(options?: {
     }
   }
 
-  // 2. If a specific hovered row element has a pin button or menu action
+  // 2. If a specific hovered row element has a pin button or menu action (or DOM mock)
   if (options?.hoveredRowEl) {
     const rowPinItem = options.hoveredRowEl.querySelector?.(
       '[data-testid^="sidebar-workspace-menu-pin-"]',
@@ -3092,7 +3215,50 @@ export function toggleActiveWorkspacePin(options?: {
     }
   }
 
-  // 3. Dispatch native KeyboardEvent for Cmd+Shift+P (workspace.pin)
+  const resolvedActiveId = resolveCurrentActiveWorkspaceId(
+    doc,
+    win,
+    callbacks?.getFallbackWorkspaceId?.(),
+  );
+  const targetWsId =
+    options?.targetWorkspaceId ??
+    options?.hoveredWorkspaceId ??
+    resolvedActiveId;
+
+  const isCurrentlyPinned = targetWsId ? isWorkspacePinnedInDoc(targetWsId, doc) : false;
+  const nextPinned = !isCurrentlyPinned;
+
+  // 3. Paseo Host Runtime Store client (Direct in-process RPC to daemon)
+  const runtimeClient = getPaseoRuntimeClient(win);
+  if (runtimeClient && targetWsId) {
+    try {
+      const cleanWsId = targetWsId.replace(/^(srv_[^:]+:|local:)/, "");
+      void runtimeClient.setWorkspacePinned?.(cleanWsId, nextPinned);
+      return {
+        ok: true,
+        source: "runtime-client",
+        message: nextPinned ? "Pinned workspace to top" : "Unpinned workspace",
+      };
+    } catch {
+      // Fallback
+    }
+  }
+
+  // 4. Delegate to registered callback/RPC
+  if (callbacks?.onToggleWorkspacePin && targetWsId) {
+    try {
+      void callbacks.onToggleWorkspacePin(targetWsId, nextPinned);
+      return {
+        ok: true,
+        source: "rpc",
+        message: nextPinned ? "Pinned workspace to top" : "Unpinned workspace",
+      };
+    } catch {
+      // Fallback
+    }
+  }
+
+  // 5. Fallback synthetic dispatch for mock / test harnesses
   let nativeHandled = false;
   try {
     if (win?.dispatchEvent) {
@@ -3124,21 +3290,13 @@ export function toggleActiveWorkspacePin(options?: {
     // Ignore and fallback to DOM
   }
 
-  const activeWsId =
-    options?.targetWorkspaceId ??
-    options?.hoveredWorkspaceId ??
-    resolveCurrentActiveWorkspaceId(
-      doc,
-      win,
-      callbacks?.getFallbackWorkspaceId?.(),
-    );
   return {
-    ok: nativeHandled || Boolean(activeWsId),
+    ok: nativeHandled || Boolean(targetWsId),
     source: nativeHandled ? "native-shortcut" : "not-handled",
     message: nativeHandled
       ? `Toggled workspace pin (${isMac ? "⌘⌥P" : "Ctrl+Alt+P"})`
-      : activeWsId
-        ? `Toggled pin for workspace ${activeWsId}`
+      : targetWsId
+        ? `Toggled pin for workspace ${targetWsId}`
         : "Toggled workspace pin",
   };
 }
@@ -4049,13 +4207,16 @@ export function isMacPlatform(win?: MinimalWindow | null): boolean {
   return true;
 }
 
-export function isInsideSidebarOrWorkspaceRow(el: MinimalElement | null): boolean {
+export function isInsideSidebarOrWorkspaceRow(
+  el: MinimalElement | null,
+  doc?: MinimalDocument | null,
+): boolean {
   if (!el) return false;
   if (typeof el.closest === "function") {
     try {
       if (
         el.closest(
-          '[data-testid^="sidebar-workspace-"], [data-testid^="sidebar-project-"], [data-testid^="sidebar-"], [data-testid="sidebar"], [data-testid="sidebar-content"], [data-testid="sidebar-scroll-body"], [data-testid="sidebar-status-list-scroll"]',
+          '[data-testid^="sidebar-workspace-"], [data-testid^="sidebar-project-"], [data-testid^="sidebar-"], [data-testid*="sidebar"], [data-testid="sidebar"], [data-testid="sidebar-content"], [data-testid="sidebar-scroll-body"], [data-testid="sidebar-status-list-scroll"]',
         )
       ) {
         return true;
@@ -4065,9 +4226,10 @@ export function isInsideSidebarOrWorkspaceRow(el: MinimalElement | null): boolea
     }
   }
   let curr: MinimalElement | null = el;
-  for (let depth = 0; curr && depth < 20; depth += 1) {
+  for (let depth = 0; curr && depth < 25; depth += 1) {
     const tid = (curr.getAttribute?.("data-testid") ?? "").toLowerCase();
     if (
+      tid.includes("sidebar") ||
       tid.startsWith("sidebar-workspace-") ||
       tid.startsWith("sidebar-project-") ||
       tid.startsWith("sidebar-workspace-row-") ||
@@ -4080,6 +4242,16 @@ export function isInsideSidebarOrWorkspaceRow(el: MinimalElement | null): boolea
       return true;
     }
     curr = curr.parentElement ?? null;
+  }
+  if (doc) {
+    const sidebar = findLeftSidebarContainer(doc, el);
+    if (
+      sidebar &&
+      (sidebar === el ||
+        (typeof sidebar.contains === "function" && sidebar.contains(el as MinimalElement)))
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -6368,7 +6540,29 @@ export function installDesktopRevealHelpers(
       lastHoveredSidebarRowEl = null;
       return;
     }
-    const inside = isInsideSidebarOrWorkspaceRow(target);
+    let inside = isInsideSidebarOrWorkspaceRow(target, doc);
+    if (!inside && typeof me.clientX === "number") {
+      const leftSidebar = findLeftSidebarContainer(doc, target);
+      if (leftSidebar && typeof leftSidebar.getBoundingClientRect === "function") {
+        try {
+          const rect = leftSidebar.getBoundingClientRect();
+          const left = rect.left ?? 0;
+          const top = rect.top ?? 0;
+          const right = left + (rect.width ?? 320);
+          const bottom = top + (rect.height ?? 9999);
+          if (
+            me.clientX >= left &&
+            me.clientX <= right + 4 &&
+            me.clientY >= top &&
+            me.clientY <= bottom
+          ) {
+            inside = true;
+          }
+        } catch {}
+      } else if (me.clientX >= 0 && me.clientX <= 340) {
+        inside = true;
+      }
+    }
     isMouseInsideSidebar = inside;
     if (!inside) {
       lastHoveredSidebarWorkspaceId = null;
@@ -6560,20 +6754,25 @@ export function installDesktopRevealHelpers(
     checkActiveWorkspaceRouteSync();
 
     // Reconcile and synchronize active header title and sidebar title without delay
+    // during the active title sync grace window (3.5s after explicit rename/done action)
     if (!activeInlineSession) {
-      const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, callbacks.getFallbackWorkspaceId?.());
-      if (activeWsId) {
-        const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
-        const headerTitle = (headerTitleEl?.textContent ?? "").trim();
-        if (headerTitle) {
+      const pendingSync = getActiveExplicitTitleSync();
+      if (pendingSync) {
+        const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, callbacks.getFallbackWorkspaceId?.());
+        const cleanActive = (activeWsId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim().toLowerCase();
+        if (cleanActive && cleanActive === pendingSync.workspaceKey) {
+          const syncTitle = pendingSync.title;
+          const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
+          if (headerTitleEl && headerTitleEl.textContent !== syncTitle) {
+            headerTitleEl.textContent = syncTitle;
+          }
           const row = findSidebarWorkspaceRow(doc, activeWsId);
           if (row) {
             const rowTid = row.getAttribute?.("data-testid") ?? "";
             const parsed = parseSidebarWorkspaceRowTestId(rowTid);
-            const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? activeWsId);
-            const sbTitle = (sbTitleEl?.textContent ?? "").trim();
-            if (sbTitleEl && sbTitle && headerTitle !== sbTitle) {
-              sbTitleEl.textContent = headerTitle;
+            const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? activeWsId ?? "");
+            if (sbTitleEl && sbTitleEl.textContent !== syncTitle) {
+              sbTitleEl.textContent = syncTitle;
             }
           }
         }
@@ -7044,19 +7243,6 @@ export function installDesktopRevealHelpers(
     ) {
       ke.preventDefault();
       ke.stopPropagation?.();
-      const prevActive = doc.activeElement as unknown as { blur?: () => void; focus?: () => void } | null;
-      const hadComposerFocus = Boolean(
-        prevActive &&
-        typeof prevActive.focus === "function" &&
-        isEditableInput(prevActive as unknown as MinimalElement),
-      );
-      if (hadComposerFocus) {
-        try {
-          prevActive?.blur?.();
-        } catch {
-          // ignore
-        }
-      }
       const res = toggleActiveWorkspacePin({
         doc,
         win,
@@ -7065,15 +7251,6 @@ export function installDesktopRevealHelpers(
         hoveredWorkspaceId: lastHoveredSidebarWorkspaceId,
         hoveredRowEl: lastHoveredSidebarRowEl,
       });
-      if (hadComposerFocus) {
-        setTimeout(() => {
-          try {
-            prevActive?.focus?.();
-          } catch {
-            // ignore
-          }
-        }, 50);
-      }
       showDropReceiptToast(res.message);
       return;
     }

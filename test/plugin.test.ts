@@ -103,6 +103,10 @@ import {
   clearSidebarJumpFlashes,
   computeDoneToggledTitle,
   findSidebarRowTitleElement,
+  findSidebarWorkspaceRow,
+  getActiveExplicitTitleSync,
+  recordExplicitTitleSync,
+  resetExplicitTitleSyncForTesting,
   isMarkDoneKeyboardEvent,
   synchronizeWorkspaceTitleDom,
   toggleCurrentSessionDone,
@@ -8566,6 +8570,46 @@ test("58. Workspace Header & Sidebar Title Synchronization (Zero Timing Gap & Pr
     "Sidebar must be unmarked synchronously",
   );
   assert.equal(monogramInitial.textContent, "A", "Project monogram must never be overwritten");
+
+  // 5. Test short 1-2 char titles ("Go", "DB", "CI", "AI") against git branch "main":
+  // Defends against the fatal bug where length <= 2 heuristic picked candidate 1 ("main") instead of title ("Go")
+  titleTextEl.textContent = "Go";
+  const resolvedShortTitle = findSidebarRowTitleElement(rowNode, "wks_gozen_123");
+  assert.equal(
+    resolvedShortTitle,
+    titleTextEl,
+    "Short 2-character title 'Go' must resolve to title element, NOT the git branch 'main'!",
+  );
+  assert.equal(resolvedShortTitle?.textContent, "Go");
+
+  titleTextEl.textContent = "A";
+  const resolvedSingleCharTitle = findSidebarRowTitleElement(rowNode, "wks_gozen_123");
+  assert.equal(
+    resolvedSingleCharTitle,
+    titleTextEl,
+    "Single-character title 'A' must resolve to title element, NOT branch or other leaves",
+  );
+  assert.equal(resolvedSingleCharTitle?.textContent, "A");
+
+  // 6. Test findSidebarWorkspaceRow with compound and bare workspace IDs
+  const foundByBare = findSidebarWorkspaceRow(mockDoc, "wks_gozen_123");
+  assert.equal(foundByBare, rowNode, "Must find row by bare workspace ID");
+
+  const foundByCompound = findSidebarWorkspaceRow(mockDoc, "local:wks_gozen_123");
+  assert.equal(foundByCompound, rowNode, "Must find row by compound workspace key 'local:wks_gozen_123'");
+
+  const foundByRemoteServer = findSidebarWorkspaceRow(mockDoc, "srv_cloud:wks_gozen_123");
+  assert.equal(foundByRemoteServer, rowNode, "Must find row across serverId prefix differences");
+
+  // 7. Test explicit title sync registration and TTL
+  resetExplicitTitleSyncForTesting();
+  assert.equal(getActiveExplicitTitleSync(), null);
+  recordExplicitTitleSync("local:wks_gozen_123", "Go");
+  const activeRecord = getActiveExplicitTitleSync();
+  assert.ok(activeRecord);
+  assert.equal(activeRecord?.workspaceKey, "wks_gozen_123");
+  assert.equal(activeRecord?.title, "Go");
+  resetExplicitTitleSyncForTesting();
 });
 
 

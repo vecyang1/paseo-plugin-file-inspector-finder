@@ -305,6 +305,22 @@ export const archiveWorkspaceRpc = defineRpc({
   }),
 });
 
+export const toggleWorkspacePinRpc = defineRpc({
+  name: "finder.toggle_workspace_pin",
+  input: z.object({
+    workspaceId: z.string().optional(),
+    pinned: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    workspaceId: z.string(),
+    pinned: z.boolean(),
+    pinnedAt: z.union([z.string(), z.number()]).nullable().optional(),
+    message: z.string(),
+  }),
+});
+
 export const manageWorkspaceLabelsRpc = defineRpc({
   name: "finder.manage_labels",
   input: z.object({

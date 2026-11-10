@@ -10,6 +10,7 @@ import {
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
   archiveWorkspaceRpc,
+  toggleWorkspacePinRpc,
   extractProjectSearchKeywords,
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
@@ -984,6 +985,13 @@ export default function contribute(client: PluginClientContext) {
           trimmed.toLowerCase() === "clear" || trimmed.toLowerCase() === "reset"
             ? null
             : trimmed;
+        if (normalized) {
+          const win = getWebWindow();
+          const doc = win?.document ?? null;
+          if (doc) {
+            synchronizeWorkspaceTitleDom(doc, win, workspace.id, normalized);
+          }
+        }
         await client.paseo.workspaces.ref(workspace.id).setTitle(normalized);
         await rpc(renameWorkspaceOrAgentRpc, {
           workspaceId: workspace.id,
@@ -1648,6 +1656,28 @@ export default function contribute(client: PluginClientContext) {
         }
       }
       return { ok: false };
+    },
+    onToggleWorkspacePin: async (workspaceId?: string, pinned?: boolean) => {
+      const targetWsId = workspaceId ?? lastKnownWorkspaceId;
+      try {
+        const res = await client.rpc(toggleWorkspacePinRpc, {
+          workspaceId: targetWsId,
+          pinned,
+        });
+        return {
+          ok: res.ok,
+          workspaceId: res.workspaceId,
+          pinned: res.pinned,
+          message: res.message,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          workspaceId: targetWsId ?? "",
+          pinned: false,
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
     },
   });
 
