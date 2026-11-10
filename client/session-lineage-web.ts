@@ -95,7 +95,7 @@ export function isElementInVisibleBranch(
     }
   }
   let cur: Element | null = el;
-  while (cur && cur.nodeType === 1) {
+  while (cur && (cur.nodeType === 1 || cur.nodeType === undefined)) {
     const htmlEl = cur as HTMLElement;
     if (
       htmlEl.hidden ||

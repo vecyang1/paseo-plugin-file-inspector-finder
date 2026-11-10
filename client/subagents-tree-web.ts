@@ -899,18 +899,30 @@ export function installDesktopSubagentsTreeEnhancer(
       inFlight?: Promise<SubagentAgentTree | null>;
     }
   >();
+  const workspaceTreesByWsId = new Map<string, SubagentAgentTree>();
+  const collapsedByWorkspaceId = new Map<string, boolean>();
+  let batchPrefetchInFlight: Promise<void> | null = null;
+  let lastBatchPrefetchMs = 0;
   let lastScopeKey: string | null = null;
   let activeDrawerOverlayEl: HTMLElement | null = null;
   let activeDrawerRefreshFn: (() => Promise<void>) | null = null;
   let activeDrawerSelectSessionFn: ((cid: string) => void) | null = null;
   let pollIntervalId: ReturnType<typeof setInterval> | null = null;
   let rafId: number | null = null;
-  let leftSidebarCollapsed = false;
+  let leftSidebarCollapsed = true;
   try {
-    leftSidebarCollapsed = window.localStorage?.getItem(LEFT_SIDEBAR_COLLAPSED_KEY) === "true";
+    const saved = window.localStorage?.getItem(LEFT_SIDEBAR_COLLAPSED_KEY);
+    leftSidebarCollapsed = saved === null ? true : saved === "true";
   } catch {
-    leftSidebarCollapsed = false;
+    leftSidebarCollapsed = true;
   }
+
+  const isWorkspaceSidebarTreeCollapsed = (normWs: string): boolean => {
+    if (collapsedByWorkspaceId.has(normWs)) {
+      return collapsedByWorkspaceId.get(normWs)!;
+    }
+    return leftSidebarCollapsed;
+  };
 
   const isZh = (): boolean => isChineseLocale(client.getLocale?.() ?? window.navigator?.language);
 
@@ -920,9 +932,22 @@ export function installDesktopSubagentsTreeEnhancer(
     workspaceId: string | null;
   } => {
     const ctx = extractCurrentWorkspaceAndAgent(document, window);
-    const agId = ctx.agentId ?? extractCurrentRouteAgentId(window.location?.pathname);
     const wsId = normalizeWorkspaceKey(ctx.workspaceId);
-    const scopeKey = agId ? `ag:${agId}` : wsId ? `ws:${wsId}` : null;
+    let agId = ctx.agentId ?? extractCurrentRouteAgentId(window.location?.pathname);
+    if (wsId && agId) {
+      const cachedAg = treeCacheByKey.get(`ag:${agId}`)?.tree;
+      const cachedAgWs = normalizeWorkspaceKey(cachedAg?.workspaceId);
+      if (cachedAgWs && cachedAgWs !== wsId) {
+        agId = null;
+      }
+    }
+    const scopeKey = wsId
+      ? agId
+        ? `ws:${wsId}:ag:${agId}`
+        : `ws:${wsId}`
+      : agId
+        ? `ag:${agId}`
+        : null;
     return { scopeKey, agentId: agId, workspaceId: wsId };
   };
 
@@ -940,18 +965,31 @@ export function installDesktopSubagentsTreeEnhancer(
     if (scope?.agentId) {
       treeCacheByKey.set(`ag:${scope.agentId}`, { tree: validTree, fetchedAtMs: now });
       treeCacheByKey.set(scope.agentId, { tree: validTree, fetchedAtMs: now });
+      if (scope.workspaceId) {
+        treeCacheByKey.set(`ws:${scope.workspaceId}:ag:${scope.agentId}`, {
+          tree: validTree,
+          fetchedAtMs: now,
+        });
+      }
     }
     if (scope?.workspaceId) {
       treeCacheByKey.set(`ws:${scope.workspaceId}`, { tree: validTree, fetchedAtMs: now });
     }
     if (validTree) {
+      const normWs = normalizeWorkspaceKey(validTree.workspaceId);
       if (validTree.agentId) {
         treeCacheByKey.set(`ag:${validTree.agentId}`, { tree: validTree, fetchedAtMs: now });
         treeCacheByKey.set(validTree.agentId, { tree: validTree, fetchedAtMs: now });
+        if (normWs) {
+          treeCacheByKey.set(`ws:${normWs}:ag:${validTree.agentId}`, {
+            tree: validTree,
+            fetchedAtMs: now,
+          });
+        }
       }
-      const normWs = normalizeWorkspaceKey(validTree.workspaceId);
       if (normWs) {
         treeCacheByKey.set(`ws:${normWs}`, { tree: validTree, fetchedAtMs: now });
+        workspaceTreesByWsId.set(normWs, validTree);
       }
     }
   };
@@ -961,18 +999,80 @@ export function installDesktopSubagentsTreeEnhancer(
     agentId: string | null;
     workspaceId: string | null;
   }): SubagentAgentTree | null => {
-    const pickValid = (tr?: SubagentAgentTree | null): SubagentAgentTree | null =>
-      tr && tr.subagentSummary.total > 0 && tr.flatSubagents.length > 0 ? tr : null;
+    const pickValid = (tr?: SubagentAgentTree | null): SubagentAgentTree | null => {
+      if (!tr || tr.subagentSummary.total <= 0 || tr.flatSubagents.length === 0) {
+        return null;
+      }
+      const trWs = normalizeWorkspaceKey(tr.workspaceId);
+      if (scope.workspaceId && trWs && trWs !== scope.workspaceId) {
+        return null;
+      }
+      return tr;
+    };
     if (scope.scopeKey && treeCacheByKey.has(scope.scopeKey)) {
       return pickValid(treeCacheByKey.get(scope.scopeKey)?.tree);
-    }
-    if (scope.agentId && treeCacheByKey.has(`ag:${scope.agentId}`)) {
-      return pickValid(treeCacheByKey.get(`ag:${scope.agentId}`)?.tree);
     }
     if (scope.workspaceId && treeCacheByKey.has(`ws:${scope.workspaceId}`)) {
       return pickValid(treeCacheByKey.get(`ws:${scope.workspaceId}`)?.tree);
     }
+    if (scope.agentId && treeCacheByKey.has(`ag:${scope.agentId}`)) {
+      return pickValid(treeCacheByKey.get(`ag:${scope.agentId}`)?.tree);
+    }
+    if (scope.workspaceId && workspaceTreesByWsId.has(scope.workspaceId)) {
+      return pickValid(workspaceTreesByWsId.get(scope.workspaceId));
+    }
     return null;
+  };
+
+  const prefetchAllWorkspaceSubagentTrees = (force = false): Promise<void> => {
+    const now = Date.now();
+    if (!force && now - lastBatchPrefetchMs < 4_000) {
+      return batchPrefetchInFlight ?? Promise.resolve();
+    }
+    if (batchPrefetchInFlight) {
+      return batchPrefetchInFlight;
+    }
+    lastBatchPrefetchMs = now;
+    batchPrefetchInFlight = client
+      .call(manageSubagentsRpc, {
+        action: "tree",
+        includeTimeline: false,
+        limit: 20,
+        source: "timeline-inline",
+      })
+      .then((res) => {
+        const fetchedAt = Date.now();
+        for (const tr of res.trees ?? []) {
+          if (tr.subagentSummary.total > 0 && tr.flatSubagents.length > 0) {
+            const normWs = normalizeWorkspaceKey(tr.workspaceId);
+            cacheTreeUnderAllKeys(tr, normWs ? `ws:${normWs}` : `ag:${tr.agentId}`, {
+              scopeKey: normWs
+                ? tr.agentId
+                  ? `ws:${normWs}:ag:${tr.agentId}`
+                  : `ws:${normWs}`
+                : `ag:${tr.agentId}`,
+              agentId: tr.agentId || null,
+              workspaceId: normWs,
+            });
+          }
+        }
+        const sidebarRows = Array.from(
+          document.querySelectorAll<HTMLElement>('[data-testid^="sidebar-workspace-row-"]'),
+        );
+        for (const row of sidebarRows) {
+          const tid = row.getAttribute("data-testid") ?? "";
+          const rawWs = tid.replace(/^sidebar-workspace-row-/, "");
+          const normWs = normalizeWorkspaceKey(rawWs);
+          if (normWs && !workspaceTreesByWsId.has(normWs) && !treeCacheByKey.has(`ws:${normWs}`)) {
+            treeCacheByKey.set(`ws:${normWs}`, { tree: null, fetchedAtMs: fetchedAt });
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        batchPrefetchInFlight = null;
+      });
+    return batchPrefetchInFlight;
   };
 
   const fetchScopeTree = async (
@@ -981,7 +1081,10 @@ export function installDesktopSubagentsTreeEnhancer(
     includeTimeline = false,
   ): Promise<SubagentAgentTree | null> => {
     if (!scope.scopeKey) return null;
-    const cached = treeCacheByKey.get(scope.scopeKey);
+    const cached =
+      treeCacheByKey.get(scope.scopeKey) ??
+      (scope.workspaceId ? treeCacheByKey.get(`ws:${scope.workspaceId}`) : undefined) ??
+      (scope.agentId ? treeCacheByKey.get(`ag:${scope.agentId}`) : undefined);
     const now = Date.now();
     const ttlMs = cached?.tree?.subagentSummary.running ? 2_500 : 10_000;
     if (
@@ -991,11 +1094,7 @@ export function installDesktopSubagentsTreeEnhancer(
       now - cached.fetchedAtMs < ttlMs &&
       cached.tree !== undefined
     ) {
-      return cached.tree &&
-        cached.tree.subagentSummary.total > 0 &&
-        cached.tree.flatSubagents.length > 0
-        ? cached.tree
-        : null;
+      return getCachedTreeForScope(scope);
     }
     if (!force && !includeTimeline && cached?.inFlight) {
       return cached.inFlight;
@@ -2500,67 +2599,65 @@ export function installDesktopSubagentsTreeEnhancer(
     void openDrawer(opts);
   };
 
-  // Render collapsible Subagent & Timer Tree inside Paseo's Left Sidebar right below the active workspace row
-  const renderLeftSidebarSubagentsTree = (
-    tree: SubagentAgentTree | null,
-    scope: { scopeKey: string | null; agentId: string | null; workspaceId: string | null },
-  ) => {
-    const existingLeftTree = document.querySelector<HTMLElement>(
-      '[data-testid="paseo-finder-left-sidebar-subagents"]',
-    );
-
-    if (
-      !scope.scopeKey ||
-      !tree ||
-      tree.subagentSummary.total <= 0 ||
-      tree.flatSubagents.length === 0
-    ) {
-      existingLeftTree?.remove();
-      return;
-    }
-
-    const totalTimers =
-      (tree.rootTimersAndTasks?.length ?? 0) +
-      tree.flatSubagents.reduce((acc, s) => acc + (s.timersAndTasks?.length ?? 0), 0);
-
-    const normWs = normalizeWorkspaceKey(tree.workspaceId) ?? scope.workspaceId;
-    const candidateSelectors = normWs
-      ? [
-          `[data-testid="sidebar-workspace-row-${tree.workspaceId}"]`,
-          `[data-testid="sidebar-workspace-row-local:${normWs}"]`,
-          `[data-testid="sidebar-workspace-row-${normWs}"]`,
-          `[data-testid^="sidebar-workspace-row-"][data-testid$=":${normWs}"]`,
-        ]
-      : ['[data-testid^="sidebar-workspace-row-"][aria-selected="true"]'];
+  // Render collapsible Subagent & Timer Tree persistently under each workspace row in Paseo's Left Sidebar
+  // so clicking into or away from a workspace causes 0px layout shift ("shrinking") and 0ms delay.
+  const renderSingleWorkspaceLeftSidebarTree = (
+    tree: SubagentAgentTree,
+    normWs: string,
+    isActiveWorkspace: boolean,
+    zh: boolean,
+    tokens: ReturnType<typeof syncPaseoThemeCssVariables>,
+  ): HTMLElement | null => {
+    const candidateSelectors = [
+      `[data-testid="sidebar-workspace-row-${tree.workspaceId}"]`,
+      `[data-testid="sidebar-workspace-row-local:${normWs}"]`,
+      `[data-testid="sidebar-workspace-row-${normWs}"]`,
+      `[data-testid^="sidebar-workspace-row-"][data-testid$=":${normWs}"]`,
+    ];
     let targetWsRow: HTMLElement | null = null;
     for (const sel of candidateSelectors) {
       targetWsRow = document.querySelector<HTMLElement>(sel);
       if (targetWsRow) break;
     }
 
-    if (!targetWsRow || !targetWsRow.parentElement) {
-      existingLeftTree?.remove();
-      return;
+    const existingForWs = document.querySelector<HTMLElement>(
+      `[data-testid="paseo-finder-left-sidebar-subagents"][data-workspace-id="${normWs}"]`,
+    );
+
+    if (
+      !targetWsRow ||
+      !targetWsRow.parentElement ||
+      tree.subagentSummary.total <= 0 ||
+      tree.flatSubagents.length === 0
+    ) {
+      existingForWs?.remove();
+      return null;
     }
 
-    const zh = isZh();
-    const tokens = syncPaseoThemeCssVariables(document as never, window as never);
-    const activeSub = resolveActiveSubagentNodeFromDom(tree, document, window);
+    const totalTimers =
+      (tree.rootTimersAndTasks?.length ?? 0) +
+      tree.flatSubagents.reduce((acc, s) => acc + (s.timersAndTasks?.length ?? 0), 0);
+
+    const activeSub = isActiveWorkspace
+      ? resolveActiveSubagentNodeFromDom(tree, document, window)
+      : null;
     const activeSubCid = activeSub?.conversationId ?? "";
     const allDone = tree.subagentSummary.running === 0;
     const allArchived = allDone && isAllSubagentsArchivedForTree(tree, window);
-    const sig = `${tree.agentId}:${activeSubCid}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${totalTimers}:${allArchived}:${leftSidebarCollapsed}:${zh}`;
+    const wsCollapsed = isWorkspaceSidebarTreeCollapsed(normWs);
+    const sig = `${normWs}:${tree.agentId}:${activeSubCid}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${totalTimers}:${allArchived}:${wsCollapsed}:${zh}`;
 
-    let container = existingLeftTree;
+    let container = existingForWs;
     if (!container || container.previousElementSibling !== targetWsRow) {
-      existingLeftTree?.remove();
+      existingForWs?.remove();
       container = document.createElement("div");
       container.setAttribute("data-testid", "paseo-finder-left-sidebar-subagents");
+      container.setAttribute("data-workspace-id", normWs);
       targetWsRow.insertAdjacentElement("afterend", container);
     }
 
     if (container.getAttribute("data-render-sig") === sig) {
-      return;
+      return container;
     }
     container.setAttribute("data-render-sig", sig);
     container.innerHTML = "";
@@ -2576,17 +2673,9 @@ export function installDesktopSubagentsTreeEnhancer(
         'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     });
 
-    const compactSubagentName = (name: string, parentName?: string | null): string => {
-      const trimmed = (name || "").trim();
-      if (parentName && trimmed.length > parentName.length && trimmed.startsWith(parentName)) {
-        const rest = trimmed.slice(parentName.length).replace(/^[-_\s]+/, "");
-        if (rest.length >= 3) return rest;
-      }
-      return trimmed;
-    };
-
     const headerRow = document.createElement("div");
     headerRow.setAttribute("data-testid", "paseo-finder-left-sidebar-subagents-toggle");
+    headerRow.setAttribute("data-workspace-id", normWs);
     Object.assign(headerRow.style, {
       display: "flex",
       alignItems: "center",
@@ -2628,8 +2717,8 @@ export function installDesktopSubagentsTreeEnhancer(
 
     const headerLabel = document.createElement("span");
     headerLabel.textContent = zh
-      ? `${leftSidebarCollapsed ? "▸" : "▾"} 子会话 (${tree.subagentSummary.total}${headerStateSuffix})`
-      : `${leftSidebarCollapsed ? "▸" : "▾"} Subagents (${tree.subagentSummary.total}${headerStateSuffix})`;
+      ? `${wsCollapsed ? "▸" : "▾"} 子会话 (${tree.subagentSummary.total}${headerStateSuffix})`
+      : `${wsCollapsed ? "▸" : "▾"} Subagents (${tree.subagentSummary.total}${headerStateSuffix})`;
     Object.assign(headerLabel.style, {
       fontSize: "11px",
       fontWeight: "500",
@@ -2642,22 +2731,25 @@ export function installDesktopSubagentsTreeEnhancer(
     headerRow.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      leftSidebarCollapsed = !leftSidebarCollapsed;
+      const nextCollapsed = !isWorkspaceSidebarTreeCollapsed(normWs);
+      collapsedByWorkspaceId.set(normWs, nextCollapsed);
+      leftSidebarCollapsed = nextCollapsed;
       try {
-        window.localStorage?.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, String(leftSidebarCollapsed));
+        window.localStorage?.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, String(nextCollapsed));
       } catch {
         // ignore
       }
-      renderLeftSidebarSubagentsTree(tree, scope);
+      const curScope = resolveActiveScope();
+      renderLeftSidebarSubagentsTree(getCachedTreeForScope(curScope), curScope);
     });
     container.appendChild(headerRow);
 
-    if (leftSidebarCollapsed) {
-      return;
+    if (wsCollapsed) {
+      return container;
     }
 
     // Root L0 row inside Left Sidebar Subagents Tree (hidden when already on Main Agent so it doesn't duplicate workspace row)
-    const isRootActive = !activeSub;
+    const isRootActive = isActiveWorkspace && !activeSub;
     const rootBtn = document.createElement("button");
     rootBtn.type = "button";
     rootBtn.setAttribute("data-testid", "paseo-finder-left-sidebar-subagent-root");
@@ -2710,7 +2802,7 @@ export function installDesktopSubagentsTreeEnhancer(
 
     for (const sub of tree.flatSubagents) {
       const sc = statusColors(sub.status, tokens);
-      const isSubActive = activeSub?.conversationId === sub.conversationId;
+      const isSubActive = isActiveWorkspace && activeSub?.conversationId === sub.conversationId;
       const parentSub =
         sub.depth >= 2
           ? tree.flatSubagents.find(
@@ -2825,6 +2917,46 @@ export function installDesktopSubagentsTreeEnhancer(
       });
 
       container.appendChild(itemBtn);
+    }
+    return container;
+  };
+
+  const renderLeftSidebarSubagentsTree = (
+    tree: SubagentAgentTree | null,
+    scope: { scopeKey: string | null; agentId: string | null; workspaceId: string | null },
+  ) => {
+    if (tree && tree.subagentSummary.total > 0 && tree.flatSubagents.length > 0) {
+      const normActiveWs = normalizeWorkspaceKey(tree.workspaceId) ?? scope.workspaceId;
+      if (normActiveWs) {
+        workspaceTreesByWsId.set(normActiveWs, tree);
+      }
+    }
+
+    const zh = isZh();
+    const tokens = syncPaseoThemeCssVariables(document as never, window as never);
+    const activeNormWs = scope.workspaceId;
+    const mountedContainers = new Set<HTMLElement>();
+
+    for (const [normWs, wsTree] of workspaceTreesByWsId.entries()) {
+      const mounted = renderSingleWorkspaceLeftSidebarTree(
+        wsTree,
+        normWs,
+        normWs === activeNormWs,
+        zh,
+        tokens,
+      );
+      if (mounted) {
+        mountedContainers.add(mounted);
+      }
+    }
+
+    const allLeftTrees = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid="paseo-finder-left-sidebar-subagents"]'),
+    );
+    for (const el of allLeftTrees) {
+      if (!mountedContainers.has(el)) {
+        el.remove();
+      }
     }
   };
 

@@ -413,6 +413,33 @@ export async function handleInspectScheduleRuns(
     // Ignore when running outside active daemon workspace context
   }
 
+  try {
+    const workspacesJsonPath = path.join(
+      path.dirname(schedulesDir),
+      "projects",
+      "workspaces.json",
+    );
+    const content = await fs.readFile(workspacesJsonPath, "utf8").catch(() => null);
+    if (content) {
+      const parsedWorkspaces = JSON.parse(content) as Array<{
+        workspaceId?: string;
+        title?: string;
+        name?: string;
+        displayName?: string;
+      }>;
+      if (Array.isArray(parsedWorkspaces)) {
+        for (const w of parsedWorkspaces) {
+          if (w.workspaceId && !activeWorkspacesMap.has(w.workspaceId)) {
+            const t = w.title || w.displayName || w.name || w.workspaceId;
+            activeWorkspacesMap.set(w.workspaceId, t);
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore workspaces.json read errors
+  }
+
   const rawSchedules = await readSchedulesFromDisk(schedulesDir, filterId);
   const recoveryNameMap = new Map<string, { name: string | null; archived: boolean }>();
 
@@ -626,6 +653,26 @@ export async function handleInspectScheduleRuns(
     summaries,
   );
 
+  const workspaceScheduleMap: Record<
+    string,
+    { scheduleId: string; scheduleName: string; isRunning: boolean; runStatus: string }
+  > = {};
+  for (const s of summaries) {
+    for (const r of s.runs ?? []) {
+      if (r.workspaceId) {
+        const cleanWid = r.workspaceId.replace(/^local:/, "").trim();
+        if (cleanWid && !workspaceScheduleMap[cleanWid]) {
+          workspaceScheduleMap[cleanWid] = {
+            scheduleId: s.id,
+            scheduleName: s.name,
+            isRunning: r.status === "running",
+            runStatus: r.status,
+          };
+        }
+      }
+    }
+  }
+
   const durationMs = Date.now() - startMs;
   return {
     ok: true,
@@ -638,6 +685,7 @@ export async function handleInspectScheduleRuns(
     runningRuns,
     schedules: summaries,
     recentRuns: allRecentRuns.slice(0, 50),
+    workspaceScheduleMap,
     projectLastActiveByKey,
     durationMs,
     message: `Inspected ${rawSchedules.length} schedules (${schedulesWithRuns} with runs, ${totalRuns} total runs) in ${durationMs}ms`,

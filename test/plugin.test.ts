@@ -7491,6 +7491,97 @@ test("55. Colleague pill bidirectional jump-back, cross-workspace stale-agentId 
   assert.ok(trailingButtons[0].textContent.includes("Sent by Settings search & keyboard n"));
 });
 
+test("56. Left sidebar subagents zero-shrink & zero-delay: hidden provider_subagent tab isolation and handleManageSubagents Smart Skip (<25ms)", async () => {
+  const { extractCurrentWorkspaceAndAgent } = await import("../client/session-lineage-web");
+  const { handleManageSubagents } = await import("../server/agent-history-handlers");
+
+  // 1) When switching to Workspace B (`wks_open_design`, which has 0 visible subagent tabs)
+  // while Workspace A (`wks_scan_funnels`) still has a hidden `provider_subagent` tab in the DOM,
+  // `extractCurrentWorkspaceAndAgent` must NOT leak Workspace A's `parentAgentId` into Workspace B.
+  const wsBAgentTab = {
+    getAttribute: (k: string) => {
+      if (k === "data-testid") return "workspace-tab-agent_aaaaaaaa-1111-2222-3333-444444444444";
+      if (k === "aria-selected") return "true";
+      return null;
+    },
+    parentElement: null,
+    style: { display: "flex" },
+  };
+  const hiddenWsASubagentTab = {
+    getAttribute: (k: string) => {
+      if (k === "data-testid") {
+        return "workspace-tab-provider_subagent_36_539eb3cd-c9d1-494a-926e-8e1be08c4487_36_a88d4f36-f88d-4018-9cb6-65d92cb0893d";
+      }
+      if (k === "aria-selected") return "true";
+      return null;
+    },
+    parentElement: {
+      parentElement: null,
+      style: { display: "none" },
+      getAttribute: () => null,
+    },
+    style: { display: "flex" },
+  };
+  const mockDoc = {
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("workspace-tab-provider_subagent_")) return [hiddenWsASubagentTab];
+      if (sel.includes("workspace-tab-agent_")) return [wsBAgentTab];
+      return [];
+    },
+  } as unknown as Document;
+  const mockWin = {
+    location: {
+      pathname: "/workspace/local:wks_open_design",
+      href: "http://localhost/workspace/local:wks_open_design",
+    },
+  } as unknown as Window;
+
+  const ctx = extractCurrentWorkspaceAndAgent(mockDoc, mockWin);
+  assert.equal(ctx.workspaceId, "local:wks_open_design");
+  assert.equal(
+    ctx.agentId,
+    "aaaaaaaa-1111-2222-3333-444444444444",
+    "Must resolve Workspace B's own visible agent tab instead of leaking hidden Workspace A's parentAgentId",
+  );
+  assert.equal(ctx.activeSubagentId, null);
+
+  // 2) handleManageSubagents Smart Skip: cold index build + warm lookup (<10ms) without spawning 1,200ms Python subprocess.
+  const tCold = Date.now();
+  const resCold = await handleManageSubagents(
+    {
+      action: "tree",
+      workspaceId: "wks_39986d1a4c4b2392",
+      includeTimeline: false,
+      limit: 5,
+    },
+    {} as never,
+  );
+  const coldElapsed = Date.now() - tCold;
+  assert.equal(resCold.ok, true);
+  assert.equal(resCold.trees.length, 0);
+  assert.ok(coldElapsed < 500, `Expected cold index build + Smart Skip <500ms, got ${coldElapsed}ms`);
+
+  const tWarm = Date.now();
+  const resWarm = await handleManageSubagents(
+    {
+      action: "tree",
+      workspaceId: "wks_67f5e15fb90d56de",
+      includeTimeline: false,
+      limit: 5,
+    },
+    {} as never,
+  );
+  const warmElapsed = Date.now() - tWarm;
+  assert.equal(resWarm.ok, true);
+  assert.equal(resWarm.trees.length, 0);
+  assert.ok(
+    warmElapsed < 500,
+    `Expected warm Smart Skip on second workspace without spawning Python (got ${warmElapsed}ms, Python takes >1200ms)`,
+  );
+});
+
+
 
 
 

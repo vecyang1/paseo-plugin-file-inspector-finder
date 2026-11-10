@@ -1130,55 +1130,86 @@ function normalizeServerWorkspaceKey(raw?: string | null): string {
   return (raw ?? "").trim().replace(/^[^:]+:/, "").trim();
 }
 
-async function getAgentSubagentIndex(): Promise<{
+let AGENT_SUBAGENT_INDEX_IN_FLIGHT: Promise<{
+  byAgentId: Map<string, AgentSubagentIndexEntry>;
+  byWorkspaceId: Map<string, AgentSubagentIndexEntry[]>;
+}> | null = null;
+
+async function buildAgentSubagentIndex(): Promise<{
   byAgentId: Map<string, AgentSubagentIndexEntry>;
   byWorkspaceId: Map<string, AgentSubagentIndexEntry[]>;
 }> {
-  const now = Date.now();
-  if (AGENT_SUBAGENT_INDEX_CACHE && now - AGENT_SUBAGENT_INDEX_CACHE.builtAtMs < 2_500) {
-    return AGENT_SUBAGENT_INDEX_CACHE;
-  }
   const byAgentId = new Map<string, AgentSubagentIndexEntry>();
   const byWorkspaceId = new Map<string, AgentSubagentIndexEntry[]>();
   const agentsRoot = path.join(os.homedir(), ".paseo", "agents");
   try {
     const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
-    for (const bucket of buckets) {
-      if (!bucket.isDirectory() || bucket.name === "archived") continue;
-      const bPath = path.join(agentsRoot, bucket.name);
-      const files = await fs.readdir(bPath);
-      for (const f of files) {
-        if (!f.endsWith(".json")) continue;
+    await Promise.all(
+      buckets.map(async (bucket) => {
+        if (!bucket.isDirectory() || bucket.name === "archived") return;
+        const bPath = path.join(agentsRoot, bucket.name);
+        let files: string[] = [];
         try {
-          const rec = JSON.parse(
-            await fs.readFile(path.join(bPath, f), "utf8"),
-          ) as FullRawAgentRecord;
-          const aid = (rec.id ?? "").trim();
-          if (!aid || rec.archivedAt) continue;
-          const wsKey = normalizeServerWorkspaceKey(rec.workspaceId);
-          const cid = extractProviderSessionId(rec);
-          const entry: AgentSubagentIndexEntry = {
-            agentId: aid,
-            workspaceId: wsKey,
-            provider: String(rec.provider ?? ""),
-            conversationId: cid,
-          };
-          byAgentId.set(aid, entry);
-          if (wsKey) {
-            const list = byWorkspaceId.get(wsKey) ?? [];
-            list.push(entry);
-            byWorkspaceId.set(wsKey, list);
-          }
+          files = await fs.readdir(bPath);
         } catch {
-          // ignore
+          return;
         }
-      }
-    }
+        await Promise.all(
+          files.map(async (f) => {
+            if (!f.endsWith(".json")) return;
+            try {
+              const rec = JSON.parse(
+                await fs.readFile(path.join(bPath, f), "utf8"),
+              ) as FullRawAgentRecord;
+              const aid = (rec.id ?? "").trim();
+              if (!aid || rec.archivedAt) return;
+              const wsKey = normalizeServerWorkspaceKey(rec.workspaceId);
+              const cid = extractProviderSessionId(rec);
+              const entry: AgentSubagentIndexEntry = {
+                agentId: aid,
+                workspaceId: wsKey,
+                provider: String(rec.provider ?? ""),
+                conversationId: cid,
+              };
+              byAgentId.set(aid, entry);
+              if (wsKey) {
+                const list = byWorkspaceId.get(wsKey) ?? [];
+                list.push(entry);
+                byWorkspaceId.set(wsKey, list);
+              }
+            } catch {
+              // ignore
+            }
+          }),
+        );
+      }),
+    );
   } catch {
     // ignore
   }
-  AGENT_SUBAGENT_INDEX_CACHE = { builtAtMs: now, byAgentId, byWorkspaceId };
+  AGENT_SUBAGENT_INDEX_CACHE = { builtAtMs: Date.now(), byAgentId, byWorkspaceId };
   return AGENT_SUBAGENT_INDEX_CACHE;
+}
+
+async function getAgentSubagentIndex(): Promise<{
+  byAgentId: Map<string, AgentSubagentIndexEntry>;
+  byWorkspaceId: Map<string, AgentSubagentIndexEntry[]>;
+}> {
+  const now = Date.now();
+  if (AGENT_SUBAGENT_INDEX_CACHE) {
+    if (now - AGENT_SUBAGENT_INDEX_CACHE.builtAtMs >= 15_000 && !AGENT_SUBAGENT_INDEX_IN_FLIGHT) {
+      AGENT_SUBAGENT_INDEX_IN_FLIGHT = buildAgentSubagentIndex().finally(() => {
+        AGENT_SUBAGENT_INDEX_IN_FLIGHT = null;
+      });
+    }
+    return AGENT_SUBAGENT_INDEX_CACHE;
+  }
+  if (!AGENT_SUBAGENT_INDEX_IN_FLIGHT) {
+    AGENT_SUBAGENT_INDEX_IN_FLIGHT = buildAgentSubagentIndex().finally(() => {
+      AGENT_SUBAGENT_INDEX_IN_FLIGHT = null;
+    });
+  }
+  return AGENT_SUBAGENT_INDEX_IN_FLIGHT;
 }
 
 async function hasTranscriptSubagentOrTimerActivity(conversationId: string): Promise<boolean> {
@@ -1216,10 +1247,7 @@ async function hasTranscriptSubagentOrTimerActivity(conversationId: string): Pro
         continue;
       }
       const raw = await fs.readFile(tPath, "utf8");
-      const hasActivity =
-        raw.includes("invoke_subagent") ||
-        raw.includes('"schedule"') ||
-        raw.includes("manage_task");
+      const hasActivity = /"name"\s*:\s*"invoke_subagent"/.test(raw);
       TRANSCRIPT_ACTIVITY_CACHE.set(tPath, {
         mtimeMs: st.mtimeMs,
         size: st.size,
