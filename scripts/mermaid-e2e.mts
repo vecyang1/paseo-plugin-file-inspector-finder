@@ -6,8 +6,10 @@
  *   node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs \
  *     scripts/mermaid-e2e.mts --agent <agentId> [--server srv_x] [--port 6796] [--shots <dir>]
  *
- * --agent is a session whose last assistant message holds the four fixtures from the plugin
- * reference (bold labels, unlabelled fence, `@{}` shape data, a syntax error), in that order.
+ * --agent is a session whose last assistant message is `scripts/mermaid-e2e.fixture.md` verbatim
+ * (bold labels, unlabelled fence, `@{}` shape data, a syntax error, in that order). Make one with
+ * `paseo run "Reply with exactly this markdown, nothing else: ..."` and check the reply is not
+ * entity-escaped (Gemini Flash once echoed `&quot;` / `--&gt;`), then archive it afterwards.
  * Read-only: it sends nothing. Screenshots show this machine's real host page, so they go to a
  * temp dir, never the repo. Exit 0 = every check passed, 1 = a check failed, 3 = setup missing.
  */
