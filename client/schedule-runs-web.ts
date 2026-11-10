@@ -408,6 +408,17 @@ let globalCleanupInjectedScheduleNodes: (() => void) | null = null;
 let activeScheduleRunsClient: ScheduleRunsWebClient | null = null;
 let activeShowToast: ((msg: string) => void) | null = null;
 
+export const GENERIC_CHAT_TITLES = new Set([
+  "untitled",
+  "new workspace",
+  "new session",
+  "chat",
+  "conversation",
+  "main",
+  "scratch",
+  "notes",
+]);
+
 export const CADENCE_TIMER_SVG =
   '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
   '<circle cx="8" cy="9.5" r="5.5"/>' +
@@ -443,10 +454,15 @@ export function matchScheduleTitleOrSlug(
   // e.g. "d ", "done: ", "✓ ", "Run ", "Running ", "Execute ", "AG · ", "AG: "
   const t = rawT
     .replace(/^(?:d|done:?|✓)\s+/i, "")
+    .replace(/^[\s★⭐️✨⚡️🔥📌🏷️✓•·]+\s*/i, "")
     .replace(/^(?:run(?:ning)?|execute)\s+/i, "")
     .replace(/^ag\s*[·•:-]\s*/i, "")
     .trim();
   if (!t) return false;
+
+  if (GENERIC_CHAT_TITLES.has(t) || GENERIC_CHAT_TITLES.has(rawT)) {
+    return false;
+  }
 
   // 2. Extract Cadence Card ID if present (e.g. "CAD-20260925-mac-morning-speed-watch" or "CAD-20260925")
   const cadIdMatch = /(?:CAD-\d{8}-[a-z0-9-]+|CAD-\d{8})/i.exec(cleanTitle);
@@ -676,7 +692,13 @@ export function findCadenceScheduleForWorkspace(
         if (cleanId && r?.workspaceId && r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanId) {
           return sched;
         }
-        if (cleanTitle && r?.workspaceName && r.workspaceName.trim().toLowerCase() === cleanTitle) {
+        if (
+          cleanTitle &&
+          cleanTitle.length >= 6 &&
+          !GENERIC_CHAT_TITLES.has(cleanTitle) &&
+          r?.workspaceName &&
+          r.workspaceName.trim().toLowerCase() === cleanTitle
+        ) {
           return sched;
         }
       }
@@ -1084,7 +1106,13 @@ function resolveCadenceSchedule(
         if (normWsId && r?.workspaceId && r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim() === normWsId) {
           return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
         }
-        if (cleanTitle && r?.workspaceName && r.workspaceName.trim().toLowerCase() === cleanTitle) {
+        if (
+          cleanTitle &&
+          cleanTitle.length >= 6 &&
+          !GENERIC_CHAT_TITLES.has(cleanTitle) &&
+          r?.workspaceName &&
+          r.workspaceName.trim().toLowerCase() === cleanTitle
+        ) {
           return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
         }
       }

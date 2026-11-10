@@ -7790,6 +7790,56 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
     false,
     "General session mentioning Paseo must not match cadence doctor",
   );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "★ strange that in agy u forcely insert paseo system prompt but 2026-11-08 Meta harness",
+      "Paseo cadence doctor",
+      null,
+      null,
+    ),
+    false,
+    "User prompt asking about Paseo system prompt must not match cadence doctor",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "⭐️ strange that in agy u forcely insert paseo system prompt but",
+      "Paseo cadence doctor",
+      null,
+      null,
+    ),
+    false,
+    "Starred user prompt must not match cadence doctor",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Check and fix open issues via spark and email",
+      "AG · ⭐️ Email Traffic Filter Evolution & Noise Denoising Cadence",
+      null,
+      null,
+    ),
+    false,
+    "General user task referencing email must not match email cadence",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Untitled",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    false,
+    "Generic 'Untitled' workspace must never match cadence schedule",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "New workspace",
+      schedName,
+      standbySlug,
+      prompt,
+    ),
+    false,
+    "Generic 'New workspace' must never match cadence schedule",
+  );
 
   // 2. Cache & O(1) workspaceScheduleMap resolution
   resetScheduleRunsCacheForTesting();
