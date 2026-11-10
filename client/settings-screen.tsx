@@ -45,6 +45,7 @@ import {
   renameWorkspaceOrAgentRpc,
 } from "../shared/contracts";
 import { isChineseLocale, pluginTranslations } from "./i18n";
+import { MermaidSettingsSection } from "./mermaid-settings-section";
 import {
   type ScheduleRunsDomHealthSnapshot,
   type ScheduleRunsDomSelfTestResult,
@@ -3635,6 +3636,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           ) : null}
         </View>
       </SettingsSection>
+
+      <MermaidSettingsSection isZh={isZh} styles={styles} />
 
       <SettingsSection
         title={

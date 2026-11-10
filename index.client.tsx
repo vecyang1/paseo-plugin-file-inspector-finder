@@ -66,6 +66,7 @@ import {
   registerMarkdownTableEnhancer,
   syncMarkdownTablePreferences,
 } from "./client/markdown-table-web";
+import { installMermaidEnhancer } from "./client/markdown-mermaid-web";
 import { installDesktopSessionTimeEnhancer } from "./client/session-time-web";
 import { installQuoteReply } from "./client/quote-reply-web";
 import { installCommitOriginPills } from "./client/commit-origin-web";
@@ -1649,6 +1650,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupMarkdownTableEnhancer = registerMarkdownTableEnhancer();
 
+  const cleanupMermaidEnhancer = installMermaidEnhancer({ getLocale: () => client.i18n.locale });
+
   const cleanupSessionTimeEnhancer = installDesktopSessionTimeEnhancer();
 
   const cleanupQuoteReply = installQuoteReply({ getLocale: () => client.i18n.locale });
@@ -1685,6 +1688,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSettingsSearch();
     cleanupSmartClipboardCopy();
     cleanupMarkdownTableEnhancer();
+    cleanupMermaidEnhancer();
     cleanupSessionTimeEnhancer();
     cleanupQuoteReply();
     cleanupCommitOriginPills();

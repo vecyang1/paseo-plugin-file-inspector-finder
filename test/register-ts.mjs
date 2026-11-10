@@ -8,7 +8,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === "react-native") {
-    const stub = 'export const Platform = { OS: "web" };';
+    const stub =
+      'export const Platform = { OS: "web" }; export const Text = "Text"; export const View = "View"; export const Pressable = "Pressable";';
     return {
       shortCircuit: true,
       url: "data:text/javascript;base64," + Buffer.from(stub).toString("base64"),
