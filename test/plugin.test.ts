@@ -171,9 +171,11 @@ import {
   syncMarkdownTablePreferences,
 } from "../client/markdown-table-web";
 import {
+  decorateSessionTimestampsDom,
   formatCompactLabelAsProseWithLocalTime,
   formatConciseLocalFinishedTime,
   formatRelativeWithLocalTime,
+  formatTurnDurationMs,
   formatTurnWorkedForWithFinishedTime,
   getSessionTimeHealthSnapshot,
   getUserTimezoneInfo,
@@ -1222,6 +1224,10 @@ function createInteractiveDomNode(
         if (matchAttr) return tid === matchAttr[1];
         const matchPrefix = s.match(/^\[data-testid\^="([^"]+)"\]$/);
         if (matchPrefix) return tid.startsWith(matchPrefix[1]);
+        const genericAttr = s.match(/^\[([a-z0-9_-]+)="([^"]+)"\]$/i);
+        if (genericAttr) {
+          return (el.getAttribute?.(genericAttr[1]!) ?? "") === genericAttr[2];
+        }
 
         if (s.startsWith(".")) {
           return cls.split(/\s+/).includes(s.slice(1));
@@ -1279,6 +1285,10 @@ function createInteractiveDomNode(
         if (matchAttr) return tid === matchAttr[1];
         const matchPrefix = s.match(/^\[data-testid\^="([^"]+)"\]$/);
         if (matchPrefix) return tid.startsWith(matchPrefix[1]);
+        const genericAttr = s.match(/^\[([a-z0-9_-]+)="([^"]+)"\]$/i);
+        if (genericAttr) {
+          return (el.getAttribute?.(genericAttr[1]!) ?? "") === genericAttr[2];
+        }
 
         if (s.startsWith(".")) {
           return cls.split(/\s+/).includes(s.slice(1));
@@ -5590,11 +5600,11 @@ test("48. Session finished time in user local timezone (concise HH:mm / MM/DD HH
     formatMessageTimestamp: (_d: Date, _now?: Date) => "1:38 AM",
   };
   const mockMod5312 = {
-    deriveStreamTurnTiming: (_items: unknown[]) => ({
+    deriveStreamTurnTiming: (_items: unknown) => ({
       activeStartedAt: null,
-      byItemId: {
-        turn_1: { completedAt: sameDayDone, durationMs: 5_340_000 },
-      },
+      byItemId: new Map([
+        ["turn_1", { completedAt: sameDayDone, durationMs: 5_340_000 }],
+      ]),
     }),
   };
   const mockMod5287 = {
@@ -5619,6 +5629,92 @@ test("48. Session finished time in user local timezone (concise HH:mm / MM/DD HH
   mockMod5312.deriveStreamTurnTiming([]);
   assert.ok(
     mockMod5287.getTurnDurationLabel(5_340_000).startsWith("Worked for 1h 29m · "),
+  );
+
+  // Regression: mid-turn `data-paseo-turn-base-duration="Worked for 44m 20s"` must be
+  // overwritten when turn finishes at `53m 42s` (`3_222_000` ms) & `09:55`, and React Compiler
+  // `useMemoCache(29)` (`l[4]` and `l[6]`) must stay synced so mouse-out never shrinks.
+  const turnEnd0955 = new Date(2026, 10, 10, 9, 55, 33);
+  const checkAt1855 = new Date(2026, 10, 10, 18, 55, 33).getTime();
+  const sizerSpan = createInteractiveDomNode("div", { dir: "auto" }, "Worked for 44m 20s · 09:55 (8h ago)");
+  const overlaySpan = createInteractiveDomNode("div", { dir: "auto" }, "Worked for 44m 20s · 09:55 (8h ago)");
+  const turnBtn = createInteractiveDomNode("div", {
+    role: "button",
+    "aria-label": "Worked for 53m 42s, ended 9:55 AM",
+    "data-paseo-turn-base-duration": "Worked for 44m 20s",
+  });
+  turnBtn.appendChild?.(sizerSpan);
+  turnBtn.appendChild?.(overlaySpan);
+
+  // Attach simulated React 19 Fiber with `useMemoCache(29)` (`slots[4] = "Worked for 53m 42s"`, `slots[6] = "9:55 AM"`)
+  const memoSlots = new Array<unknown>(29).fill(null);
+  memoSlots[2] = 3_222_000;
+  memoSlots[4] = "Worked for 53m 42s";
+  memoSlots[5] = turnEnd0955;
+  memoSlots[6] = "9:55 AM";
+  memoSlots[19] = "Worked for 53m 42s";
+  (turnBtn as unknown as Record<string, unknown>).__reactFiber$test = {
+    memoizedProps: {},
+    return: {
+      memoizedProps: {
+        durationMs: 3_222_000,
+        completedAt: turnEnd0955,
+      },
+      updateQueue: {
+        memoCache: {
+          data: [memoSlots],
+        },
+      },
+      return: null,
+    },
+  };
+
+  const mockTurnDoc = {
+    head: createInteractiveDomNode("head"),
+    documentElement: createInteractiveDomNode("html"),
+    getElementById: () => createInteractiveDomNode("style"),
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("data-paseo-turn-base-duration")) return [turnBtn];
+      return [];
+    },
+  } as unknown as Document;
+
+  decorateSessionTimestampsDom(mockTurnDoc, checkAt1855);
+
+  assert.equal(
+    turnBtn.getAttribute?.("data-paseo-turn-base-duration"),
+    "Worked for 53m 42s",
+    "Stale mid-turn 44m 20s base duration must be replaced by authoritative 53m 42s duration",
+  );
+  assert.equal(
+    overlaySpan.textContent,
+    "Worked for 53m 42s · 09:55 (9h ago)",
+    "Overlay text must reflect the real 53m 42s duration and local finished time",
+  );
+  assert.equal(
+    sizerSpan.textContent,
+    "Worked for 53m 42s · 09:55 (9h ago)",
+    "Sizer text must match overlay text so layout width never shrinks",
+  );
+  assert.equal(
+    memoSlots[4],
+    "Worked for 53m 42s · 09:55 (9h ago)",
+    "React Compiler memoCache slot 4 (unhovered C) must be synced",
+  );
+  assert.equal(
+    memoSlots[6],
+    "Worked for 53m 42s · 09:55 (9h ago)",
+    "React Compiler memoCache slot 6 (hovered k) must be synced so hover/mouse-out never shrinks",
+  );
+
+  // Simulate React overwriting overlaySpan on mouseleave and verify pointerleave listener restores it
+  overlaySpan.textContent = "Worked for 53m 42s";
+  turnBtn.dispatch("pointerleave");
+  assert.equal(
+    overlaySpan.textContent,
+    "Worked for 53m 42s · 09:55 (9h ago)",
+    "pointerleave listener must immediately restore full finished-time label without shrinking",
   );
 
   const selfTest = runSessionTimeSelfTest({ nowMs, clockFormat: "24h" });
