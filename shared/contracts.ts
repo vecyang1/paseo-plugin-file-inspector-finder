@@ -145,6 +145,7 @@ export const pluginSettings = defineSettings({
     smartCopyBulletMarker: SmartCopyBulletMarkerSchema.default("bullet"),
     smartCopyLinkFormat: SmartCopyLinkFormatSchema.default("label-only"),
     enableMarkdownTableEnhancer: z.boolean().default(true),
+    enableLatexMathRendering: z.boolean().default(true),
     enableSessionFinishedTimeEnhancer: z.boolean().default(true),
     sessionTimeClockFormat: z.enum(["24h", "12h"]).default("24h"),
     showFinishedTimeInSidebar: z.boolean().default(true),

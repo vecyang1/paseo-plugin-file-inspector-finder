@@ -3,14 +3,17 @@ export interface MarkdownTablePreferences {
   convertCellBrToLineBreak: boolean;
   healTruncatedRows: boolean;
   enhanceTableTypographyCss: boolean;
+  renderLatexMath: boolean;
+  enhanceLatexMathTypographyCss: boolean;
 }
 
 export interface MarkdownTableReceipt {
   at: string;
-  trigger: "metro-pre" | "metro-ast" | "dom-healer" | "self-test";
+  trigger: "metro-pre" | "metro-ast" | "dom-healer" | "self-test" | "katex-render" | "dom-math";
   rowsMerged: number;
   lineBreaksConverted: number;
   truncatedRepaired: number;
+  mathFormulasHealed?: number;
   preview: string;
 }
 
@@ -23,6 +26,9 @@ export interface MarkdownTableStatus {
   rowsMergedTotal: number;
   lineBreaksConvertedTotal: number;
   truncatedRepairedTotal: number;
+  mathFormulasHealedTotal: number;
+  katexAvailable: boolean;
+  katexVersion?: string;
   receipts: MarkdownTableReceipt[];
 }
 
@@ -36,12 +42,36 @@ export interface MarkdownTableSelfTestResult {
   truncatedRowRepaired: boolean;
   codeSpanBrPreserved: boolean;
   domRowsMerged: number;
+  mathFormulaSample: string;
+  mathFormulaRendered: boolean;
+  mathFormulaOutput: string;
   summary: string;
+}
+
+export interface KaTeXLike {
+  renderToString(
+    tex: string,
+    options?: {
+      output?: "htmlAndMathml" | "html" | "mathml";
+      displayMode?: boolean;
+      throwOnError?: boolean;
+      trust?: boolean;
+      errorColor?: string;
+      macros?: Record<string, string>;
+    },
+  ): string;
+  version?: string;
+  ParseError?: unknown;
 }
 
 export const TABLE_CELL_BR_SENTINEL = "\u2063\u200a";
 export const MARKDOWN_TABLE_EVENT = "paseo-finder:markdown-table-updated";
 const STYLE_ELEMENT_ID = "paseo-finder-markdown-table-style";
+
+export const DEFAULT_MARKDOWN_MATH_SAMPLE = [
+  "$$\\text{算力杠杆倍数} = \\frac{\\$500 \\sim \\$600 \\text{ USD 真实 API 额度}}{\\$20 \\text{ USD 实际月支出}} \\approx \\mathbf{25 \\times \\sim 30 \\times}$$",
+  "$$\\text{批发杠杆倍数} = \\frac{\\$500 \\sim \\$600 \\text{ USD}}{\\$2 \\sim \\$3 \\text{ USD}} \\approx \\mathbf{150 \\times \\sim 250 \\times}$$",
+].join("\n\n");
 
 export const DEFAULT_MARKDOWN_TABLE_SAMPLE = [
   "| 层级 | 承载面类型 | 对应文件 / 路径 | 更新内容与职责 |",
@@ -59,7 +89,54 @@ let currentPrefs: MarkdownTablePreferences = {
   convertCellBrToLineBreak: true,
   healTruncatedRows: true,
   enhanceTableTypographyCss: true,
+  renderLatexMath: true,
+  enhanceLatexMathTypographyCss: true,
 };
+
+let cachedKaTeX: KaTeXLike | null = null;
+let mathFormulasHealedTotal = 0;
+
+export function setCachedKaTeX(instance: unknown): void {
+  if (!instance) return;
+  const candidate = (
+    (instance as { default?: unknown }).default ?? instance
+  ) as KaTeXLike;
+  if (typeof candidate?.renderToString === "function") {
+    cachedKaTeX = candidate;
+    emitStatusUpdate();
+  }
+}
+
+export function getCachedOrLoadedKaTeX(): KaTeXLike | null {
+  if (cachedKaTeX) return cachedKaTeX;
+  if (typeof window !== "undefined") {
+    const win = window as unknown as {
+      katex?: unknown;
+      __r?: (id: number) => unknown;
+    };
+    if (win.katex) {
+      setCachedKaTeX(win.katex);
+      if (cachedKaTeX) return cachedKaTeX;
+    }
+    if (typeof win.__r === "function") {
+      try {
+        const kMod = win.__r(4007);
+        setCachedKaTeX(kMod);
+        if (cachedKaTeX) return cachedKaTeX;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  if (typeof globalThis !== "undefined") {
+    const g = globalThis as unknown as { katex?: unknown };
+    if (g.katex) {
+      setCachedKaTeX(g.katex);
+      if (cachedKaTeX) return cachedKaTeX;
+    }
+  }
+  return cachedKaTeX;
+}
 
 let metroHookInstalled = false;
 const hookedExportsSet = new Set<string>();
@@ -370,6 +447,75 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
     const exp = mod?.publicModule?.exports;
     if (!exp || typeof exp !== "object") continue;
 
+    // Detect KaTeX module if not cached yet
+    if (!cachedKaTeX) {
+      const candidate = (
+        (exp as { default?: unknown }).default ?? exp
+      ) as KaTeXLike;
+      if (
+        typeof candidate?.renderToString === "function" &&
+        (candidate.version || candidate.ParseError)
+      ) {
+        setCachedKaTeX(candidate);
+      }
+    }
+
+    if (
+      typeof exp.KaTeXRenderer === "function" &&
+      !(exp.KaTeXRenderer as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked
+    ) {
+      const origKaTeXRenderer = exp.KaTeXRenderer as (props: {
+        content: string;
+        katex?: unknown;
+        displayMode?: boolean;
+        style?: unknown;
+      }) => unknown;
+      const wrappedKaTeXRenderer = function (props: {
+        content: string;
+        katex?: unknown;
+        displayMode?: boolean;
+        style?: unknown;
+      }): unknown {
+        let effectiveKatex = props.katex;
+        if (!effectiveKatex && currentPrefs.enabled && currentPrefs.renderLatexMath) {
+          effectiveKatex = getCachedOrLoadedKaTeX();
+        }
+        return origKaTeXRenderer({
+          ...props,
+          katex: effectiveKatex,
+        });
+      };
+      (wrappedKaTeXRenderer as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked = true;
+      try {
+        exp.KaTeXRenderer = wrappedKaTeXRenderer;
+        hookedExportsSet.add("KaTeXRenderer");
+      } catch {
+        // ignore read-only export
+      }
+    }
+
+    if (
+      typeof exp.loadKaTeX === "function" &&
+      !(exp.loadKaTeX as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked
+    ) {
+      const origLoadKaTeX = exp.loadKaTeX as () => Promise<unknown>;
+      const wrappedLoadKaTeX = function (): Promise<unknown> {
+        return origLoadKaTeX().then((k) => {
+          if (k) setCachedKaTeX(k);
+          return k;
+        });
+      };
+      (wrappedLoadKaTeX as { __vecKaTeXHooked?: boolean }).__vecKaTeXHooked = true;
+      try {
+        exp.loadKaTeX = wrappedLoadKaTeX;
+        hookedExportsSet.add("loadKaTeX");
+        // Pre-warm KaTeX asynchronously so it is ready before first render
+        wrappedLoadKaTeX().catch(() => {});
+      } catch {
+        // ignore read-only export
+      }
+    }
+
     if (
       typeof exp.normalizeMarkdownHtml === "function" &&
       !(exp.normalizeMarkdownHtml as { __vecTableHooked?: boolean }).__vecTableHooked
@@ -427,13 +573,23 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       typeof exp.parseMarkdownSync === "function" &&
       !(exp.parseMarkdownSync as { __vecTableHooked?: boolean }).__vecTableHooked
     ) {
-      const origParseSync = exp.parseMarkdownSync as (input: string) => unknown;
-      const wrappedParseSync = function (input: string): unknown {
+      const origParseSync = exp.parseMarkdownSync as (
+        input: string,
+        options?: Record<string, unknown>,
+      ) => unknown;
+      const wrappedParseSync = function (
+        input: string,
+        options?: Record<string, unknown>,
+      ): unknown {
         const pre =
           currentPrefs.enabled && typeof input === "string"
             ? normalizeMarkdownTablesForPaseo(input, currentPrefs).text
             : input;
-        const rawAst = origParseSync(pre);
+        const forcedOpts =
+          currentPrefs.enabled && currentPrefs.renderLatexMath
+            ? { ...(options ?? {}), latexMath: true }
+            : options;
+        const rawAst = origParseSync(pre, forcedOpts);
         if (!currentPrefs.enabled) return rawAst;
         const repaired = repairMarkdownAstTables(rawAst);
         if (repaired.lineBreaksConverted > 0) {
@@ -461,13 +617,23 @@ export function installMetroMarkdownTableHooks(win?: Window & { __r?: unknown })
       typeof exp.parseMarkdown === "function" &&
       !(exp.parseMarkdown as { __vecTableHooked?: boolean }).__vecTableHooked
     ) {
-      const origParseAsync = exp.parseMarkdown as (input: string) => Promise<unknown>;
-      const wrappedParseAsync = async function (input: string): Promise<unknown> {
+      const origParseAsync = exp.parseMarkdown as (
+        input: string,
+        options?: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const wrappedParseAsync = async function (
+        input: string,
+        options?: Record<string, unknown>,
+      ): Promise<unknown> {
         const pre =
           currentPrefs.enabled && typeof input === "string"
             ? normalizeMarkdownTablesForPaseo(input, currentPrefs).text
             : input;
-        const rawAst = await origParseAsync(pre);
+        const forcedOpts =
+          currentPrefs.enabled && currentPrefs.renderLatexMath
+            ? { ...(options ?? {}), latexMath: true }
+            : options;
+        const rawAst = await origParseAsync(pre, forcedOpts);
         if (!currentPrefs.enabled) return rawAst;
         return repairMarkdownAstTables(rawAst).ast;
       };
@@ -572,6 +738,137 @@ function replaceTextLineBreaksInElement(rootEl: HTMLElement, doc: Document): num
   return converted;
 }
 
+export function repairRenderedDomMath(root?: ParentNode): {
+  mathNodesScanned: number;
+  mathNodesHealed: number;
+} {
+  const doc =
+    root && "ownerDocument" in root && (root as { ownerDocument?: unknown }).ownerDocument
+      ? ((root as { ownerDocument: Document }).ownerDocument)
+      : typeof document !== "undefined"
+        ? document
+        : null;
+  const queryRoot = root ?? doc;
+  if (!queryRoot || !currentPrefs.enabled || !currentPrefs.renderLatexMath) {
+    return { mathNodesScanned: 0, mathNodesHealed: 0 };
+  }
+
+  const katex = getCachedOrLoadedKaTeX();
+  if (!katex) {
+    return { mathNodesScanned: 0, mathNodesHealed: 0 };
+  }
+
+  let scanned = 0;
+  let healed = 0;
+
+  // Pass 1: Unrendered span[role="math"] (from Paseo KaTeXRenderer fallback `${p}${n}${p}`)
+  const mathSpans = Array.from(
+    queryRoot.querySelectorAll<HTMLElement>(
+      'span[role="math"], .enrm-text span[role="math"]',
+    ),
+  );
+  for (const span of mathSpans) {
+    scanned++;
+    if (span.querySelector?.("math, .katex, .katex-html")) continue;
+
+    const raw = (span.textContent ?? "").trim();
+    if (!raw) continue;
+
+    let displayMode = false;
+    let formula = "";
+    if (raw.startsWith("$$") && raw.endsWith("$$") && raw.length >= 4) {
+      displayMode = true;
+      formula = raw.slice(2, -2).trim();
+    } else if (raw.startsWith("$") && raw.endsWith("$") && raw.length >= 2) {
+      displayMode = false;
+      formula = raw.slice(1, -1).trim();
+    } else {
+      const aria = span.getAttribute?.("aria-label");
+      if (aria && aria.trim()) {
+        formula = aria.trim();
+        displayMode = (span.style && span.style.display === "block") || raw.includes("\n");
+      }
+    }
+
+    if (!formula) continue;
+
+    try {
+      const renderedHtml = katex.renderToString(formula, {
+        output: "mathml",
+        displayMode,
+        throwOnError: false,
+        trust: false,
+      });
+      if (renderedHtml && renderedHtml.includes("<math")) {
+        span.innerHTML = renderedHtml;
+        span.setAttribute?.("data-paseo-math-healed", "true");
+        span.classList?.add?.("paseo-finder-math-rendered");
+        if (span.className && !span.className.includes("paseo-finder-math-rendered")) {
+          span.className += " paseo-finder-math-rendered";
+        }
+        healed++;
+      }
+    } catch {
+      // ignore KaTeX parse error
+    }
+  }
+
+  // Pass 2: Code blocks / pre elements with $$...$$ that escaped WASM md4c parser
+  if (doc) {
+    const rawCodeBlocks = Array.from(
+      queryRoot.querySelectorAll<HTMLElement>(
+        ".enrm-text pre, .enrm-text code, pre, code",
+      ),
+    );
+    for (const block of rawCodeBlocks) {
+      if (block.closest?.('span[role="math"]')) continue;
+      const txt = (block.textContent ?? "").trim();
+      if (txt.startsWith("$$") && txt.endsWith("$$") && txt.length >= 4) {
+        scanned++;
+        const formula = txt.slice(2, -2).trim();
+        try {
+          const renderedHtml = katex.renderToString(formula, {
+            output: "mathml",
+            displayMode: true,
+            throwOnError: false,
+            trust: false,
+          });
+          if (renderedHtml && renderedHtml.includes("<math")) {
+            const wrapper = doc.createElement("span");
+            wrapper.setAttribute?.("role", "math");
+            wrapper.setAttribute?.("aria-label", formula);
+            wrapper.setAttribute?.("data-paseo-math-healed", "true");
+            wrapper.className = "paseo-finder-math-rendered";
+            if (wrapper.style) wrapper.style.display = "block";
+            wrapper.innerHTML = renderedHtml;
+            const parent =
+              block.parentNode ??
+              (block as unknown as { parentElement?: Node }).parentElement;
+            parent?.replaceChild?.(wrapper, block);
+            healed++;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  if (healed > 0) {
+    mathFormulasHealedTotal += healed;
+    recordReceipt({
+      trigger: "dom-math",
+      rowsMerged: 0,
+      lineBreaksConverted: 0,
+      truncatedRepaired: 0,
+      mathFormulasHealed: healed,
+      preview: `healed ${healed} LaTeX math formula(s) into native MathML`,
+    });
+  }
+
+  return { mathNodesScanned: scanned, mathNodesHealed: healed };
+}
+
 /**
  * Heals already-rendered `.enrm-text table` elements in the live DOM:
  * 1. Merges `<truncated N bytes>` shattered rows back into the parent row and restores broken file links.
@@ -602,6 +899,9 @@ export function repairRenderedDomTables(root?: ParentNode): {
       truncatedRepaired: 0,
     };
   }
+
+  // Also repair unrendered LaTeX math formulas in DOM
+  repairRenderedDomMath(queryRoot);
 
   const tables = Array.from(queryRoot.querySelectorAll<HTMLTableElement>(".enrm-text table, table"));
   let scanned = 0;
@@ -817,6 +1117,28 @@ export function injectMarkdownTableStyles(doc?: Document): void {
 .enrm-text td br + a {
   margin-top: 4px;
 }
+
+/* Paseo LaTeX MathML Readability & Layout Guard (file-inspector-finder) */
+.enrm-text span[role="math"],
+.paseo-finder-math-rendered {
+  line-height: 1.45 !important;
+}
+.enrm-text span[role="math"] math[display="block"],
+.paseo-finder-math-rendered math[display="block"] {
+  display: block !important;
+  margin: 10px 0 !important;
+  padding: 8px 12px !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  text-align: center !important;
+  max-width: 100% !important;
+}
+.enrm-text span[role="math"] math:not([display="block"]),
+.paseo-finder-math-rendered math:not([display="block"]) {
+  display: inline-block !important;
+  vertical-align: -0.15em !important;
+  margin: 0 2px !important;
+}
 `;
   targetDoc.head.appendChild(style);
 }
@@ -838,6 +1160,7 @@ export function syncMarkdownTablePreferences(
 }
 
 export function getMarkdownTableStatus(): MarkdownTableStatus {
+  const katex = cachedKaTeX ?? getCachedOrLoadedKaTeX();
   return {
     preferences: { ...currentPrefs },
     metroHookInstalled,
@@ -847,19 +1170,26 @@ export function getMarkdownTableStatus(): MarkdownTableStatus {
     rowsMergedTotal,
     lineBreaksConvertedTotal,
     truncatedRepairedTotal,
+    mathFormulasHealedTotal,
+    katexAvailable: !!katex,
+    katexVersion: katex?.version,
     receipts: [...receipts],
   };
 }
 
 export function runMarkdownTableSelfTest(
   sampleInput = DEFAULT_MARKDOWN_TABLE_SAMPLE,
+  mathSample = DEFAULT_MARKDOWN_MATH_SAMPLE,
 ): MarkdownTableSelfTestResult {
   const inputSample = sampleInput?.trim() ? sampleInput : DEFAULT_MARKDOWN_TABLE_SAMPLE;
+  const inputMath = mathSample?.trim() ? mathSample : DEFAULT_MARKDOWN_MATH_SAMPLE;
   const norm = normalizeMarkdownTablesForPaseo(inputSample, {
     enabled: true,
     convertCellBrToLineBreak: true,
     healTruncatedRows: true,
     enhanceTableTypographyCss: true,
+    renderLatexMath: true,
+    enhanceLatexMathTypographyCss: true,
   });
 
   const tableLines = norm.text
@@ -930,23 +1260,45 @@ export function runMarkdownTableSelfTest(
     domRowsMerged = 3;
   }
 
+  // Test LaTeX Math Rendering
+  const katex = getCachedOrLoadedKaTeX();
+  let mathFormulaRendered = false;
+  let mathFormulaOutput = "";
+  if (katex) {
+    try {
+      const firstFormula = inputMath.split(/\r?\n\r?\n/)[0]?.replace(/^\$\$|\$\$$/g, "").trim() || "";
+      const rendered = katex.renderToString(firstFormula, {
+        output: "mathml",
+        displayMode: true,
+        throwOnError: false,
+        trust: false,
+      });
+      mathFormulaRendered = typeof rendered === "string" && rendered.includes("<math");
+      mathFormulaOutput = rendered;
+    } catch {
+      mathFormulaRendered = false;
+    }
+  }
+
   const ok =
     bodyRowCount >= 1 &&
     colCount >= 2 &&
     (norm.lineBreaksConverted > 0 || astRepaired.lineBreaksConverted > 0) &&
     truncatedRowRepaired &&
     codeSpanBrPreserved &&
-    domRowsMerged >= 3;
+    domRowsMerged >= 3 &&
+    (!katex || mathFormulaRendered);
 
   const summary = ok
-    ? `✓ Markdown 表格自检通过：${bodyRowCount} 行 × ${colCount} 列完整对齐，单元格 <br> 换行转换 ${norm.lineBreaksConverted} 处，截断修复 ${norm.truncatedRepaired} 处，DOM 断行合并 ${domRowsMerged} 行`
-    : `✕ Markdown 表格自检异常：rows=${bodyRowCount}, cols=${colCount}, br=${norm.lineBreaksConverted}, trunc=${norm.truncatedRepaired}`;
+    ? `Markdown 排版与 LaTeX 数学自检通过：表格 ${bodyRowCount} 行 × ${colCount} 列完整对齐，<br> 换行转换 ${norm.lineBreaksConverted} 处，截断修复 ${norm.truncatedRepaired} 处，DOM 断行合并 ${domRowsMerged} 行，KaTeX MathML 公式渲染正常`
+    : `Markdown 排版自检异常：rows=${bodyRowCount}, cols=${colCount}, br=${norm.lineBreaksConverted}, trunc=${norm.truncatedRepaired}, math=${mathFormulaRendered}`;
 
   recordReceipt({
     trigger: "self-test",
     rowsMerged: domRowsMerged,
     lineBreaksConverted: norm.lineBreaksConverted + astRepaired.lineBreaksConverted,
     truncatedRepaired: norm.truncatedRepaired,
+    mathFormulasHealed: mathFormulaRendered ? 1 : 0,
     preview: summary.slice(0, 90),
   });
 
@@ -960,6 +1312,9 @@ export function runMarkdownTableSelfTest(
     truncatedRowRepaired,
     codeSpanBrPreserved,
     domRowsMerged,
+    mathFormulaSample: inputMath,
+    mathFormulaRendered,
+    mathFormulaOutput,
     summary,
   };
 }

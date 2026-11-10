@@ -380,6 +380,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       });
       syncMarkdownTablePreferences({
         enabled: settings.values.enableMarkdownTableEnhancer ?? true,
+        renderLatexMath: settings.values.enableLatexMathRendering ?? true,
       });
       syncSessionTimePreferences(
         {
@@ -3519,20 +3520,43 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               void save({ ...values, enableMarkdownTableEnhancer: next }, revision);
             }}
           />
+          <SettingsSwitch
+            label={
+              isZh
+                ? "启用 LaTeX 数学公式渲染 (KaTeX MathML)"
+                : "Enable LaTeX Math Rendering (KaTeX MathML)"
+            }
+            hint={
+              isZh
+                ? "修复 Paseo 默认禁用 latexMath 导致数学公式裸露为 $$...$$ 源码的问题，注入内置 KaTeX 引擎渲染原生高清 MathML 数学排版"
+                : "Fixes Paseo's disabled latexMath flag by rendering mathematical formulas ($$...$$) into native MathML via bundled KaTeX"
+            }
+            value={values.enableLatexMathRendering ?? true}
+            onValueChange={(next: boolean) => {
+              syncMarkdownTablePreferences({ renderLatexMath: next });
+              setMarkdownTableStatus(getMarkdownTableStatus());
+              void save({ ...values, enableLatexMathRendering: next }, revision);
+            }}
+          />
         </SettingsCard>
 
         <View style={styles.diagBox}>
           <Text style={styles.detail}>
             • {isZh ? "当前生效状态 (能读)" : "Active Status"}:{" "}
-            {markdownTableStatus?.preferences.enabled !== false ? "✓ true" : "✕ false"} · Metro
+            {markdownTableStatus?.preferences.enabled !== false ? "true" : "false"} · Metro
             Hooks:{" "}
             {markdownTableStatus?.metroHookInstalled
-              ? `✓ (${markdownTableStatus.hookedExports.join(", ")})`
+              ? `[${markdownTableStatus.hookedExports.join(", ")}]`
               : "DOM-Healer Active"}{" "}
-            · Scanned: {markdownTableStatus?.tablesScanned ?? 0} · Healed:{" "}
+            · KaTeX:{" "}
+            {markdownTableStatus?.katexAvailable
+              ? `[${markdownTableStatus.katexVersion ?? "0.16.47"} MathML]`
+              : "Loading"}{" "}
+            · Tables Scanned: {markdownTableStatus?.tablesScanned ?? 0} · Tables Healed:{" "}
             {markdownTableStatus?.tablesHealed ?? 0} · Rows Merged:{" "}
             {markdownTableStatus?.rowsMergedTotal ?? 0} · Cell &lt;br&gt; Fixed:{" "}
-            {markdownTableStatus?.lineBreaksConvertedTotal ?? 0}
+            {markdownTableStatus?.lineBreaksConvertedTotal ?? 0} · Math Formulas Healed:{" "}
+            {markdownTableStatus?.mathFormulasHealedTotal ?? 0}
           </Text>
 
           <View style={styles.row}>
@@ -3561,7 +3585,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               style={styles.btn}
             >
               <Text style={styles.btnText}>
-                {isZh ? "验算并修复表格 (能试)" : "Run Table Self-Test"}
+                {isZh ? "验算并修复排版 (能试)" : "Run Layout Self-Test"}
               </Text>
             </Pressable>
             <Pressable
@@ -3572,17 +3596,20 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                   convertCellBrToLineBreak: true,
                   healTruncatedRows: true,
                   enhanceTableTypographyCss: true,
+                  renderLatexMath: true,
+                  enhanceLatexMathTypographyCss: true,
                 });
                 void save(
                   {
                     ...values,
                     enableMarkdownTableEnhancer: true,
+                    enableLatexMathRendering: true,
                   },
                   revision,
                 );
                 setMarkdownTableStatus(getMarkdownTableStatus());
                 toast.show(
-                  isZh ? "已恢复 Markdown 表格修复默认配置" : "Restored Markdown table defaults",
+                  isZh ? "已恢复 Markdown 与 LaTeX 渲染默认配置" : "Restored Markdown and LaTeX defaults",
                 );
               }}
               style={styles.secondaryBtn}

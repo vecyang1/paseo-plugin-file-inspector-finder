@@ -152,13 +152,19 @@ import {
   extractCurrentWorkspaceAndAgent,
   openWorkspaceTargetTabViaStore,
 } from "../client/session-lineage-web";
+import katex from "katex";
 import {
   DEFAULT_MARKDOWN_TABLE_SAMPLE,
+  DEFAULT_MARKDOWN_MATH_SAMPLE,
   TABLE_CELL_BR_SENTINEL,
+  getCachedOrLoadedKaTeX,
   installMetroMarkdownTableHooks,
   normalizeMarkdownTablesForPaseo,
   repairMarkdownAstTables,
+  repairRenderedDomMath,
   runMarkdownTableSelfTest,
+  setCachedKaTeX,
+  syncMarkdownTablePreferences,
 } from "../client/markdown-table-web";
 import {
   formatCompactLabelAsProseWithLocalTime,
@@ -1035,12 +1041,31 @@ function createInteractiveDomNode(
   selected: boolean;
   triggerBlur: () => void;
   dispatch: (type: string, ev?: Record<string, unknown>) => void;
+  parentNode?: MinimalElement | null;
+  replaceChild?: (newChild: MinimalElement, oldChild: MinimalElement) => void;
+  classList?: {
+    add: (...tokens: string[]) => void;
+    remove: (...tokens: string[]) => void;
+    contains: (token: string) => boolean;
+  };
+  ownerDocument?: {
+    createElement: (tag: string) => MinimalElement;
+    createTextNode?: (text: string) => { nodeValue: string; textContent: string };
+    createDocumentFragment?: () => MinimalElement;
+  };
 } {
   const attrs = new Map<string, string>(Object.entries(initialAttrs));
   const listeners = new Map<string, Array<(ev: unknown) => void>>();
   const children: MinimalElement[] = [];
 
   let explicitText = initialText;
+  let explicitHtml = "";
+
+  const mockOwnerDocument = {
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    createTextNode: (text: string) => ({ nodeValue: text, textContent: text }),
+    createDocumentFragment: () => createInteractiveDomNode("div"),
+  };
 
   const node: MinimalElement & {
     attrs: Map<string, string>;
@@ -1052,8 +1077,21 @@ function createInteractiveDomNode(
     scrollLeft: number;
     triggerBlur: () => void;
     dispatch: (type: string, ev?: Record<string, unknown>) => void;
+    parentNode?: MinimalElement | null;
+    replaceChild?: (newChild: MinimalElement, oldChild: MinimalElement) => void;
+    classList?: {
+      add: (...tokens: string[]) => void;
+      remove: (...tokens: string[]) => void;
+      contains: (token: string) => boolean;
+    };
+    ownerDocument?: {
+      createElement: (tag: string) => MinimalElement;
+      createTextNode?: (text: string) => { nodeValue: string; textContent: string };
+      createDocumentFragment?: () => MinimalElement;
+    };
   } = {
     tagName: tagName.toUpperCase(),
+    ownerDocument: mockOwnerDocument,
     get textContent() {
       if (explicitText) return explicitText;
       if (children.length > 0) {
@@ -1063,11 +1101,31 @@ function createInteractiveDomNode(
     },
     set textContent(val: string | null | undefined) {
       explicitText = val ?? "";
+      explicitHtml = "";
+    },
+    get innerHTML() {
+      return explicitHtml || explicitText;
+    },
+    set innerHTML(val: string) {
+      explicitHtml = val;
+      explicitText = val.replace(/<[^>]*>/g, "");
+    },
+    get className() {
+      return attrs.get("class") ?? "";
+    },
+    set className(val: string) {
+      attrs.set("class", val);
     },
     value: "",
     style: {},
     children,
     parentElement: null,
+    get parentNode() {
+      return node.parentElement ?? null;
+    },
+    set parentNode(val: MinimalElement | null) {
+      node.parentElement = val;
+    },
     attrs,
     listeners,
     focused: false,
@@ -1075,6 +1133,25 @@ function createInteractiveDomNode(
     selectionStart: null,
     selectionEnd: null,
     scrollLeft: 0,
+    classList: {
+      add: (...tokens: string[]) => {
+        const cur = attrs.get("class") ?? "";
+        const parts = cur ? cur.split(/\s+/).filter(Boolean) : [];
+        for (const t of tokens) {
+          if (!parts.includes(t)) parts.push(t);
+        }
+        attrs.set("class", parts.join(" "));
+      },
+      remove: (...tokens: string[]) => {
+        const cur = attrs.get("class") ?? "";
+        const parts = cur.split(/\s+/).filter((p) => !tokens.includes(p));
+        attrs.set("class", parts.join(" "));
+      },
+      contains: (token: string) => {
+        const cur = attrs.get("class") ?? "";
+        return cur.split(/\s+/).includes(token);
+      },
+    },
     getAttribute: (n) => attrs.get(n) ?? null,
     setAttribute: (n, v) => {
       attrs.set(n, v);
@@ -1095,6 +1172,16 @@ function createInteractiveDomNode(
         children.push(newChild);
       }
     },
+    replaceChild: (newChild: MinimalElement, oldChild: MinimalElement) => {
+      newChild.parentElement = node;
+      const idx = children.indexOf(oldChild);
+      if (idx >= 0) {
+        children.splice(idx, 1, newChild);
+      } else {
+        children.push(newChild);
+      }
+      oldChild.parentElement = null;
+    },
     remove: () => {
       if (node.parentElement?.children) {
         const list = node.parentElement.children as MinimalElement[];
@@ -1112,17 +1199,50 @@ function createInteractiveDomNode(
       return false;
     },
     querySelector: (selector: string) => {
-      const matchAttr = selector.match(/^\[data-testid="([^"]+)"\]$/);
-      const matchPrefix = selector.match(/^\[data-testid\^="([^"]+)"\]$/);
-      const isTag = /^[a-z0-9_-]+$/i.test(selector.trim());
-      const hasTextarea = selector.includes("textarea");
-      const walk = (el: MinimalElement): MinimalElement | null => {
-        const tid = el.getAttribute?.("data-testid") ?? "";
+      const testSelectorPart = (el: MinimalElement, sel: string): boolean => {
+        const s = sel.trim();
+        if (!s) return false;
         const tag = (el.tagName ?? "").toLowerCase();
-        if (matchAttr && tid === matchAttr[1]) return el;
-        if (matchPrefix && tid.startsWith(matchPrefix[1])) return el;
-        if (isTag && tag === selector.trim().toLowerCase()) return el;
-        if (hasTextarea && tag === "textarea") return el;
+        const tid = el.getAttribute?.("data-testid") ?? "";
+        const role = el.getAttribute?.("role") ?? "";
+        const cls = el.getAttribute?.("class") ?? "";
+
+        const roleMatch = s.match(/^(?:([a-z0-9_-]+))?\[role="([^"]+)"\]$/i);
+        if (roleMatch) {
+          const reqTag = roleMatch[1]?.toLowerCase();
+          const reqRole = roleMatch[2];
+          return (!reqTag || tag === reqTag) && role === reqRole;
+        }
+
+        const matchAttr = s.match(/^\[data-testid="([^"]+)"\]$/);
+        if (matchAttr) return tid === matchAttr[1];
+        const matchPrefix = s.match(/^\[data-testid\^="([^"]+)"\]$/);
+        if (matchPrefix) return tid.startsWith(matchPrefix[1]);
+
+        if (s.startsWith(".")) {
+          return cls.split(/\s+/).includes(s.slice(1));
+        }
+
+        if (/^[a-z0-9_-]+$/i.test(s)) {
+          return tag === s.toLowerCase();
+        }
+
+        if (s.includes("textarea") && tag === "textarea") return true;
+        return false;
+      };
+
+      const matchesAnySelector = (el: MinimalElement, sel: string): boolean => {
+        const parts = sel.split(",").map((p) => p.trim());
+        for (const p of parts) {
+          const subParts = p.split(/\s+/);
+          const lastPart = subParts[subParts.length - 1]!;
+          if (testSelectorPart(el, lastPart)) return true;
+        }
+        return false;
+      };
+
+      const walk = (el: MinimalElement): MinimalElement | null => {
+        if (matchesAnySelector(el, selector)) return el;
         for (const ch of (el.children as MinimalElement[]) ?? []) {
           const found = walk(ch);
           if (found) return found;
@@ -1136,18 +1256,51 @@ function createInteractiveDomNode(
       return null;
     },
     querySelectorAll: (selector: string) => {
-      const matchAttr = selector.match(/^\[data-testid="([^"]+)"\]$/);
-      const matchPrefix = selector.match(/^\[data-testid\^="([^"]+)"\]$/);
-      const isTag = /^[a-z0-9_-]+$/i.test(selector.trim());
-      const hasTextarea = selector.includes("textarea");
+      const testSelectorPart = (el: MinimalElement, sel: string): boolean => {
+        const s = sel.trim();
+        if (!s) return false;
+        const tag = (el.tagName ?? "").toLowerCase();
+        const tid = el.getAttribute?.("data-testid") ?? "";
+        const role = el.getAttribute?.("role") ?? "";
+        const cls = el.getAttribute?.("class") ?? "";
+
+        const roleMatch = s.match(/^(?:([a-z0-9_-]+))?\[role="([^"]+)"\]$/i);
+        if (roleMatch) {
+          const reqTag = roleMatch[1]?.toLowerCase();
+          const reqRole = roleMatch[2];
+          return (!reqTag || tag === reqTag) && role === reqRole;
+        }
+
+        const matchAttr = s.match(/^\[data-testid="([^"]+)"\]$/);
+        if (matchAttr) return tid === matchAttr[1];
+        const matchPrefix = s.match(/^\[data-testid\^="([^"]+)"\]$/);
+        if (matchPrefix) return tid.startsWith(matchPrefix[1]);
+
+        if (s.startsWith(".")) {
+          return cls.split(/\s+/).includes(s.slice(1));
+        }
+
+        if (/^[a-z0-9_-]+$/i.test(s)) {
+          return tag === s.toLowerCase();
+        }
+
+        if (s.includes("textarea") && tag === "textarea") return true;
+        return false;
+      };
+
+      const matchesAnySelector = (el: MinimalElement, sel: string): boolean => {
+        const parts = sel.split(",").map((p) => p.trim());
+        for (const p of parts) {
+          const subParts = p.split(/\s+/);
+          const lastPart = subParts[subParts.length - 1]!;
+          if (testSelectorPart(el, lastPart)) return true;
+        }
+        return false;
+      };
+
       const out: MinimalElement[] = [];
       const walk = (el: MinimalElement) => {
-        const tid = el.getAttribute?.("data-testid") ?? "";
-        const tag = (el.tagName ?? "").toLowerCase();
-        if (matchAttr && tid === matchAttr[1]) out.push(el);
-        else if (matchPrefix && tid.startsWith(matchPrefix[1])) out.push(el);
-        else if (isTag && tag === selector.trim().toLowerCase()) out.push(el);
-        else if (hasTextarea && tag === "textarea") out.push(el);
+        if (matchesAnySelector(el, selector)) out.push(el);
         for (const ch of (el.children as MinimalElement[]) ?? []) {
           walk(ch);
         }
@@ -4074,6 +4227,163 @@ test("44. Markdown table <br> cell line-break, <truncated N bytes> row repair, a
   assert.ok(quotedTable.text.includes(`alpha${TABLE_CELL_BR_SENTINEL}beta`));
 });
 
+test("44b. LaTeX Math formula rendering (KaTeX MathML), Metro AST options override & DOM fallback healing", () => {
+  // 1. Initialize KaTeX in plugin cache and verify single truth source
+  setCachedKaTeX(katex);
+  const activeKatex = getCachedOrLoadedKaTeX();
+  assert.ok(activeKatex, "KaTeX instance must be available in getCachedOrLoadedKaTeX()");
+  assert.equal(typeof activeKatex?.renderToString, "function");
+
+  // 2. Test the exact mathematical formulas from the user's screenshot
+  const screenshotFormula1 =
+    "\\text{算力杠杆倍数} = \\frac{\\$500 \\sim \\$600 \\text{ USD 真实 API 额度}}{\\$20 \\text{ USD 实际月支出}} \\approx \\mathbf{25 \\times \\sim 30 \\times}";
+  const screenshotFormula2 =
+    "\\text{批发杠杆倍数} = \\frac{\\$500 \\sim \\$600 \\text{ USD}}{\\$2 \\sim \\$3 \\text{ USD}} \\approx \\mathbf{150 \\times \\sim 250 \\times}";
+
+  const renderedHtml1 = activeKatex.renderToString(screenshotFormula1, {
+    output: "mathml",
+    displayMode: true,
+    throwOnError: false,
+    trust: false,
+  });
+  assert.ok(
+    renderedHtml1.includes('<math xmlns="http://www.w3.org/1998/Math/MathML" display="block">'),
+    "Display formula must render native MathML display block",
+  );
+  assert.ok(renderedHtml1.includes("算力杠杆倍数"), "Rendered MathML must preserve CJK math text");
+  assert.ok(renderedHtml1.includes("<mfrac>"), "Fraction must compile to <mfrac>");
+
+  const renderedHtml2 = activeKatex.renderToString(screenshotFormula2, {
+    output: "mathml",
+    displayMode: true,
+    throwOnError: false,
+    trust: false,
+  });
+  assert.ok(renderedHtml2.includes("批发杠杆倍数"));
+  assert.ok(renderedHtml2.includes("<mfrac>"));
+
+  // 3. Test Metro module 3999 (KaTeXRenderer) hook: injects KaTeX when Paseo passes katex: null
+  type MockKaTeXRendererProps = {
+    content: string;
+    katex?: { renderToString: (tex: string, opts: unknown) => string } | null;
+    displayMode?: boolean;
+  };
+  const mockMod3999 = {
+    isInitialized: true,
+    publicModule: {
+      exports: {
+        KaTeXRenderer: (props: MockKaTeXRendererProps) => {
+          const p = props.displayMode ? "$$" : "$";
+          if (!props.katex) {
+            return { fallback: true, text: `${p}${props.content}${p}` };
+          }
+          const html = props.katex.renderToString(props.content, {
+            output: "mathml",
+            displayMode: props.displayMode,
+          });
+          return { fallback: false, html };
+        },
+      },
+    },
+  };
+
+  // 4. Test Metro module 3993 (parseMarkdownSync) hook: overrides Paseo's latexMath: false flag
+  let capturedOptions: Record<string, unknown> | undefined;
+  const mockMod3993 = {
+    isInitialized: true,
+    publicModule: {
+      exports: {
+        parseMarkdownSync: (input: string, options?: Record<string, unknown>) => {
+          capturedOptions = options;
+          return {
+            type: "Document",
+            children: [
+              {
+                type: "LatexMathDisplay",
+                children: [{ type: "Text", text: input }],
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+
+  const fakeMetroModules = new Map<number, unknown>();
+  for (let i = 0; i < 60; i++) {
+    fakeMetroModules.set(i, { isInitialized: true, publicModule: { exports: {} } });
+  }
+  fakeMetroModules.set(3999, mockMod3999);
+  fakeMetroModules.set(3993, mockMod3993);
+
+  const fakeWindow = {
+    __r: (id: number) => fakeMetroModules.get(id),
+  } as unknown as Window & { __r?: unknown };
+
+  const installOk = installMetroMarkdownTableHooks(fakeWindow);
+  assert.equal(installOk, true, "installMetroMarkdownTableHooks must succeed on mock Metro runtime");
+
+  // Verify parseMarkdownSync forcibly turns on latexMath: true even when Paseo caller passes latexMath: false
+  mockMod3993.publicModule.exports.parseMarkdownSync("$$E=mc^2$$", {
+    latexMath: false,
+    hardSoftBreaks: true,
+  });
+  assert.equal(capturedOptions?.latexMath, true, "latexMath flag must be overridden to true");
+
+  // Verify KaTeXRenderer supplies cached KaTeX when caller passed null/undefined
+  const renderResult = mockMod3999.publicModule.exports.KaTeXRenderer({
+    content: "E=mc^2",
+    katex: null, // simulates Paseo's broken prop where katex was not loaded
+    displayMode: true,
+  }) as { fallback: boolean; html?: string; text?: string };
+  assert.equal(renderResult.fallback, false, "KaTeXRenderer must not use fallback when hook supplies KaTeX");
+  assert.ok(renderResult.html?.includes("<math"), "KaTeXRenderer output must contain native MathML");
+
+  // 5. Test DOM Math Healer on pre-rendered fallback nodes
+  const mockContainer = createInteractiveDomNode("div");
+  const fallbackSpanDisplay = createInteractiveDomNode(
+    "span",
+    { role: "math", "aria-label": screenshotFormula1 },
+    `$$${screenshotFormula1}$$`,
+  );
+  const fallbackSpanInline = createInteractiveDomNode(
+    "span",
+    { role: "math", "aria-label": "E=mc^2" },
+    "$E=mc^2$",
+  );
+  const rawCodeBlock = createInteractiveDomNode(
+    "code",
+    {},
+    `$$${screenshotFormula2}$$`,
+  );
+  mockContainer.appendChild?.(fallbackSpanDisplay);
+  mockContainer.appendChild?.(fallbackSpanInline);
+  mockContainer.appendChild?.(rawCodeBlock);
+
+  const domRes = repairRenderedDomMath(mockContainer as unknown as ParentNode);
+  assert.ok(domRes.mathNodesScanned >= 2, "DOM healer must scan all math candidates");
+  assert.ok(domRes.mathNodesHealed >= 2, "DOM healer must heal unrendered fallback formulas");
+  assert.ok(fallbackSpanDisplay.innerHTML?.includes("<math"), "Display span must receive compiled MathML");
+  assert.ok(fallbackSpanInline.innerHTML?.includes("<math"), "Inline span must receive compiled MathML");
+
+  // 6. Test runMarkdownTableSelfTest end-to-end integration
+  const selfTest = runMarkdownTableSelfTest();
+  assert.equal(selfTest.ok, true, selfTest.summary);
+  assert.equal(selfTest.mathFormulaRendered, true, "Self-test must prove math formula renders");
+  assert.ok(selfTest.summary.includes("KaTeX MathML 公式渲染正常"));
+
+  // 7. Verify preference toggle
+  syncMarkdownTablePreferences({ renderLatexMath: false });
+  // When disabled, parseMarkdownSync does not force latexMath
+  mockMod3993.publicModule.exports.parseMarkdownSync("$$x=1$$", { latexMath: false });
+  assert.equal(capturedOptions?.latexMath, false, "When disabled, latexMath flag should not be forced");
+
+  // Restore defaults
+  syncMarkdownTablePreferences({ renderLatexMath: true });
+  mockMod3993.publicModule.exports.parseMarkdownSync("$$x=1$$", { latexMath: false });
+  assert.equal(capturedOptions?.latexMath, true, "When re-enabled, latexMath flag must be forced again");
+});
+
 test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut annotation with UI Observability", async () => {
   // 1. LabelShortcutComboSchema validation
   assert.equal(LabelShortcutComboSchema.parse("both"), "both");
@@ -6843,6 +7153,218 @@ test("52. Brand-new user sessions never inherit hidden background <code> referen
     "Hidden <code> elements from inactive background sessions must never leak when the active session has 0 visible <code> elements",
   );
 });
+
+test("55. Colleague pill bidirectional jump-back, cross-workspace stale-agentId guard, and peers send trailing-row button", async () => {
+  const {
+    clearSessionDirectoryForTests,
+    ingestSessionLineageResponse,
+    extractCurrentWorkspaceAndAgent,
+    navigateToLineageNode,
+    getReturnBreadcrumbForSession,
+    enhanceTimelineSentByButtons,
+  } = await import("../client/session-lineage-web");
+
+  clearSessionDirectoryForTests();
+
+  const originSession = {
+    agentId: "2fd9139e-2506-4df5-b699-5425553fc48c",
+    shortId: "2fd9139e",
+    agentTitle: "Show linked sub-agent sessions in Paseo sidebar",
+    workspaceId: "wks_01fb9117e07777ba",
+    workspaceTitle: "Show linked sub-agent sessions in Paseo sidebar",
+    projectId: "proj_meta",
+    projectName: "2026-11-08 Meta harness",
+    status: "done",
+    provider: "antigravity",
+    model: "gemini-3.8-flash-high",
+    providerSessionId: null,
+    relationKind: "self" as const,
+    routedByAgentId: null,
+    createdAt: "2026-11-09T10:00:00Z",
+    updatedAt: "2026-11-10T06:00:00Z",
+    briefPath: null,
+    reportPath: null,
+    reportExists: false,
+    notionUrl: null,
+    notionTaskId: null,
+  };
+
+  const colleagueSession = {
+    ...originSession,
+    agentId: "efbb3721-90c3-45cc-b781-a931e64f7700",
+    shortId: "efbb3721",
+    agentTitle: "Add chat rewind and fork-session buttons",
+    workspaceId: "wks_40c7f50a74de87a4",
+    workspaceTitle: "Add chat rewind and fork-session buttons",
+    relationKind: "colleague" as const,
+  };
+
+  const peerSenderSession = {
+    ...originSession,
+    agentId: "af81b8f0-1111-4222-8333-444455556666",
+    shortId: "af81b8f0",
+    agentTitle: "Settings search & keyboard navigation",
+    workspaceId: "wks_settings_search",
+    workspaceTitle: "Settings search & keyboard navigation",
+    relationKind: "colleague" as const,
+  };
+
+  ingestSessionLineageResponse({
+    ok: true,
+    action: "inspect",
+    current: originSession,
+    parent: null,
+    routedOrigin: null,
+    siblings: [],
+    children: [],
+    colleagues: [colleagueSession],
+    projectPeers: [colleagueSession, peerSenderSession],
+    directory: [originSession, colleagueSession, peerSenderSession],
+    reconcileSummary: {
+      untitledFound: 0,
+      renamedCount: 0,
+      unlinkedFound: 0,
+      linkedCount: 0,
+      renamedWorkspaces: [],
+    },
+    message: "ok",
+    durationMs: 1,
+  });
+
+  // 1) Cross-workspace transition guard in extractCurrentWorkspaceAndAgent:
+  // When URL has switched to wks_40c7f50a74de87a4 (colleagueSession), a stale DOM tab for originSession (2fd9139e, belonging to wks_01fb9117e07777ba) must NOT be returned as agentId!
+  const staleTabEl = {
+    nodeType: 1,
+    hidden: false,
+    style: {},
+    parentElement: null,
+    getAttribute: (k: string) => {
+      if (k === "data-testid") return `workspace-tab-agent_${originSession.agentId}`;
+      if (k === "aria-selected") return "true";
+      return null;
+    },
+  };
+  const transitionDoc = {
+    querySelector: () => null,
+    querySelectorAll: (sel: string) =>
+      sel.includes("workspace-tab-agent_") ? [staleTabEl] : [],
+  } as unknown as Document;
+  const transitionWin = {
+    location: { pathname: `/h/srv_TS6CdHdSs5mI/workspace/${colleagueSession.workspaceId}` },
+  } as unknown as Window;
+
+  const extractedDuringTransition = extractCurrentWorkspaceAndAgent(transitionDoc, transitionWin);
+  assert.equal(extractedDuringTransition.workspaceId, colleagueSession.workspaceId);
+  assert.equal(
+    extractedDuringTransition.agentId,
+    null,
+    "Stale DOM tab from previous workspace must be rejected when URL has already moved to a different workspace",
+  );
+
+  // 2) Navigating from originSession (even when currentActive only has srv_...:wks_... workspaceId) records the return breadcrumb
+  const storageMap = new Map<string, string>();
+  const navWin = {
+    navigator: { language: "en-US" },
+    location: { pathname: `/h/srv_TS6CdHdSs5mI/workspace/srv_TS6CdHdSs5mI:${originSession.workspaceId}` },
+    sessionStorage: {
+      getItem: (k: string) => storageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => storageMap.set(k, v),
+      removeItem: (k: string) => storageMap.delete(k),
+    },
+  } as unknown as Window;
+  const navDoc = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  } as unknown as Document;
+
+  navigateToLineageNode(colleagueSession, navDoc, navWin, originSession);
+
+  const crumbOnColleague = getReturnBreadcrumbForSession(
+    `srv_TS6CdHdSs5mI:${colleagueSession.workspaceId}`,
+    colleagueSession.agentId,
+    navWin,
+  );
+  assert.ok(crumbOnColleague, "Return breadcrumb must be resolved on colleague session");
+  assert.equal(crumbOnColleague?.agentId, originSession.agentId);
+
+  // 3) enhanceTimelineSentByButtons injects [Sent by <Colleague> ↗] into user-message-trailing-row for `peers send <id>` messages
+  const trailingButtons: Array<{ attrs: Map<string, string>; textContent: string; title: string }> = [];
+  const fakeTrailingRow = {
+    nodeType: 1,
+    hidden: false,
+    style: {},
+    firstChild: null,
+    querySelectorAll: () => trailingButtons,
+    insertBefore: (el: any) => {
+      trailingButtons.unshift(el);
+    },
+  };
+  const fakePeerMsg = {
+    nodeType: 1,
+    hidden: false,
+    style: {},
+    parentElement: null,
+    textContent:
+      "From the T-039 settings-search session (Paseo agent af81b8f0), not the user. Reply route: antigravity-ops peers send af81b8f0",
+    getAttribute: (k: string) => (k === "data-testid" ? "user-message" : null),
+    querySelector: (sel: string) =>
+      sel.includes("user-message-trailing-row") ? fakeTrailingRow : null,
+  };
+  const msgDoc = {
+    documentElement: { style: { setProperty: () => {} } },
+    createElement: () => {
+      const attrs = new Map<string, string>();
+      return {
+        attrs,
+        type: "",
+        title: "",
+        textContent: "",
+        style: {},
+        setAttribute: (k: string, v: string) => attrs.set(k, v),
+        getAttribute: (k: string) => attrs.get(k) ?? null,
+        addEventListener: () => {},
+      };
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("user-message")) return [fakePeerMsg];
+      return [];
+    },
+  } as unknown as Document;
+
+  const healed = enhanceTimelineSentByButtons(
+    {
+      ok: true,
+      action: "inspect",
+      current: colleagueSession,
+      parent: null,
+      routedOrigin: originSession,
+      siblings: [],
+      children: [],
+      colleagues: [originSession, peerSenderSession],
+      projectPeers: [originSession, peerSenderSession],
+      directory: [originSession, colleagueSession, peerSenderSession],
+      reconcileSummary: {
+        untitledFound: 0,
+        renamedCount: 0,
+        unlinkedFound: 0,
+        linkedCount: 0,
+        renamedWorkspaces: [],
+      },
+      message: "ok",
+      durationMs: 1,
+    },
+    msgDoc,
+    navWin,
+  );
+  assert.ok(healed >= 1, "enhanceTimelineSentByButtons must inject a trailing-row sender button for peers send messages");
+  assert.equal(trailingButtons.length, 1);
+  assert.equal(
+    trailingButtons[0].attrs.get("data-testid"),
+    "paseo-finder-peer-sender-btn-af81b8f0",
+  );
+  assert.ok(trailingButtons[0].textContent.includes("Sent by Settings search & keyboard n"));
+});
+
 
 
 

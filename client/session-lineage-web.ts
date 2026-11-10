@@ -202,6 +202,7 @@ export function extractCurrentWorkspaceAndAgent(
     }
 
     if (!agentId) {
+      const cleanWs = (workspaceId ?? "").replace(/^[^:]+:/, "").trim();
       const allTabs = Array.from(
         doc.querySelectorAll<HTMLElement>('[data-testid^="workspace-tab-agent_"]'),
       ).filter((el) => {
@@ -215,7 +216,16 @@ export function extractCurrentWorkspaceAndAgent(
         );
       });
       const visibleTabs = allTabs.filter((el) => isElementInVisibleBranch(el, win));
-      const tabs = visibleTabs.length > 0 ? visibleTabs : allTabs;
+      const candidateTabs = visibleTabs.length > 0 ? visibleTabs : allTabs;
+      const wsMatchedTabs = cleanWs
+        ? candidateTabs.filter((el) => {
+            const tid = el.getAttribute("data-testid") ?? "";
+            const aid = tid.slice("workspace-tab-agent_".length).trim();
+            const known = aid ? globalSessionDirectoryByAgentId.get(aid) : null;
+            return !known?.workspaceId || known.workspaceId === cleanWs;
+          })
+        : candidateTabs;
+      const tabs = wsMatchedTabs.length > 0 ? wsMatchedTabs : cleanWs ? [] : candidateTabs;
       const selectedTab =
         tabs.find(
           (el) =>
@@ -228,6 +238,15 @@ export function extractCurrentWorkspaceAndAgent(
         const extracted = tid.slice("workspace-tab-agent_".length).trim();
         if (extracted) {
           agentId = extracted;
+        }
+      }
+      if (!agentId && cleanWs) {
+        const focusedTarget = extractFocusedWorkspaceTabTarget(cleanWs, win);
+        if (focusedTarget?.agentId) {
+          const known = globalSessionDirectoryByAgentId.get(focusedTarget.agentId);
+          if (!known?.workspaceId || known.workspaceId === cleanWs) {
+            agentId = focusedTarget.agentId;
+          }
         }
       }
     }
@@ -1191,11 +1210,12 @@ export function navigateToLineageNode(
   const explicitOriginNode =
     fromOrigin && "agentId" in fromOrigin ? fromOrigin : null;
 
+  const cleanCurrentWs = (currentActive.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
   const resolvedOrigin =
     explicitOriginNode ??
     (currentActive.agentId ? globalSessionDirectoryByAgentId.get(currentActive.agentId) : null) ??
-    (currentActive.workspaceId
-      ? globalSessionDirectoryByWorkspaceId.get(currentActive.workspaceId)?.[0]
+    (cleanCurrentWs
+      ? globalSessionDirectoryByWorkspaceId.get(cleanCurrentWs)?.[0]
       : null) ??
     null;
 
@@ -1209,6 +1229,14 @@ export function navigateToLineageNode(
       w,
     );
   }
+
+  const scheduleLineageResync = () => {
+    for (const delay of [50, 160, 380]) {
+      setTimeout(() => {
+        externalSyncLineageFn?.(true);
+      }, delay);
+    }
+  };
 
   // Fast path 0: Use Paseo's native Metro navigateToAgent when navigating to a known agentId
   if (node.agentId && metroNavigateToAgentFn) {
@@ -1246,6 +1274,7 @@ export function navigateToLineageNode(
     );
     if (trackBtn) {
       trackBtn.click();
+      scheduleLineageResync();
       return true;
     }
   }
@@ -1281,6 +1310,7 @@ export function navigateToLineageNode(
   for (const delay of [90, 220, 460]) {
     setTimeout(trySelectAgentTab, delay);
   }
+  scheduleLineageResync();
   return focused;
 }
 
@@ -1566,6 +1596,7 @@ export function enhanceTimelineSentByButtons(
     ...(data.children ?? []),
     ...(data.parent ? [data.parent] : []),
     ...(data.routedOrigin ? [data.routedOrigin] : []),
+    ...(data.colleagues ?? []),
     ...(data.siblings ?? []),
   ].filter((n) => n.agentId && n.agentId !== currentId);
 
@@ -1838,11 +1869,113 @@ export function enhanceTimelineSentByButtons(
     }
   }
 
+  // Step 3: For peer messages delivered via `antigravity-ops peers send` (`From the ... session (Paseo agent <id>)`
+  // or `Reply route: antigravity-ops peers send <id>`) that lack a native `Sent by` button in `[data-testid="user-message-trailing-row"]`,
+  // inject a clickable `[Sent by <Colleague> ↗]` button so the recipient can jump directly to the sender from the message footer.
+  {
+    const tokens = syncPaseoThemeCssVariables(d as never, w as never);
+    const zh = isChineseLocale(w.navigator?.language);
+    const allUserMessages = Array.from(
+      d.querySelectorAll<HTMLElement>('[data-testid="user-message"], [data-testid^="user-message-"]'),
+    ).filter((el) => {
+      const tid = el.getAttribute("data-testid") ?? "";
+      return tid !== "user-message-trailing-row" && tid !== "user-message-timestamp";
+    });
+    const visibleUserMessages = allUserMessages.filter((el) => isElementInVisibleBranch(el, w));
+
+    for (const msgEl of visibleUserMessages) {
+      const msgText = msgEl.textContent ?? "";
+      const peerSendMatch =
+        msgText.match(/peers\s+send\s+([0-9a-f]{7,36})/i) ??
+        msgText.match(/Paseo\s+agent\s+([0-9a-f]{7,36})/i) ??
+        msgText.match(/^From\s+agent\s+([0-9a-f]{7,36})\b/i);
+      const senderTok = peerSendMatch?.[1]?.trim();
+      if (!senderTok) continue;
+
+      const senderNode =
+        resolveSessionReference(senderTok, currentId) ??
+        peerCandidates.find(
+          (c) =>
+            c.agentId.toLowerCase().startsWith(senderTok.toLowerCase()) ||
+            c.shortId.toLowerCase().startsWith(senderTok.toLowerCase()),
+        ) ??
+        null;
+      if (!senderNode || senderNode.agentId === currentId) continue;
+
+      const trailingRow =
+        msgEl.querySelector<HTMLElement>('[data-testid="user-message-trailing-row"]') ??
+        msgEl.parentElement?.querySelector<HTMLElement>('[data-testid="user-message-trailing-row"]');
+      if (!trailingRow) continue;
+
+      const hasExistingBtn = Array.from(trailingRow.querySelectorAll("button")).some((b) => {
+        const t = (b.textContent ?? "").trim();
+        return (
+          b.getAttribute("data-testid") === "paseo-finder-spawn-origin-btn" ||
+          b.getAttribute("data-testid") === `paseo-finder-peer-sender-btn-${senderNode.shortId}` ||
+          t.startsWith("Sent by ") ||
+          t.startsWith("发送自 ") ||
+          t.startsWith("Routed from ") ||
+          t.startsWith("派发自 ")
+        );
+      });
+      if (hasExistingBtn) continue;
+
+      const rawSenderTitle =
+        senderNode.workspaceTitle && !/^https?:\/\//i.test(senderNode.workspaceTitle.trim())
+          ? senderNode.workspaceTitle
+          : senderNode.agentTitle || senderNode.shortId;
+      const cleanSenderTitle = cleanSessionDisplayTitle(rawSenderTitle) || senderNode.shortId;
+      const shortSenderTitle =
+        cleanSenderTitle.length > 28 ? `${cleanSenderTitle.slice(0, 28)}\u2026` : cleanSenderTitle;
+
+      const peerBtn = d.createElement("button");
+      peerBtn.type = "button";
+      peerBtn.setAttribute("data-testid", `paseo-finder-peer-sender-btn-${senderNode.shortId}`);
+      peerBtn.title = zh
+        ? `点击跳转至发送方协作会话: ${cleanSenderTitle} (#${senderNode.shortId})`
+        : `Click to jump to sender session: ${cleanSenderTitle} (#${senderNode.shortId})`;
+      peerBtn.textContent = zh
+        ? `发送自 ${shortSenderTitle} ↗`
+        : `Sent by ${shortSenderTitle} ↗`;
+      Object.assign(peerBtn.style, {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "4px",
+        padding: "1px 6px",
+        marginRight: "6px",
+        borderRadius: "999px",
+        border: `1px solid ${tokens.border}`,
+        backgroundColor: tokens.surface1,
+        color: tokens.foregroundMuted,
+        fontSize: "11px",
+        fontWeight: "500",
+        cursor: "pointer",
+        lineHeight: "1.3",
+      });
+      peerBtn.addEventListener("pointerenter", () => {
+        peerBtn.style.backgroundColor = tokens.surface2;
+        peerBtn.style.color = tokens.foreground;
+      });
+      peerBtn.addEventListener("pointerleave", () => {
+        peerBtn.style.backgroundColor = tokens.surface1;
+        peerBtn.style.color = tokens.foregroundMuted;
+      });
+      peerBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        navigateToLineageNode(senderNode, d, w, data.current);
+      });
+      trailingRow.insertBefore(peerBtn, trailingRow.firstChild);
+      healedCount += 1;
+    }
+  }
+
   return healedCount;
 }
 
 let externalJumpToParentFn: (() => Promise<boolean>) | null = null;
 let externalReconcileTitlesFn: (() => Promise<LineageRpcResponse | null>) | null = null;
+let externalSyncLineageFn: ((force?: boolean) => void) | null = null;
 
 export async function triggerJumpToParentSession(): Promise<boolean> {
   if (!externalJumpToParentFn) return false;
@@ -2347,7 +2480,7 @@ export function installDesktopSessionLineageEnhancer(
       parentBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        navigateToLineageNode(parentNode, document, window);
+        navigateToLineageNode(parentNode, document, window, current);
       });
 
       leftGroup.appendChild(parentBtn);
@@ -2385,7 +2518,7 @@ export function installDesktopSessionLineageEnhancer(
       originBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        navigateToLineageNode(originNode, document, window);
+        navigateToLineageNode(originNode, document, window, current);
       });
 
       leftGroup.appendChild(originBtn);
@@ -2417,7 +2550,7 @@ export function installDesktopSessionLineageEnhancer(
         chip.addEventListener("click", (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
-          navigateToLineageNode(child, document, window);
+          navigateToLineageNode(child, document, window, current);
         });
         leftGroup.appendChild(chip);
       } else {
@@ -2454,46 +2587,49 @@ export function installDesktopSessionLineageEnhancer(
     }
 
     // 2.2 Collaborated / Peer-Exchanged Colleague Sessions (`⇄ 协作同伴`)
+    // Always surface the primary (most recent) colleague as a 1-click jump pill on the bar,
+    // and if there are additional colleagues, render a compact `+N Colleagues ▾` toggle beside it.
     if (colleagues.length > 0) {
-      if (colleagues.length === 1) {
-        const col = colleagues[0];
-        const colDisplay = displayLabelFor(col);
-        const colChip = document.createElement("button");
-        colChip.type = "button";
-        colChip.setAttribute(
-          "data-testid",
-          `paseo-finder-lineage-colleague-chip-${col.shortId}`,
-        );
-        const shortColTitle =
-          colDisplay.length > 28
-            ? `${colDisplay.slice(0, 28)}\u2026`
-            : colDisplay;
-        colChip.title = zh
-          ? `跨会话协作同伴 · 点击跳转: ${colDisplay} · #${col.shortId}`
-          : `Collaborating peer session · Click to jump: ${colDisplay} · #${col.shortId}`;
-        const textSpan = document.createElement("span");
-        textSpan.textContent = zh
-          ? `协作 · ${shortColTitle} ↗`
-          : `Colleague · ${shortColTitle} ↗`;
-        colChip.appendChild(createDot(col.status));
-        colChip.appendChild(textSpan);
-        styleTrackPill(colChip);
-        colChip.addEventListener("click", (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          navigateToLineageNode(col, document, window);
-        });
-        leftGroup.appendChild(colChip);
-      } else {
+      const col = colleagues[0];
+      const colDisplay = displayLabelFor(col);
+      const colChip = document.createElement("button");
+      colChip.type = "button";
+      colChip.setAttribute(
+        "data-testid",
+        `paseo-finder-lineage-colleague-chip-${col.shortId}`,
+      );
+      const shortColTitle =
+        colDisplay.length > 28
+          ? `${colDisplay.slice(0, 28)}\u2026`
+          : colDisplay;
+      colChip.title = zh
+        ? `跨会话协作同伴 · 点击跳转: ${colDisplay} · #${col.shortId}`
+        : `Collaborating peer session · Click to jump: ${colDisplay} · #${col.shortId}`;
+      const textSpan = document.createElement("span");
+      textSpan.textContent = zh
+        ? `协作 · ${shortColTitle} ↗`
+        : `Colleague · ${shortColTitle} ↗`;
+      colChip.appendChild(createDot(col.status));
+      colChip.appendChild(textSpan);
+      styleTrackPill(colChip);
+      colChip.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        navigateToLineageNode(col, document, window, current);
+      });
+      leftGroup.appendChild(colChip);
+
+      if (colleagues.length > 1) {
         const isColleaguesOpen = activePopoverSection === "colleagues";
         const anyColleagueRunning = colleagues.some((c) => c.status === "running");
+        const extraCount = colleagues.length - 1;
         const colleaguesToggleBtn = document.createElement("button");
         colleaguesToggleBtn.type = "button";
         colleaguesToggleBtn.setAttribute("data-testid", "paseo-finder-lineage-colleagues-toggle");
         const labelSpan = document.createElement("span");
         labelSpan.textContent = zh
-          ? `${colleagues.length} 个协作会话 ${isColleaguesOpen ? "▴" : "▾"}`
-          : `${colleagues.length} Colleagues ${isColleaguesOpen ? "▴" : "▾"}`;
+          ? `+${extraCount} 协作 ${isColleaguesOpen ? "▴" : "▾"}`
+          : `+${extraCount} ${extraCount === 1 ? "Colleague" : "Colleagues"} ${isColleaguesOpen ? "▴" : "▾"}`;
         colleaguesToggleBtn.appendChild(
           createDot(anyColleagueRunning ? "running" : "done"),
         );
@@ -2538,7 +2674,7 @@ export function installDesktopSessionLineageEnhancer(
         peerChip.addEventListener("click", (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
-          navigateToLineageNode(peer, document, window);
+          navigateToLineageNode(peer, document, window, current);
         });
         leftGroup.appendChild(peerChip);
       } else {
@@ -2740,7 +2876,7 @@ export function installDesktopSessionLineageEnhancer(
           ev.preventDefault();
           ev.stopPropagation();
           activePopoverSection = null;
-          navigateToLineageNode(itemNode, document, window);
+          navigateToLineageNode(itemNode, document, window, current);
         });
 
         listGrid.appendChild(itemBtn);
@@ -2765,7 +2901,11 @@ export function installDesktopSessionLineageEnhancer(
       activePopoverSection = null;
     }
 
-    const cached = cacheByKey.get(routeKey)?.data ?? null;
+    const cleanReqWs = (workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+    const cached =
+      cacheByKey.get(routeKey)?.data ??
+      (cleanReqWs && !agentId ? cacheByKey.get(`${cleanReqWs}:`)?.data : null) ??
+      null;
     if (cached) {
       renderLineageBar(cached);
     }
@@ -2774,12 +2914,27 @@ export function installDesktopSessionLineageEnhancer(
     initialReconcileDone = true;
 
     void fetchLineage(workspaceId, agentId, force || routeChanged, action).then((res) => {
+      if (!res) return;
       const nowActive = extractCurrentWorkspaceAndAgent(document, window);
-      if (`${nowActive.workspaceId ?? ""}:${nowActive.agentId ?? ""}` === routeKey) {
+      const nowRouteKey = `${nowActive.workspaceId ?? ""}:${nowActive.agentId ?? ""}`;
+      const cleanNowWs = (nowActive.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+      const resWs = (res.current?.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+      if (
+        nowRouteKey === routeKey ||
+        (cleanNowWs && (cleanNowWs === cleanReqWs || cleanNowWs === resWs)) ||
+        (nowActive.agentId && res.current?.agentId === nowActive.agentId)
+      ) {
+        if (res.current?.workspaceId && res.current?.agentId) {
+          cacheByKey.set(`${res.current.workspaceId}:${res.current.agentId}`, {
+            data: res,
+            fetchedAtMs: Date.now(),
+          });
+        }
         renderLineageBar(res);
       }
     });
   };
+  externalSyncLineageFn = syncLineageForCurrentRoute;
 
   const observer = new MutationObserver(() => {
     if (rafId !== null) return;
@@ -2839,6 +2994,7 @@ export function installDesktopSessionLineageEnhancer(
   return () => {
     externalJumpToParentFn = null;
     externalReconcileTitlesFn = null;
+    externalSyncLineageFn = null;
     observer.disconnect();
     if (pollId) clearInterval(pollId);
     if (rafId !== null) window.cancelAnimationFrame(rafId);
