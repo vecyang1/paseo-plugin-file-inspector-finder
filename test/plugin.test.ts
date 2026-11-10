@@ -102,7 +102,9 @@ import {
   revealWorkspaceInSidebar,
   clearSidebarJumpFlashes,
   computeDoneToggledTitle,
+  findSidebarRowTitleElement,
   isMarkDoneKeyboardEvent,
+  synchronizeWorkspaceTitleDom,
   toggleCurrentSessionDone,
   extractActiveWorkspaceHeaderProjectName,
   extractCommandCenterSelectionHint,
@@ -8389,6 +8391,150 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
   // Clean up cache
   resetScheduleRunsCacheForTesting();
 });
+
+test("58. Workspace Header & Sidebar Title Synchronization (Zero Timing Gap & Project Avatar Defense)", async () => {
+  // 1. Setup mock sidebar row representing Paseo v0.15.3 layout:
+  // - Leading visual: ProjectStatusIndicator with monogram initial "A" and testID="project-status-indicator-running"
+  // - Content column: workspaceTitleRow with text "Check Go Zen subscription status and reviews" and trailing buttons
+  // - Meta row: currentBranch "main", age "8h"
+  const rowNode = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_gozen_123",
+  });
+  const rowMain = createInteractiveDomNode("div");
+  const leadingProjectIcon = createInteractiveDomNode("div", {
+    "data-testid": "project-status-indicator-running",
+  });
+  const monogramInitial = createInteractiveDomNode("span", {}, "A");
+  leadingProjectIcon.appendChild?.(monogramInitial);
+
+  const contentCol = createInteractiveDomNode("div");
+  const titleRow = createInteractiveDomNode("div");
+  const titleTextEl = createInteractiveDomNode(
+    "span",
+    {},
+    "Check Go Zen subscription status and reviews",
+  );
+  const rowRight = createInteractiveDomNode("div");
+  const kebabBtn = createInteractiveDomNode("button", {
+    "data-testid": "sidebar-workspace-kebab-local:wks_gozen_123",
+    role: "button",
+  });
+  rowRight.appendChild?.(kebabBtn);
+  titleRow.appendChild?.(titleTextEl);
+  titleRow.appendChild?.(rowRight);
+
+  const metaRow = createInteractiveDomNode("div");
+  const branchText = createInteractiveDomNode("span", {}, "main");
+  const ageText = createInteractiveDomNode("span", {}, "8h");
+  metaRow.appendChild?.(branchText);
+  metaRow.appendChild?.(ageText);
+
+  contentCol.appendChild?.(titleRow);
+  contentCol.appendChild?.(metaRow);
+  rowMain.appendChild?.(leadingProjectIcon);
+  rowMain.appendChild?.(contentCol);
+  rowNode.appendChild?.(rowMain);
+
+  // 1a. Verify findSidebarRowTitleElement resolves titleTextEl, NOT monogram "A", NOT "8h", NOT kebab
+  const resolvedWithBareId = findSidebarRowTitleElement(rowNode, "wks_gozen_123");
+  assert.equal(
+    resolvedWithBareId,
+    titleTextEl,
+    "Must resolve the actual title element when passed bare workspace ID",
+  );
+  assert.equal(
+    resolvedWithBareId?.textContent,
+    "Check Go Zen subscription status and reviews",
+  );
+
+  const resolvedWithCompoundKey = findSidebarRowTitleElement(rowNode, "local:wks_gozen_123");
+  assert.equal(
+    resolvedWithCompoundKey,
+    titleTextEl,
+    "Must resolve the actual title element when passed compound workspace key",
+  );
+
+  // 2. Setup mock document with both header title and sidebar row
+  const headerTitleEl = createInteractiveDomNode(
+    "div",
+    { "data-testid": "workspace-header-title" },
+    "Check Go Zen subscription status and reviews",
+  );
+
+  const mockDoc: MinimalDocument = {
+    body: createInteractiveDomNode("body"),
+    querySelector: (sel: string) => {
+      if (sel.includes("workspace-header-title")) return headerTitleEl;
+      if (sel.includes("sidebar-workspace-row-") && sel.includes("wks_gozen_123")) return rowNode;
+      if (sel.includes("sidebar-workspace-row-") && sel.includes("aria-selected")) return rowNode;
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-")) return [rowNode];
+      return [];
+    },
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const storageMap = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => storageMap.get(k) ?? null,
+    setItem: (k: string, v: string) => storageMap.set(k, v),
+    removeItem: (k: string) => storageMap.delete(k),
+    clear: () => storageMap.clear(),
+    key: () => null,
+    length: 0,
+  };
+
+  const mockWin: MinimalWindow = {
+    document: mockDoc,
+    localStorage: mockStorage,
+    location: { pathname: "/workspace/wks_gozen_123" },
+    navigator: { language: "zh-CN" },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // 3. Test synchronizeWorkspaceTitleDom synchronously updates BOTH header and sidebar simultaneously
+  const syncResult = synchronizeWorkspaceTitleDom(
+    mockDoc,
+    mockWin,
+    "wks_gozen_123",
+    "d Check Go Zen subscription status and reviews",
+  );
+  assert.equal(syncResult.headerUpdated, true, "Header must be updated");
+  assert.equal(syncResult.sidebarUpdated, true, "Sidebar must be updated");
+  assert.equal(headerTitleEl.textContent, "d Check Go Zen subscription status and reviews");
+  assert.equal(titleTextEl.textContent, "d Check Go Zen subscription status and reviews");
+  assert.equal(monogramInitial.textContent, "A", "Project monogram 'A' must remain untouched!");
+
+  // 4. Test toggleCurrentSessionDone synchronously marks done and updates both surfaces
+  const toggleRes = await toggleCurrentSessionDone({
+    workspaceId: "wks_gozen_123",
+    doc: mockDoc,
+    win: mockWin,
+    prefix: "d ",
+  });
+  assert.ok(toggleRes);
+  assert.equal(toggleRes.ok, true);
+  // It was already marked with "d ", so toggling unmarks it back to clean title
+  assert.equal(toggleRes.action, "unmarked");
+  assert.equal(toggleRes.newTitle, "Check Go Zen subscription status and reviews");
+  assert.equal(
+    headerTitleEl.textContent,
+    "Check Go Zen subscription status and reviews",
+    "Header must be unmarked synchronously",
+  );
+  assert.equal(
+    titleTextEl.textContent,
+    "Check Go Zen subscription status and reviews",
+    "Sidebar must be unmarked synchronously",
+  );
+  assert.equal(monogramInitial.textContent, "A", "Project monogram must never be overwritten");
+});
+
 
 
 

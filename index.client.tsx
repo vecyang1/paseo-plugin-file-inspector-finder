@@ -40,6 +40,7 @@ import {
   resolveCurrentActiveWorkspaceId,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
+  synchronizeWorkspaceTitleDom,
   toggleCurrentSessionDone,
   triggerQuickThreadMetadataBar,
 } from "./client/web";
@@ -200,6 +201,14 @@ export default function contribute(client: PluginClientContext) {
               target,
               async (nextTitle, meta) => {
                 const targetWsId = meta?.workspaceId ?? workspace.id;
+                if (nextTitle) {
+                  synchronizeWorkspaceTitleDom(
+                    g.document as Parameters<typeof synchronizeWorkspaceTitleDom>[0],
+                    g.window as Parameters<typeof synchronizeWorkspaceTitleDom>[1],
+                    targetWsId,
+                    nextTitle,
+                  );
+                }
                 if (targetWsId && !meta?.agentId) {
                   try {
                     await client.paseo.workspaces.ref(targetWsId).setTitle(nextTitle);
@@ -241,6 +250,9 @@ export default function contribute(client: PluginClientContext) {
           callbacks: {
             onRenameThread: async (newTitle, options) => {
               const targetWsId = options?.workspaceId ?? workspace.id;
+              if (newTitle) {
+                synchronizeWorkspaceTitleDom(doc, win, targetWsId, newTitle);
+              }
               try {
                 await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
               } catch {
@@ -1002,6 +1014,9 @@ export default function contribute(client: PluginClientContext) {
             callbacks: {
               onRenameThread: async (newTitle, options) => {
                 const targetWsId = options?.workspaceId ?? workspace.id;
+                if (newTitle) {
+                  synchronizeWorkspaceTitleDom(doc, win, targetWsId, newTitle);
+                }
                 try {
                   await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
                 } catch {
@@ -1476,6 +1491,13 @@ export default function contribute(client: PluginClientContext) {
       },
     ) => {
       const targetWsId = options?.workspaceId ?? lastKnownWorkspaceId;
+      if (newTitle) {
+        const win = getWebWindow();
+        const doc = win?.document ?? null;
+        if (doc) {
+          synchronizeWorkspaceTitleDom(doc, win, targetWsId, newTitle);
+        }
+      }
       if (targetWsId && !options?.agentId) {
         try {
           await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);

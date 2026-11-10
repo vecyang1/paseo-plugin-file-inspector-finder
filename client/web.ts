@@ -766,35 +766,54 @@ export interface InlineRenameTarget {
   initialTitle: string;
 }
 
+const SIDEBAR_ROW_RELATIVE_TIME_REGEX =
+  /^(?:just now|\d+\s*(?:s|m|h|d|w|mo|y)|yesterday|today)$/i;
+
+function isSkippedRowElement(el: MinimalElement): boolean {
+  const tag = (el.tagName ?? "").toUpperCase();
+  if (tag === "SVG" || tag === "PATH" || tag === "IMG" || tag === "INPUT") {
+    return true;
+  }
+  const tid = el.getAttribute?.("data-testid") ?? "";
+  if (
+    tid.startsWith("workspace-tab-modified-") ||
+    tid.startsWith("workspace-tab-close-") ||
+    tid.startsWith("workspace-status-indicator-") ||
+    tid.startsWith("sidebar-row-project-icon-") ||
+    tid.startsWith("project-status-indicator-") ||
+    tid === "project-icon-only" ||
+    tid.includes("status-indicator") ||
+    tid.includes("project-icon") ||
+    tid.includes("status-badge") ||
+    tid.includes("status-ring") ||
+    tid.startsWith("sidebar-workspace-kebab-") ||
+    tid.startsWith("sidebar-workspace-archive-") ||
+    tid === "sidebar-workspace-trailing-scrim" ||
+    tid.startsWith("sidebar-workspace-cadence-badge-") ||
+    tid.startsWith("workspace-header-cadence-badge-") ||
+    tid.startsWith("sidebar-workspace-shortcut-badge")
+  ) {
+    return true;
+  }
+  if (el.getAttribute?.("pointer-events") === "none") {
+    return true;
+  }
+  const role = el.getAttribute?.("role") ?? "";
+  if (role === "menuitem" || role === "button") {
+    return true;
+  }
+  return false;
+}
+
 function findFirstTextLeafElement(root: MinimalElement): MinimalElement | null {
+  if (isSkippedRowElement(root)) return null;
   const children = root.children;
   if (!children || children.length === 0) {
     return (root.textContent ?? "").trim().length > 0 ? root : null;
   }
   for (let i = 0; i < children.length; i += 1) {
     const child = children[i];
-    if (!child) continue;
-    const tag = (child.tagName ?? "").toUpperCase();
-    if (tag === "SVG" || tag === "PATH" || tag === "IMG" || tag === "INPUT") {
-      continue;
-    }
-    const tid = child.getAttribute?.("data-testid") ?? "";
-    if (
-      tid.startsWith("workspace-tab-modified-") ||
-      tid.startsWith("workspace-tab-close-") ||
-      tid.startsWith("workspace-status-indicator-") ||
-      tid.startsWith("sidebar-row-project-icon-") ||
-      tid.startsWith("sidebar-workspace-kebab-") ||
-      tid.startsWith("sidebar-workspace-archive-") ||
-      tid === "sidebar-workspace-trailing-scrim" ||
-      tid.startsWith("sidebar-workspace-cadence-badge-") ||
-      tid.startsWith("workspace-header-cadence-badge-")
-    ) {
-      continue;
-    }
-    if (child.getAttribute?.("pointer-events") === "none") {
-      continue;
-    }
+    if (!child || isSkippedRowElement(child)) continue;
     const subChildren = child.children;
     if ((!subChildren || subChildren.length === 0) && (child.textContent ?? "").trim().length > 0) {
       return child;
@@ -805,17 +824,134 @@ function findFirstTextLeafElement(root: MinimalElement): MinimalElement | null {
   return null;
 }
 
+function collectRowCandidateTextLeaves(
+  root: MinimalElement,
+  leaves: MinimalElement[] = [],
+): MinimalElement[] {
+  if (isSkippedRowElement(root)) return leaves;
+  const children = root.children;
+  if (!children || children.length === 0) {
+    const txt = (root.textContent ?? "").trim();
+    if (txt.length > 0) {
+      leaves.push(root);
+    }
+    return leaves;
+  }
+  for (let i = 0; i < children.length; i += 1) {
+    const child = children[i];
+    if (child) {
+      collectRowCandidateTextLeaves(child, leaves);
+    }
+  }
+  return leaves;
+}
+
 export function findSidebarRowTitleElement(
   rowEl: MinimalElement,
   workspaceKey: string,
 ): MinimalElement | null {
+  const rowTid = rowEl.getAttribute?.("data-testid") ?? "";
+  const parsed = parseSidebarWorkspaceRowTestId(rowTid);
+  const fullKey = parsed?.workspaceKey ?? workspaceKey;
+  const cleanWsId = (parsed?.workspaceId ?? workspaceKey).replace(/^(?:local|srv_[^:]+):/, "").trim();
+
+  // 1. Precise explicit data-testid lookup matching all permutations of compound and bare keys
   const explicit =
-    rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${workspaceKey}"]`) ??
+    (fullKey ? rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${fullKey}"]`) : null) ??
+    (workspaceKey && workspaceKey !== fullKey
+      ? rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${workspaceKey}"]`)
+      : null) ??
+    (cleanWsId
+      ? rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-local:${cleanWsId}"]`)
+      : null) ??
+    (cleanWsId
+      ? rowEl.querySelector?.(`[data-testid="sidebar-workspace-title-${cleanWsId}"]`)
+      : null) ??
+    (cleanWsId
+      ? rowEl.querySelector?.(`[data-testid$=":${cleanWsId}"]`)
+      : null) ??
     rowEl.querySelector?.('[data-testid^="sidebar-workspace-title-"]');
+
   if (explicit) {
     return explicit;
   }
-  return findFirstTextLeafElement(rowEl);
+
+  // 2. Structural leaf search: collect candidate text leaves, filtering out project icons, status dots, and timestamps
+  const leaves = collectRowCandidateTextLeaves(rowEl);
+  if (leaves.length === 0) {
+    return null;
+  }
+
+  const titleCandidates = leaves.filter((leaf) => {
+    const txt = (leaf.textContent ?? "").trim();
+    if (!txt) return false;
+    if (SIDEBAR_ROW_RELATIVE_TIME_REGEX.test(txt)) return false;
+    return true;
+  });
+
+  if (titleCandidates.length === 0) {
+    return leaves[0] ?? null;
+  }
+
+  // If the first leaf is a 1-2 character initial/monogram (e.g. "A" or "2") and a longer text leaf exists, pick the real title
+  if (titleCandidates.length > 1) {
+    const firstTxt = (titleCandidates[0]?.textContent ?? "").trim();
+    if (firstTxt.length <= 2 && (titleCandidates[1]?.textContent ?? "").trim().length > 2) {
+      return titleCandidates[1];
+    }
+  }
+
+  return titleCandidates[0] ?? null;
+}
+
+export interface SynchronizeWorkspaceTitleResult {
+  headerUpdated: boolean;
+  sidebarUpdated: boolean;
+  headerTitleEl: MinimalElement | null;
+  sidebarTitleEl: MinimalElement | null;
+}
+
+export function synchronizeWorkspaceTitleDom(
+  doc: MinimalDocument | null | undefined,
+  win: MinimalWindow | null | undefined,
+  workspaceId: string | undefined | null,
+  newTitle: string,
+): SynchronizeWorkspaceTitleResult {
+  const result: SynchronizeWorkspaceTitleResult = {
+    headerUpdated: false,
+    sidebarUpdated: false,
+    headerTitleEl: null,
+    sidebarTitleEl: null,
+  };
+  if (!doc) return result;
+
+  const cleanWsId = (workspaceId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
+  const activeWsId = (resolveCurrentActiveWorkspaceId(doc, win) ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
+
+  // 1. Update top workspace header title if this workspace is active
+  if (!cleanWsId || cleanWsId === activeWsId) {
+    const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
+    if (headerTitleEl) {
+      headerTitleEl.textContent = newTitle;
+      result.headerUpdated = true;
+      result.headerTitleEl = headerTitleEl;
+    }
+  }
+
+  // 2. Update left sidebar workspace row title
+  const row = findSidebarWorkspaceRow(doc, cleanWsId);
+  if (row) {
+    const rowTid = row.getAttribute?.("data-testid") ?? "";
+    const parsed = parseSidebarWorkspaceRowTestId(rowTid);
+    const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? cleanWsId);
+    if (sbTitleEl) {
+      sbTitleEl.textContent = newTitle;
+      result.sidebarUpdated = true;
+      result.sidebarTitleEl = sbTitleEl;
+    }
+  }
+
+  return result;
 }
 
 export function resolveInlineRenameTarget(
@@ -1203,6 +1339,15 @@ export function mountInlineTitleInput(
     }
     if (normalizedNext) {
       target.titleEl.textContent = normalizedNext;
+      // Synchronize counterpart surface (header <-> sidebar) immediately with zero delay
+      if (target.workspaceId) {
+        synchronizeWorkspaceTitleDom(doc, win, target.workspaceId, normalizedNext);
+      } else {
+        const activeWs = resolveCurrentActiveWorkspaceId(doc, win);
+        if (activeWs) {
+          synchronizeWorkspaceTitleDom(doc, win, activeWs, normalizedNext);
+        }
+      }
     }
 
     try {
@@ -3388,8 +3533,11 @@ export async function toggleCurrentSessionDone(
   }
 
   const sidebarRow = effectiveWsId ? findSidebarWorkspaceRow(doc, effectiveWsId) : null;
+  const sidebarRowTid = sidebarRow?.getAttribute?.("data-testid") ?? "";
+  const sidebarParsed = parseSidebarWorkspaceRowTestId(sidebarRowTid);
+  const rowWorkspaceKey = sidebarParsed?.workspaceKey ?? effectiveWsId;
   const sidebarTitleEl = sidebarRow
-    ? findSidebarRowTitleElement(sidebarRow, effectiveWsId)
+    ? findSidebarRowTitleElement(sidebarRow, rowWorkspaceKey)
     : null;
   const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]') ?? null;
 
@@ -3418,14 +3566,15 @@ export async function toggleCurrentSessionDone(
   const prefix = options?.prefix ?? "d ";
   const { newTitle, action } = computeDoneToggledTitle(currentTitle, prefix);
 
-  // Immediate optimistic DOM updates
+  // Immediate optimistic DOM updates — synchronized across BOTH header and sidebar simultaneously
+  synchronizeWorkspaceTitleDom(doc, win, effectiveWsId, newTitle);
   if (f2Target?.titleEl) {
     f2Target.titleEl.textContent = newTitle;
   }
-  if (sidebarTitleEl && sidebarTitleEl !== f2Target?.titleEl) {
+  if (sidebarTitleEl && sidebarTitleEl.textContent !== newTitle) {
     sidebarTitleEl.textContent = newTitle;
   }
-  if (headerTitleEl && headerTitleEl !== f2Target?.titleEl) {
+  if (headerTitleEl && headerTitleEl.textContent !== newTitle) {
     headerTitleEl.textContent = newTitle;
   }
 
@@ -6409,6 +6558,28 @@ export function installDesktopRevealHelpers(
       lastObservedRoutePath = currentPath;
     }
     checkActiveWorkspaceRouteSync();
+
+    // Reconcile and synchronize active header title and sidebar title without delay
+    if (!activeInlineSession) {
+      const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, callbacks.getFallbackWorkspaceId?.());
+      if (activeWsId) {
+        const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
+        const headerTitle = (headerTitleEl?.textContent ?? "").trim();
+        if (headerTitle) {
+          const row = findSidebarWorkspaceRow(doc, activeWsId);
+          if (row) {
+            const rowTid = row.getAttribute?.("data-testid") ?? "";
+            const parsed = parseSidebarWorkspaceRowTestId(rowTid);
+            const sbTitleEl = findSidebarRowTitleElement(row, parsed?.workspaceKey ?? activeWsId);
+            const sbTitle = (sbTitleEl?.textContent ?? "").trim();
+            if (sbTitleEl && sbTitle && headerTitle !== sbTitle) {
+              sbTitleEl.textContent = headerTitle;
+            }
+          }
+        }
+      }
+    }
+
     const renamePrefs = readInlineRenamePreferences(win.localStorage);
     const count =
       injectIntoNativeTabMenus(doc, callbacks, lastRightClickedTabPath, win) +
