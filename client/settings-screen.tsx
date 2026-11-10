@@ -79,6 +79,15 @@ import {
   syncSidebarDefaultCollapsePrefs,
 } from "./sidebar-default-collapse-web";
 import {
+  SIDEBAR_CHILD_SESSIONS_EVENT,
+  type SidebarChildSessionsCheck,
+  type SidebarChildSessionsStatus,
+  describeSkipReason,
+  getSidebarChildSessionsStatus,
+  runSidebarChildSessionsSelfTest,
+  syncSidebarChildSessionsPrefs,
+} from "./sidebar-child-sessions-web";
+import {
   SETTINGS_SEARCH_EVENT,
   type SettingsSearchStatus,
   getSettingsSearchStatus,
@@ -199,6 +208,15 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     const onReceipt = () => setModelSwitchStatus(getModelQuickSwitchStatus());
     window.addEventListener(MODEL_QUICK_SWITCH_EVENT, onReceipt);
     return () => window.removeEventListener(MODEL_QUICK_SWITCH_EVENT, onReceipt);
+  }, []);
+  const [sidebarChildStatus, setSidebarChildStatus] = useState<SidebarChildSessionsStatus | null>(null);
+  const [sidebarChildChecks, setSidebarChildChecks] = useState<SidebarChildSessionsCheck[] | null>(null);
+  useEffect(() => {
+    setSidebarChildStatus(getSidebarChildSessionsStatus());
+    if (typeof window === "undefined") return;
+    const onChange = () => setSidebarChildStatus(getSidebarChildSessionsStatus());
+    window.addEventListener(SIDEBAR_CHILD_SESSIONS_EVENT, onChange);
+    return () => window.removeEventListener(SIDEBAR_CHILD_SESSIONS_EVENT, onChange);
   }, []);
   const [sidebarCollapseStatus, setSidebarCollapseStatus] =
     useState<SidebarDefaultCollapseStatus | null>(null);
@@ -1993,6 +2011,76 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             ))
           ) : (
             <Text style={styles.detail}>{t("settings.sidebarCollapseNoReceipts")}</Text>
+          )}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionSidebarChildSessions")}>
+        <SettingsSwitch
+          label={t("settings.sidebarChildEnabledLabel")}
+          hint={t("settings.sidebarChildEnabledHint")}
+          value={sidebarChildStatus?.prefs.enabled ?? true}
+          onValueChange={(next) => {
+            syncSidebarChildSessionsPrefs({ enabled: next });
+            setSidebarChildStatus(getSidebarChildSessionsStatus());
+            setSidebarChildChecks(null);
+          }}
+        />
+        <SettingsSwitch
+          label={t("settings.sidebarChildTabsLabel")}
+          hint={t("settings.sidebarChildTabsHint")}
+          value={sidebarChildStatus?.prefs.tabChildren ?? true}
+          onValueChange={(next) => {
+            syncSidebarChildSessionsPrefs({ tabChildren: next });
+            setSidebarChildStatus(getSidebarChildSessionsStatus());
+            setSidebarChildChecks(null);
+          }}
+        />
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {t("settings.sidebarChildStatusPrefix")}{" "}
+            {sidebarChildStatus
+              ? `${sidebarChildStatus.prefs.enabled ? "on" : "off"} · store=${sidebarChildStatus.storeFound ? "found" : "missing"} · nested workspaces=${sidebarChildStatus.nested.length} · tab sub-sessions=${sidebarChildStatus.tabRows.reduce((n, r) => n + r.count, 0)} · kept at top=${sidebarChildStatus.skipped.length} · render ${sidebarChildStatus.renderMs} ms`
+              : "-"}
+          </Text>
+          <View style={styles.row}>
+            <Pressable
+              style={styles.btn}
+              onPress={() => {
+                setSidebarChildChecks(runSidebarChildSessionsSelfTest());
+                setSidebarChildStatus(getSidebarChildSessionsStatus());
+              }}
+            >
+              <Text style={styles.btnText}>{t("settings.sidebarChildSelfTestBtn")}</Text>
+            </Pressable>
+          </View>
+          {sidebarChildChecks
+            ? sidebarChildChecks.map((c) => (
+                <Text key={`check-${c.name}`} style={styles.detail}>
+                  • {c.ok ? "✓" : "✕"} {c.name}: {c.detail}
+                </Text>
+              ))
+            : null}
+          <Text style={styles.detail}>{t("settings.sidebarChildNestedTitle")}</Text>
+          {sidebarChildStatus && sidebarChildStatus.nested.length > 0 ? (
+            sidebarChildStatus.nested.slice(0, 12).map((n) => (
+              <Text key={`nested-${n.workspaceId}`} style={styles.detail}>
+                • {n.title} ← {n.parentTitle}
+                {n.onScreen ? "" : " (not on screen)"}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settings.sidebarChildNone")}</Text>
+          )}
+          <Text style={styles.detail}>{t("settings.sidebarChildSkippedTitle")}</Text>
+          {sidebarChildStatus && sidebarChildStatus.skipped.length > 0 ? (
+            sidebarChildStatus.skipped.slice(0, 12).map((s) => (
+              <Text key={`skip-${s.agentId}`} style={styles.detail}>
+                • {s.title} #{s.agentId.slice(0, 8)}: {describeSkipReason(s.reason, isZh)}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settings.sidebarChildNone")}</Text>
           )}
         </View>
       </SettingsSection>

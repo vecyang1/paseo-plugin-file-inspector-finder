@@ -53,6 +53,7 @@ import {
 } from "./client/schedule-runs-web";
 import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
 import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
+import { installSidebarChildSessions } from "./client/sidebar-child-sessions-web";
 import { installSettingsSearch, openSettingsSearch } from "./client/settings-search-web";
 import {
   copyCurrentSelectionOrMessageWithMode,
@@ -1571,6 +1572,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupSidebarDefaultCollapse = installSidebarDefaultCollapse();
 
+  const cleanupSidebarChildSessions = installSidebarChildSessions();
+
   const cleanupSettingsSearch = installSettingsSearch({ getLocale: () => client.i18n.locale });
 
   const cleanupSmartClipboardCopy = installSmartClipboardCopy();
@@ -1600,6 +1603,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupVoiceSttEnhancer();
     cleanupModelQuickSwitch();
     cleanupSidebarDefaultCollapse();
+    cleanupSidebarChildSessions();
     cleanupSettingsSearch();
     cleanupSmartClipboardCopy();
     cleanupMarkdownTableEnhancer();

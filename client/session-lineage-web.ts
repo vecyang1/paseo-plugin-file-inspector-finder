@@ -166,7 +166,7 @@ let cachedLiveMetroMap: Map<
   { isInitialized?: boolean; publicModule?: { exports?: Record<string, any> } }
 > | null = null;
 
-function getMetroModuleList(
+export function getMetroModuleList(
   win?: Window | null,
 ): Array<{ isInitialized?: boolean; publicModule?: { exports?: Record<string, any> } }> {
   const w = (win ?? (typeof window !== "undefined" ? window : null)) as

@@ -309,6 +309,18 @@ export const enMessages = {
     sidebarCollapseTidyBtn: "Collapse empty projects now",
     sidebarCollapseReceiptsTitle: "Recent receipts",
     sidebarCollapseNoReceipts: "No receipts yet. One is written when a new project shows up in the sidebar.",
+    sectionSidebarChildSessions: "Sub-sessions in the sidebar",
+    sidebarChildEnabledLabel: "List sub-sessions under the session that started them",
+    sidebarChildEnabledHint:
+      "A session started by another session (an agent's create_agent or paseo run) moves under its parent's row, like Claude's desktop app. If the parent is archived it goes back to the top level. Keyboard order and drag-and-drop follow Paseo's own order.",
+    sidebarChildTabsLabel: "Also list sub-sessions that run as tabs",
+    sidebarChildTabsHint:
+      "A sub-session in its parent's workspace is otherwise only a tab. With this on it gets a row under the workspace; click it to open the tab.",
+    sidebarChildStatusPrefix: "Sub-sessions:",
+    sidebarChildSelfTestBtn: "Check placement",
+    sidebarChildNestedTitle: "Nested workspaces",
+    sidebarChildSkippedTitle: "Started by a session but kept at the top level",
+    sidebarChildNone: "None right now.",
     sectionModelQuickSwitch: "Model quick switch",
     modelQuickSwitchLabel: "Change model with ⌘/ and 1–9",
     modelQuickSwitchHint:
@@ -667,6 +679,17 @@ export const zhMessages: PluginMessageCatalog = {
     sidebarCollapseTidyBtn: "立即折叠空项目",
     sidebarCollapseReceiptsTitle: "最近回执",
     sidebarCollapseNoReceipts: "暂无回执。侧边栏出现新项目时会在这里记录。",
+    sectionSidebarChildSessions: "侧边栏子会话",
+    sidebarChildEnabledLabel: "把子会话列在发起它的会话下面",
+    sidebarChildEnabledHint:
+      "由另一个会话发起的会话（agent 调用 create_agent 或 paseo run）会移到父会话那一行下面，和 Claude 桌面版一样。父会话归档后，它回到顶层。键盘顺序和拖动排序仍按 Paseo 自己的顺序。",
+    sidebarChildTabsLabel: "也列出以标签页运行的子会话",
+    sidebarChildTabsHint: "和父会话在同一工作区的子会话原本只是一个标签页。打开后它在工作区下面有一行，点击即打开该标签页。",
+    sidebarChildStatusPrefix: "子会话：",
+    sidebarChildSelfTestBtn: "检查位置",
+    sidebarChildNestedTitle: "已嵌套的工作区",
+    sidebarChildSkippedTitle: "由会话发起但留在顶层",
+    sidebarChildNone: "目前没有。",
     sectionModelQuickSwitch: "快速切换模型",
     modelQuickSwitchLabel: "用 ⌘/ 和 1–9 切换模型",
     modelQuickSwitchHint:
