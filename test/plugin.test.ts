@@ -7390,7 +7390,7 @@ test("55. Colleague pill bidirectional jump-back, cross-workspace stale-agentId 
       sel.includes("workspace-tab-agent_") ? [staleTabEl] : [],
   } as unknown as Document;
   const transitionWin = {
-    location: { pathname: `/h/srv_TS6CdHdSs5mI/workspace/${colleagueSession.workspaceId}` },
+    location: { pathname: `/h/srv_mock_daemon_server/workspace/${colleagueSession.workspaceId}` },
   } as unknown as Window;
 
   const extractedDuringTransition = extractCurrentWorkspaceAndAgent(transitionDoc, transitionWin);
@@ -7405,7 +7405,7 @@ test("55. Colleague pill bidirectional jump-back, cross-workspace stale-agentId 
   const storageMap = new Map<string, string>();
   const navWin = {
     navigator: { language: "en-US" },
-    location: { pathname: `/h/srv_TS6CdHdSs5mI/workspace/srv_TS6CdHdSs5mI:${originSession.workspaceId}` },
+    location: { pathname: `/h/srv_mock_daemon_server/workspace/srv_mock_daemon_server:${originSession.workspaceId}` },
     sessionStorage: {
       getItem: (k: string) => storageMap.get(k) ?? null,
       setItem: (k: string, v: string) => storageMap.set(k, v),
@@ -7420,7 +7420,7 @@ test("55. Colleague pill bidirectional jump-back, cross-workspace stale-agentId 
   navigateToLineageNode(colleagueSession, navDoc, navWin, originSession);
 
   const crumbOnColleague = getReturnBreadcrumbForSession(
-    `srv_TS6CdHdSs5mI:${colleagueSession.workspaceId}`,
+    `srv_mock_daemon_server:${colleagueSession.workspaceId}`,
     colleagueSession.agentId,
     navWin,
   );
@@ -7729,6 +7729,46 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
   assert.equal(resolvedFromStore.id, "0180dc31");
   assert.equal(resolvedFromStore.lastRunStatus, "running");
 
+  // 3b. Real-time lookup via Paseo production Metro Map (__c Map / getMetroModuleMap)
+  const metroModuleRegistry = new Map<number, any>();
+  metroModuleRegistry.set(101, {
+    isInitialized: true,
+    publicModule: {
+      exports: {
+        useSessionStore: {
+          getState: () => ({
+            sessions: {
+              sess_2: {
+                agents: [
+                  {
+                    workspaceId: "srv_cloud:wks_metro_prod_live",
+                    status: "running",
+                    turn: { phase: "open" },
+                    labels: {
+                      "paseo.schedule-id": "0180dc31",
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+        },
+      },
+    },
+  });
+  const mockWinMetro = {
+    __c: metroModuleRegistry,
+  } as unknown as Window;
+
+  const resolvedFromMetro = findCadenceScheduleForWorkspace(
+    "srv_cloud:wks_metro_prod_live",
+    "Any Title",
+    mockWinMetro,
+  );
+  assert.ok(resolvedFromMetro, "Must resolve schedule from production getMetroModuleMap");
+  assert.equal(resolvedFromMetro.id, "0180dc31");
+  assert.equal(resolvedFromMetro.lastRunStatus, "running");
+
   // 4. Header title badge DOM mounting & interaction
   type CadenceTestNode = {
     id?: string;
@@ -7914,6 +7954,52 @@ test("57. Cadence Workspace Timer Badge & Header Resolution: title normalization
     "0180dc31",
     "Alt+Click on header badge must trigger onRunNow for schedule 0180dc31",
   );
+
+  // 5. Sidebar workspace row under Working status group dynamically sets isRunning to true
+  const workingGroupContainer = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-status-group-rows-working",
+  });
+  const sidebarRowEl = makeScheduleTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_working_sentinel",
+  });
+  const rowTitleEl = makeScheduleTestNode("span", {
+    "data-testid": "sidebar-workspace-title-local:wks_working_sentinel",
+  });
+  rowTitleEl.textContent = "Run Mac speed sentinel scheduled check";
+  sidebarRowEl.appendChild(rowTitleEl);
+  workingGroupContainer.appendChild(sidebarRowEl);
+
+  // Even when static schedule snapshot says succeeded with 0 running runs:
+  testMap.get("0180dc31")!.lastRunStatus = "succeeded";
+  testMap.get("0180dc31")!.runningRuns = 0;
+
+  const mockSidebarDoc = {
+    body: makeScheduleTestNode("body"),
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid^="sidebar-workspace-row-"]') return [sidebarRowEl];
+      return [];
+    },
+    getElementById: () => null,
+    createElement: (tag: string) => makeScheduleTestNode(tag),
+  };
+
+  decorateSchedulesDomOnDocument(
+    mockSidebarDoc as unknown as MinimalScheduleDomDocument,
+    {
+      schedulesById: testMap,
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 1 },
+      isZh: true,
+      onOpenDrawer: () => {},
+    },
+  );
+
+  const sidebarBadge = sidebarRowEl.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_working_sentinel"]',
+  );
+  assert.ok(sidebarBadge, "Sidebar workspace row under working status group must mount cadence badge");
+  assert.equal(sidebarBadge.getAttribute("data-running"), "true", "Badge must have data-running='true' when in working group");
+  assert.ok(sidebarBadge.getAttribute("title")?.includes("运行中"));
 
   // Clean up cache
   resetScheduleRunsCacheForTesting();

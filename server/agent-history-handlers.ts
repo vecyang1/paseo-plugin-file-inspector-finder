@@ -1289,7 +1289,10 @@ async function canSmartSkipSubagentCli(input: RpcInput<typeof manageSubagentsRpc
       }
     }
   }
-  if (candidates.length === 0) return false;
+  if (candidates.length === 0) {
+    if (reqWs && !reqAgent) return true;
+    return false;
+  }
   for (const cand of candidates) {
     if (!cand.conversationId) continue;
     if (await hasTranscriptSubagentOrTimerActivity(cand.conversationId)) {

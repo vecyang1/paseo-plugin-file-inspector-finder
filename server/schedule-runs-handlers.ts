@@ -388,6 +388,63 @@ async function resolveProjectLastActiveByKey(
   return out;
 }
 
+async function scanActiveScheduleAgents(
+  paseoDir: string,
+): Promise<Array<{ scheduleId: string; agentId: string; workspaceId: string; createdAt?: string }>> {
+  const agentsRoot = path.join(paseoDir, "agents");
+  const out: Array<{ scheduleId: string; agentId: string; workspaceId: string; createdAt?: string }> = [];
+  try {
+    const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
+    const cutoff = Date.now() - 4 * 3600 * 1000; // last 4 hours
+    for (const b of buckets) {
+      if (!b.isDirectory()) continue;
+      const bPath = path.join(agentsRoot, b.name);
+      let files: string[] = [];
+      try {
+        files = await fs.readdir(bPath);
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        const fp = path.join(bPath, f);
+        try {
+          const st = await fs.stat(fp);
+          if (st.mtimeMs < cutoff) continue;
+          const content = await fs.readFile(fp, "utf8");
+          const rec = JSON.parse(content) as {
+            id?: string;
+            workspaceId?: string;
+            labels?: Record<string, string>;
+            archivedAt?: string | null;
+            lastStatus?: string;
+            createdAt?: string;
+          };
+          const schedId = rec.labels?.["paseo.schedule-id"];
+          if (
+            schedId &&
+            rec.workspaceId &&
+            !rec.archivedAt &&
+            (rec.lastStatus === "running" || rec.lastStatus === "busy" || rec.lastStatus === "open" || !rec.lastStatus)
+          ) {
+            out.push({
+              scheduleId: schedId,
+              agentId: rec.id ?? f.replace(/\.json$/, ""),
+              workspaceId: rec.workspaceId,
+              createdAt: rec.createdAt,
+            });
+          }
+        } catch {
+          // ignore stat / read error
+        }
+      }
+    }
+  } catch {
+    // ignore missing agents dir
+  }
+  return out;
+}
+
 export async function handleInspectScheduleRuns(
   input: RpcInput<typeof inspectScheduleRunsRpc>,
   context: PluginHandlerContext,
@@ -653,14 +710,61 @@ export async function handleInspectScheduleRuns(
     summaries,
   );
 
+  const paseoDir = path.dirname(schedulesDir);
+  const activeAgents = await scanActiveScheduleAgents(paseoDir);
+
   const workspaceScheduleMap: Record<
     string,
     { scheduleId: string; scheduleName: string; isRunning: boolean; runStatus: string }
   > = {};
+
+  for (const active of activeAgents) {
+    const s = summaries.find((x) => x.id === active.scheduleId);
+    if (s) {
+      s.runningRuns = Math.max(1, (s.runningRuns ?? 0) + 1);
+      s.lastRunStatus = "running";
+      runningRuns += 1;
+      const cleanWid = active.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim();
+      if (cleanWid) {
+        workspaceScheduleMap[cleanWid] = {
+          scheduleId: s.id,
+          scheduleName: s.name,
+          isRunning: true,
+          runStatus: "running",
+        };
+      }
+      const hasExistingRun = (s.runs ?? []).some(
+        (r) => r.agentId === active.agentId || (cleanWid && r.workspaceId?.includes(cleanWid)),
+      );
+      if (!hasExistingRun) {
+        const inFlightRun: ScheduleRunEntry = {
+          id: `in-flight-${active.agentId}`,
+          scheduleId: s.id,
+          scheduleName: s.name,
+          status: "running",
+          scheduledFor: active.createdAt ?? new Date().toISOString(),
+          startedAt: active.createdAt ?? new Date().toISOString(),
+          endedAt: null,
+          durationMs: null,
+          durationFormatted: "running…",
+          agentId: active.agentId,
+          workspaceId: active.workspaceId,
+          workspaceName: activeWorkspacesMap.get(active.workspaceId) ?? null,
+          isArchived: false,
+          output: "",
+          outputPreview: "Running…",
+          error: null,
+        };
+        s.runs = [inFlightRun, ...(s.runs ?? [])];
+        allRecentRuns.unshift(inFlightRun);
+      }
+    }
+  }
+
   for (const s of summaries) {
     for (const r of s.runs ?? []) {
       if (r.workspaceId) {
-        const cleanWid = r.workspaceId.replace(/^local:/, "").trim();
+        const cleanWid = r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim();
         if (cleanWid && !workspaceScheduleMap[cleanWid]) {
           workspaceScheduleMap[cleanWid] = {
             scheduleId: s.id,
