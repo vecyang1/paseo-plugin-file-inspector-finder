@@ -9,12 +9,14 @@ import type {
   FlatSubagentNode,
   PaseoRecoveryAgentItem,
   SessionLineageNode,
+  SessionRelationKind,
   SlashDryRunResolution,
   SubagentAgentTree,
   SubagentTimelineItem,
   SubagentTimerOrTaskNode,
   WritebackReplayEvent,
   manageAgentHistoryRpc,
+  managePeerAgentsRpc,
   manageSessionLineageRpc,
   manageSlashSkillsRpc,
   manageSubagentsRpc,
@@ -22,6 +24,7 @@ import type {
   reconcilePaseoRecoveryRpc,
 } from "../shared/contracts";
 import { getRecentActionLogs } from "./handlers";
+import { nonSubagentRelation } from "../shared/sidebar-child-sessions";
 
 const APP_SESSION_TS =
   "/Applications/Paseo.app/Contents/Resources/builtin-plugins/antigravity-provider/server/internal/session.ts";
@@ -587,11 +590,22 @@ export async function handleReconcilePaseoRecovery(
   }
 
   try {
-    const res = await execCommand(ANTIGRAVITY_OPS_BIN, args, {
-      timeout: 45_000,
-      env: { ...process.env, VEC_PASEO_NO_RESTART: "1" },
-    });
-    const parsed = JSON.parse(res.stdout || "{}") as Record<string, unknown>;
+    let stdoutText = "";
+    try {
+      const res = await execCommand(ANTIGRAVITY_OPS_BIN, args, {
+        timeout: 45_000,
+        env: { ...process.env, VEC_PASEO_NO_RESTART: "1" },
+      });
+      stdoutText = res.stdout || "";
+    } catch (execErr) {
+      const maybeStdout = (execErr as { stdout?: string })?.stdout ?? "";
+      if (maybeStdout.trim().startsWith("{")) {
+        stdoutText = maybeStdout;
+      } else {
+        throw execErr;
+      }
+    }
+    const parsed = JSON.parse(stdoutText || "{}") as Record<string, unknown>;
     const durationMs = Date.now() - startMs;
     const ok = Boolean(parsed.ok);
     const interruptedCount = Number(parsed.interruptedCount ?? 0);
@@ -712,8 +726,11 @@ export async function handleManageSlashSkills(
         ? `Customize: ${actions.join(" · ")} (${totalAdvertised} active · ${pinnedCount} pinned)`
         : `Customize Inventory: ${totalAdvertised} slash commands & skills active (${inlineCount} inline /skill ready · ${pinnedCount} pinned)`;
 
+    const clientBridge = (parsed.client_bridge ?? {}) as Record<string, unknown>;
     return {
-      ok: Boolean(parsed.ok ?? true),
+      ok:
+        Boolean(parsed.ok) ||
+        (totalAdvertised > 0 && Boolean(clientBridge.ok ?? true)),
       action,
       slashCommandsMode: String(parsed.slash_commands_mode ?? "on"),
       configSource: String(parsed.config_source ?? "defaults"),
@@ -1207,6 +1224,7 @@ interface FullRawWorkspaceRecord {
   displayName?: string | null;
   cwd?: string;
   archivedAt?: string | null;
+  pinnedAt?: string | null;
   background?: boolean;
 }
 
@@ -1375,6 +1393,9 @@ export async function handleManageSessionLineage(
             ) as FullRawAgentRecord;
             const aid = (rec.id ?? "").trim();
             if (!aid) continue;
+            if (bucket.name === "archived" && !rec.archivedAt) {
+              rec.archivedAt = rec.updatedAt ?? "archived";
+            }
             if (rec.labels?.["paseo.internal"] === "true") continue;
             const sysPrompt = rec.config?.systemPrompt ?? "";
             if (sysPrompt.includes("Generates a short title for a coding workspace")) continue;
@@ -1463,7 +1484,17 @@ export async function handleManageSessionLineage(
       return null;
     };
 
+    const isIntakeOrRoutedAgent = (rec: FullRawAgentRecord): boolean =>
+      nonSubagentRelation(rec) === "intake-routed";
+
+    const isColleagueLabeledAgent = (rec: FullRawAgentRecord): boolean =>
+      nonSubagentRelation(rec) === "colleague";
+
+    // Only genuine spawned subagents (not Intake queue tasks, not colleague sessions, and not referenced sessions) have a Subagent parent
     const resolveParentOfAgent = (rec: FullRawAgentRecord): FullRawAgentRecord | null => {
+      if (nonSubagentRelation(rec) !== null) {
+        return null;
+      }
       const labels = rec.labels ?? {};
       const parentLabel = (labels["paseo.parent-agent-id"] ?? "").trim();
       if (parentLabel) {
@@ -1485,6 +1516,110 @@ export async function handleManageSessionLineage(
         }
       }
       return null;
+    };
+
+    // For Intake-routed or Colleague sessions, resolve the triggering / initiating colleague session
+    const resolveRoutedOriginOfAgent = (rec: FullRawAgentRecord): FullRawAgentRecord | null => {
+      if (!isIntakeOrRoutedAgent(rec) && !isColleagueLabeledAgent(rec)) {
+        return null;
+      }
+      const labels = rec.labels ?? {};
+      const candidates = [
+        labels["routed-by-agent-id"],
+        labels["colleague-of"],
+        labels["routed-by"],
+        labels["paseo.parent-agent-id"],
+        labels["spawned-by"],
+      ];
+      for (const raw of candidates) {
+        const cleaned = (raw ?? "").trim();
+        if (!cleaned || cleaned === "outside-paseo") continue;
+        const found = resolveAgentByIdOrPrefix(cleaned);
+        if (found && found.id !== rec.id) return found;
+      }
+      return null;
+    };
+
+    // Load peer message outbox (`~/Library/Application Support/com.vec.paseo-peers/outbox/*.json`)
+    // to identify genuine message-exchanged Colleague sessions (`from` <-> `to`)
+    const peerExchangedByAgentId = new Map<string, Set<string>>();
+    const addPeerExchange = (aId: string, bId: string) => {
+      if (!aId || !bId || aId === bId) return;
+      const setA = peerExchangedByAgentId.get(aId) ?? new Set<string>();
+      setA.add(bId);
+      peerExchangedByAgentId.set(aId, setA);
+      const setB = peerExchangedByAgentId.get(bId) ?? new Set<string>();
+      setB.add(aId);
+      peerExchangedByAgentId.set(bId, setB);
+    };
+    try {
+      const peersHome = process.env.PASEO_PEERS_USER_HOME || home;
+      const outboxDir = path.join(
+        peersHome,
+        "Library",
+        "Application Support",
+        "com.vec.paseo-peers",
+        "outbox",
+      );
+      const outboxFiles = await fs.readdir(outboxDir);
+      for (const fn of outboxFiles) {
+        if (!fn.endsWith(".json")) continue;
+        try {
+          const msgRec = JSON.parse(
+            await fs.readFile(path.join(outboxDir, fn), "utf8"),
+          ) as { from?: string | null; to?: string | null; status?: string | null };
+          const fromAg = resolveAgentByIdOrPrefix(msgRec.from);
+          const toAg = resolveAgentByIdOrPrefix(msgRec.to);
+          if (fromAg?.id && toAg?.id && fromAg.id !== toAg.id) {
+            addPeerExchange(fromAg.id, toAg.id);
+          }
+        } catch {
+          // Ignore malformed outbox json
+        }
+      }
+    } catch {
+      // Ignore missing outbox directory
+    }
+
+    const resolveNotionTaskIdForRecord = (
+      rec: FullRawAgentRecord,
+      intakeEntry?: IntakeTaskStateEntry,
+    ): string | null => {
+      if (intakeEntry?.page_id) {
+        return intakeEntry.page_id;
+      }
+      const briefStem = (rec.labels?.brief ?? "").trim();
+      const match = briefStem.match(/^intake-\d+-\d+-([0-9a-f]{8})-/i);
+      if (match?.[1]) {
+        return match[1].toLowerCase();
+      }
+      return null;
+    };
+
+    const resolveEffectiveAgentStatus = (
+      rec: FullRawAgentRecord,
+      ws?: FullRawWorkspaceRecord,
+    ): string => {
+      if (rec.archivedAt || (ws?.archivedAt && !ws?.pinnedAt)) {
+        return "archived";
+      }
+      const rawStatus = String(rec.lastStatus ?? "idle")
+        .trim()
+        .toLowerCase();
+      if (rawStatus === "running" || rawStatus === "starting") {
+        const updatedMs = Date.parse(rec.updatedAt ?? rec.createdAt ?? "") || 0;
+        if (updatedMs > 0 && Date.now() - updatedMs > 120_000) {
+          return "done";
+        }
+        return "running";
+      }
+      if (rawStatus === "failed" || rawStatus === "error") {
+        return "failed";
+      }
+      if (rawStatus === "idle" || rawStatus === "closed" || rawStatus === "completed") {
+        return "done";
+      }
+      return rawStatus || "done";
     };
 
     const toLineageNode = async (rec: FullRawAgentRecord): Promise<SessionLineageNode> => {
@@ -1550,10 +1685,19 @@ export async function handleManageSessionLineage(
         }
       }
       const reportExists = reportPath ? await fileExists(reportPath) : false;
-      const notionTaskId = intakeEntry?.page_id ?? null;
-      const notionUrl = notionTaskId
-        ? `https://www.notion.so/${notionTaskId.replace(/-/g, "")}`
-        : null;
+      const notionTaskId = resolveNotionTaskIdForRecord(rec, intakeEntry);
+      const notionUrl =
+        notionTaskId && notionTaskId.length >= 32
+          ? `https://www.notion.so/${notionTaskId.replace(/-/g, "")}`
+          : null;
+      const originRec = resolveRoutedOriginOfAgent(rec);
+      const defaultRelKind: SessionRelationKind = isIntakeOrRoutedAgent(rec)
+        ? "intake-routed"
+        : isColleagueLabeledAgent(rec)
+          ? "colleague"
+          : resolveParentOfAgent(rec)
+            ? "subagent"
+            : "self";
 
       return {
         agentId: aid,
@@ -1563,10 +1707,12 @@ export async function handleManageSessionLineage(
         workspaceTitle,
         projectId: ws?.projectId ?? null,
         projectName,
-        status: String(rec.lastStatus ?? "idle"),
+        status: resolveEffectiveAgentStatus(rec, ws),
         provider: String(rec.provider ?? "antigravity"),
         model: String(rec.config?.model ?? "default"),
         providerSessionId: extractProviderSessionId(rec),
+        relationKind: defaultRelKind,
+        routedByAgentId: originRec?.id ?? null,
         createdAt: rec.createdAt ?? null,
         updatedAt: rec.updatedAt ?? null,
         briefPath,
@@ -1589,6 +1735,23 @@ export async function handleManageSessionLineage(
       const projectName = proj
         ? String(proj.customName ?? proj.displayName ?? "").trim() || null
         : null;
+      const briefStem = (rec.labels?.brief ?? "").trim();
+      const intakeEntry =
+        intakeByAgentId.get(aid) ??
+        intakeByAgentId.get(aid.slice(0, 8)) ??
+        (briefStem ? intakeByBriefStem.get(briefStem) : undefined);
+      const notionTaskId = resolveNotionTaskIdForRecord(rec, intakeEntry);
+      const notionUrl =
+        notionTaskId && notionTaskId.length >= 32
+          ? `https://www.notion.so/${notionTaskId.replace(/-/g, "")}`
+          : null;
+      const defaultRelKind: SessionRelationKind = isIntakeOrRoutedAgent(rec)
+        ? "intake-routed"
+        : isColleagueLabeledAgent(rec)
+          ? "colleague"
+          : resolveParentOfAgent(rec)
+            ? "subagent"
+            : "project-peer";
       return {
         agentId: aid,
         shortId: aid.slice(0, 8),
@@ -1597,17 +1760,19 @@ export async function handleManageSessionLineage(
         workspaceTitle,
         projectId: ws?.projectId ?? null,
         projectName,
-        status: String(rec.lastStatus ?? "idle"),
+        status: resolveEffectiveAgentStatus(rec, ws),
         provider: String(rec.provider ?? "antigravity"),
         model: String(rec.config?.model ?? "default"),
         providerSessionId: extractProviderSessionId(rec),
+        relationKind: defaultRelKind,
+        routedByAgentId: null,
         createdAt: rec.createdAt ?? null,
         updatedAt: rec.updatedAt ?? null,
-        briefPath: null,
-        reportPath: null,
+        briefPath: intakeEntry?.brief ?? null,
+        reportPath: intakeEntry?.report ?? null,
         reportExists: false,
-        notionUrl: null,
-        notionTaskId: null,
+        notionUrl,
+        notionTaskId,
       };
     };
 
@@ -1632,7 +1797,9 @@ export async function handleManageSessionLineage(
 
     let currentNode: SessionLineageNode | null = null;
     let parentNode: SessionLineageNode | null = null;
+    let routedOriginNode: SessionLineageNode | null = null;
     const childNodes: SessionLineageNode[] = [];
+    const colleagueNodes: SessionLineageNode[] = [];
     const siblingNodes: SessionLineageNode[] = [];
     const projectPeerNodes: SessionLineageNode[] = [];
 
@@ -1640,7 +1807,15 @@ export async function handleManageSessionLineage(
       currentNode = await toLineageNode(currentAgent);
       const parentRec = resolveParentOfAgent(currentAgent);
       if (parentRec) {
-        parentNode = await toLineageNode(parentRec);
+        parentNode = { ...(await toLineageNode(parentRec)), relationKind: "parent" };
+      } else {
+        const originRec = resolveRoutedOriginOfAgent(currentAgent);
+        if (originRec) {
+          routedOriginNode = {
+            ...(await toLineageNode(originRec)),
+            relationKind: isIntakeOrRoutedAgent(currentAgent) ? "intake-routed" : "colleague",
+          };
+        }
       }
 
       const curId = currentAgent.id;
@@ -1648,33 +1823,50 @@ export async function handleManageSessionLineage(
       const curWs = curWsId ? workspacesById.get(curWsId) : undefined;
       const curProjectId = curWs?.projectId ?? null;
       const curCwd = (currentAgent.cwd ?? "").trim();
+      const exchangedPeerIds = peerExchangedByAgentId.get(curId) ?? new Set<string>();
       const rawChildren: FullRawAgentRecord[] = [];
+      const rawColleagues: FullRawAgentRecord[] = [];
       const rawSiblings: FullRawAgentRecord[] = [];
       const rawProjectPeers: FullRawAgentRecord[] = [];
 
       for (const candidate of agentsById.values()) {
-        if (!candidate.id || candidate.archivedAt) continue;
+        if (!candidate.id || candidate.id === curId) continue;
         const candWs = candidate.workspaceId ? workspacesById.get(candidate.workspaceId) : undefined;
-        if (candWs?.archivedAt) continue;
+        const isArchivedCandidate = Boolean(
+          candidate.archivedAt || (candWs?.archivedAt && !candWs?.pinnedAt),
+        );
 
         const candParent = resolveParentOfAgent(candidate);
         const candParentWs = (candidate.labels?.["parent-workspace"] ?? "").trim();
-        const isChildOfCurrent =
-          (candParent &&
-            (candParent.id === curId ||
-              (curWsId && candParent.workspaceId === curWsId && candidate.workspaceId !== curWsId))) ||
-          (curWsId && candParentWs === curWsId && candidate.workspaceId !== curWsId);
+        const isGenuineSubagentChild =
+          !isIntakeOrRoutedAgent(candidate) &&
+          !isColleagueLabeledAgent(candidate) &&
+          Boolean(
+            (candParent &&
+              (candParent.id === curId ||
+                (curWsId && candParent.workspaceId === curWsId && candidate.workspaceId !== curWsId))) ||
+              (curWsId && candParentWs === curWsId && candidate.workspaceId !== curWsId),
+          );
 
-        if (isChildOfCurrent && candidate.id !== curId) {
+        const candOrigin = resolveRoutedOriginOfAgent(candidate);
+        const isColleagueOfCurrent =
+          exchangedPeerIds.has(candidate.id) ||
+          (isColleagueLabeledAgent(candidate) && candOrigin?.id === curId) ||
+          (isColleagueLabeledAgent(currentAgent) &&
+            resolveRoutedOriginOfAgent(currentAgent)?.id === candidate.id);
+
+        if (isGenuineSubagentChild) {
           rawChildren.push(candidate);
+        } else if (isColleagueOfCurrent) {
+          rawColleagues.push(candidate);
         } else if (
+          !isArchivedCandidate &&
           parentRec &&
           candParent &&
-          candParent.id === parentRec.id &&
-          candidate.id !== curId
+          candParent.id === parentRec.id
         ) {
           rawSiblings.push(candidate);
-        } else if (candidate.id !== curId) {
+        } else if (!isArchivedCandidate) {
           const sameProject =
             (curProjectId && candWs?.projectId === curProjectId) ||
             (curCwd && (candidate.cwd ?? "").trim() === curCwd);
@@ -1689,14 +1881,21 @@ export async function handleManageSessionLineage(
           String(a.updatedAt ?? a.createdAt ?? ""),
         ),
       );
+      rawColleagues.sort((a, b) =>
+        String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+          String(a.updatedAt ?? a.createdAt ?? ""),
+        ),
+      );
       rawSiblings.sort((a, b) =>
         String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
           String(a.updatedAt ?? a.createdAt ?? ""),
         ),
       );
       rawProjectPeers.sort((a, b) => {
-        const aRun = a.lastStatus === "running" ? 1 : 0;
-        const bRun = b.lastStatus === "running" ? 1 : 0;
+        const aWs = a.workspaceId ? workspacesById.get(a.workspaceId) : undefined;
+        const bWs = b.workspaceId ? workspacesById.get(b.workspaceId) : undefined;
+        const aRun = resolveEffectiveAgentStatus(a, aWs) === "running" ? 1 : 0;
+        const bRun = resolveEffectiveAgentStatus(b, bWs) === "running" ? 1 : 0;
         if (aRun !== bRun) return bRun - aRun;
         return String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
           String(a.updatedAt ?? a.createdAt ?? ""),
@@ -1704,43 +1903,51 @@ export async function handleManageSessionLineage(
       });
 
       for (const ch of rawChildren.slice(0, 24)) {
-        childNodes.push(await toLineageNode(ch));
+        childNodes.push({ ...(await toLineageNode(ch)), relationKind: "subagent" });
+      }
+      for (const col of rawColleagues.slice(0, 24)) {
+        colleagueNodes.push({ ...(await toLineageNode(col)), relationKind: "colleague" });
       }
       for (const sb of rawSiblings.slice(0, 12)) {
-        siblingNodes.push(await toLineageNode(sb));
+        siblingNodes.push({ ...(await toLineageNode(sb)), relationKind: "subagent" });
       }
       for (const pp of rawProjectPeers.slice(0, 16)) {
-        projectPeerNodes.push(toLightDirectoryNode(pp));
+        projectPeerNodes.push({ ...toLightDirectoryNode(pp), relationKind: "project-peer" });
       }
     }
 
-    const activeDirectoryRecords = Array.from(agentsById.values()).filter((a) => {
-      if (!a.id || a.archivedAt) return false;
-      const ws = a.workspaceId ? workspacesById.get(a.workspaceId) : undefined;
-      if (ws?.archivedAt) return false;
-      return true;
-    });
+    const activeDirectoryRecords = Array.from(agentsById.values()).filter((a) => Boolean(a.id));
     activeDirectoryRecords.sort((a, b) => {
-      const aRun = a.lastStatus === "running" ? 1 : 0;
-      const bRun = b.lastStatus === "running" ? 1 : 0;
+      const aWs = a.workspaceId ? workspacesById.get(a.workspaceId) : undefined;
+      const bWs = b.workspaceId ? workspacesById.get(b.workspaceId) : undefined;
+      const aSt = resolveEffectiveAgentStatus(a, aWs);
+      const bSt = resolveEffectiveAgentStatus(b, bWs);
+      const aArch = aSt === "archived" ? 1 : 0;
+      const bArch = bSt === "archived" ? 1 : 0;
+      if (aArch !== bArch) return aArch - bArch;
+      const aRun = aSt === "running" ? 1 : 0;
+      const bRun = bSt === "running" ? 1 : 0;
       if (aRun !== bRun) return bRun - aRun;
       return String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
         String(a.updatedAt ?? a.createdAt ?? ""),
       );
     });
-    const directoryNodes = activeDirectoryRecords.slice(0, 240).map(toLightDirectoryNode);
+    const directoryNodes = activeDirectoryRecords.slice(0, 260).map(toLightDirectoryNode);
 
     const durationMs = Date.now() - startMs;
     const unlinkedFound = Number(cliReconcileRaw?.unlinked_found ?? 0);
     const linkedCount = Number(cliReconcileRaw?.linked_count ?? 0);
+    const detachedCount = Number(cliReconcileRaw?.detached_count ?? 0);
 
     return {
       ok: true,
       action,
       current: currentNode,
       parent: parentNode,
+      routedOrigin: routedOriginNode,
       siblings: siblingNodes,
       children: childNodes,
+      colleagues: colleagueNodes,
       projectPeers: projectPeerNodes,
       directory: directoryNodes,
       reconcileSummary: {
@@ -1748,13 +1955,14 @@ export async function handleManageSessionLineage(
         renamedCount: renamedWorkspaces.length,
         unlinkedFound,
         linkedCount,
+        detachedCount,
         renamedWorkspaces,
       },
       message:
-        renamedWorkspaces.length > 0 || linkedCount > 0
-          ? `已同步 ${renamedWorkspaces.length} 个侧边栏工作区标题，关联 ${linkedCount} 个派生会话链路`
+        renamedWorkspaces.length > 0 || linkedCount > 0 || detachedCount > 0
+          ? `已同步 ${renamedWorkspaces.length} 个侧边栏工作区标题，关联 ${linkedCount} 个子会话，剥离 ${detachedCount} 个误挂靠队列任务`
           : currentNode
-            ? `会话血缘: 父会话=${parentNode ? parentNode.workspaceTitle : "无"} · 派生子会话=${childNodes.length} · 同项目同伴=${projectPeerNodes.length}`
+            ? `会话血缘: 父智能体=${parentNode ? parentNode.workspaceTitle : "无"} · 派生子智能体=${childNodes.length} · 协作同伴=${colleagueNodes.length} · 同项目同伴=${projectPeerNodes.length}`
             : "会话血缘检查完成",
       durationMs,
     };
@@ -1776,6 +1984,155 @@ export async function handleManageSessionLineage(
         renamedWorkspaces: [],
       },
       message: `Session lineage error: ${errMsg}`,
+      durationMs,
+    };
+  }
+}
+
+export async function handleManagePeerAgents(
+  input: RpcInput<typeof managePeerAgentsRpc>,
+  _context: PluginHandlerContext,
+) {
+  const startMs = Date.now();
+  const action = input.action ?? "status";
+  try {
+    if (action === "enable_all") {
+      await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "enable", "--json"], {
+        timeout: 20_000,
+      });
+    } else if (action === "heal_outbox") {
+      await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "outbox", "--heal", "--json"], {
+        timeout: 20_000,
+      });
+      await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "reconcile", "--json"], {
+        timeout: 20_000,
+      });
+    }
+
+    const statusArgs = ["peers", "status", "--json"];
+    if (input.cwd && input.cwd.trim()) {
+      statusArgs.push("--cwd", input.cwd.trim());
+    }
+    const { stdout: statusStdout } = await execCommand(ANTIGRAVITY_OPS_BIN, statusArgs, {
+      timeout: 15_000,
+    });
+    const statusJson = JSON.parse(statusStdout.trim() || "{}") as Record<string, unknown>;
+    const blockVersion = Number(statusJson.block_version ?? 5);
+    const antigravityChannel = String(statusJson.antigravity_channel ?? "cli-fallback");
+
+    const rawSurfaces = Array.isArray(statusJson.surfaces) ? statusJson.surfaces : [];
+    const surfaces = rawSurfaces.map((s) => {
+      const obj = (s ?? {}) as Record<string, unknown>;
+      return {
+        name: String(obj.name ?? ""),
+        state: String(obj.state ?? "unknown"),
+        version: typeof obj.version === "number" ? obj.version : null,
+        covers: String(obj.covers ?? ""),
+        target: String(obj.target ?? obj.note ?? ""),
+      };
+    });
+
+    const rawProfiles = Array.isArray(statusJson.profiles) ? statusJson.profiles : [];
+    const profiles = rawProfiles.map((p) => {
+      const obj = (p ?? {}) as Record<string, unknown>;
+      const provider = String(obj.provider ?? "");
+      const model = String(obj.model ?? "");
+      return {
+        id: String(obj.id ?? ""),
+        name: String(obj.name ?? ""),
+        provider,
+        model,
+        launchFlags: provider && model ? `--provider ${provider}/${model}` : "",
+      };
+    });
+
+    const rawPeers = Array.isArray(statusJson.peers) ? statusJson.peers : [];
+    let activePeersCount = 0;
+    let closedPeersCount = 0;
+    for (const p of rawPeers) {
+      const st = String((p as Record<string, unknown>)?.status ?? "");
+      if (st === "running" || st === "idle") activePeersCount += 1;
+      else closedPeersCount += 1;
+    }
+
+    let outboxSummary = "outbox: ok";
+    try {
+      const { stdout: obOut } = await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "outbox"], {
+        timeout: 10_000,
+      });
+      const firstLine = (obOut.trim().split("\n")[0] ?? "").trim();
+      if (firstLine) outboxSummary = firstLine;
+    } catch {
+      // Ignore
+    }
+
+    let resolvedPreview: {
+      query: string;
+      matchedProfiles: string[];
+      sampleReviewCommand: string;
+    } | null = null;
+
+    if (action === "test_resolve" || (input.profileQuery && input.profileQuery.trim())) {
+      const q = (input.profileQuery || "gemini4, opus 5.5").trim();
+      const parts = q
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+      const revArgs = ["peers", "review"];
+      for (const part of parts.length > 0 ? parts : ["gemini4", "opus 5.5"]) {
+        revArgs.push("--profile", part);
+      }
+      revArgs.push("--prompt", "Cross-critique and improve the current design", "--dry-run", "--json");
+      const { stdout: revOut } = await execCommand(ANTIGRAVITY_OPS_BIN, revArgs, {
+        timeout: 15_000,
+      });
+      const revJson = JSON.parse(revOut.trim() || "{}") as Record<string, unknown>;
+      const matched = Array.isArray(revJson.profiles)
+        ? revJson.profiles.map((x) => String(x))
+        : [];
+      const flags = matched.map((m) => `--profile "${m}"`).join(" ");
+      resolvedPreview = {
+        query: q,
+        matchedProfiles: matched,
+        sampleReviewCommand: `antigravity-ops peers review ${flags} --prompt "<task>"`,
+      };
+    }
+
+    const durationMs = Date.now() - startMs;
+    const enabledCount = surfaces.filter((s) => s.state === "enabled").length;
+    const message = resolvedPreview
+      ? `Resolved "${resolvedPreview.query}" -> [${resolvedPreview.matchedProfiles.join(", ")}] · Command: ${resolvedPreview.sampleReviewCommand}`
+      : `Peer Block v${blockVersion} (${enabledCount}/4 auto surfaces enabled) · Profiles=${profiles.length} · Active Peers=${activePeersCount} (Closed=${closedPeersCount} folded)`;
+
+    return {
+      ok: true,
+      action,
+      blockVersion,
+      antigravityChannel,
+      surfaces,
+      profiles,
+      activePeersCount,
+      closedPeersCount,
+      outboxSummary,
+      resolvedPreview,
+      message,
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      action,
+      blockVersion: 5,
+      antigravityChannel: "cli-fallback",
+      surfaces: [],
+      profiles: [],
+      activePeersCount: 0,
+      closedPeersCount: 0,
+      outboxSummary: "outbox: unknown",
+      resolvedPreview: null,
+      message: `Peer agents reconciler error: ${errMsg}`,
       durationMs,
     };
   }

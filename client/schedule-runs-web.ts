@@ -7,8 +7,14 @@ import {
   openScheduleRunSessionRpc,
 } from "../shared/schedule-runs-contracts";
 import { isChineseLocale } from "./i18n";
+import { formatRelativeWithLocalTime } from "./session-time-web";
 import { type PaseoThemeTokens } from "../shared/paseo-theme";
 import { syncPaseoThemeCssVariables } from "./theme-web";
+import {
+  findSidebarRowTitleElement,
+  parseSidebarWorkspaceRowTestId,
+  type MinimalElement,
+} from "./web";
 
 export interface ScheduleRunsWebClient {
   call<TDef extends typeof inspectScheduleRunsRpc | typeof openScheduleRunSessionRpc>(
@@ -148,6 +154,8 @@ function formatRelativeIso(iso: string | null): string {
   if (!iso) return "-";
   const ts = Date.parse(iso);
   if (!Number.isFinite(ts)) return iso;
+  const formatted = formatRelativeWithLocalTime(iso, { compact: false });
+  if (formatted.label) return formatted.label;
   const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (diffSec < 60) return `${diffSec}s ago`;
   const diffMin = Math.floor(diffSec / 60);
@@ -314,6 +322,190 @@ let globalOpenScheduleRunsDrawer:
   | null = null;
 let globalReconnectAndRefreshEnhancer: (() => void) | null = null;
 let globalCleanupInjectedScheduleNodes: (() => void) | null = null;
+
+let activeScheduleRunsClient: ScheduleRunsWebClient | null = null;
+let activeShowToast: ((msg: string) => void) | null = null;
+
+export const CADENCE_TIMER_SVG =
+  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+  '<circle cx="8" cy="9.5" r="5.5"/>' +
+  '<path d="M8 7v2.5l1.8 1.2"/>' +
+  '<path d="M6.5 1.5h3"/>' +
+  '<path d="M8 1.5v2"/>' +
+  "</svg>";
+
+export function matchScheduleTitleOrSlug(
+  cleanTitle: string,
+  scheduleName?: string | null,
+  standbySlug?: string | null,
+): boolean {
+  if (!cleanTitle) return false;
+  const rawT = cleanTitle.trim().toLowerCase();
+  if (!rawT) return false;
+  const t = rawT.replace(/^(?:d|done:?|✓)\s+/i, "").trim();
+  if (!t) return false;
+  const tWithoutAg = t.replace(/^ag\s*[·•-]\s*/i, "").trim();
+
+  if (scheduleName) {
+    const rawS = scheduleName.trim().toLowerCase();
+    const s = rawS.replace(/^(?:d|done:?|✓)\s+/i, "").trim();
+    const sWithoutAg = s.replace(/^ag\s*[·•-]\s*/i, "").trim();
+    if (t === s || rawT === rawS || (tWithoutAg && tWithoutAg === sWithoutAg)) {
+      return true;
+    }
+    const sBeforeParen = sWithoutAg.replace(/\s*\([^)]*\)\s*$/, "").trim();
+    const tBeforeParen = tWithoutAg.replace(/\s*\([^)]*\)\s*$/, "").trim();
+    if (sBeforeParen.length >= 6 && (tWithoutAg === sBeforeParen || t === sBeforeParen)) {
+      return true;
+    }
+    if (tBeforeParen.length >= 6 && (tBeforeParen === sWithoutAg || tBeforeParen === s)) {
+      return true;
+    }
+    if (tWithoutAg.endsWith("…") || tWithoutAg.endsWith("...")) {
+      const stem = tWithoutAg.replace(/\.{3}$|…$/, "").trim();
+      if (stem.length >= 10 && (sWithoutAg.startsWith(stem) || s.startsWith(stem))) {
+        return true;
+      }
+    }
+  }
+
+  if (standbySlug) {
+    const slug = standbySlug.trim().toLowerCase();
+    const slugNorm = slug.replace(/[-_]/g, " ");
+    const tNorm = tWithoutAg.replace(/[-_]/g, " ");
+    if (
+      slug === tWithoutAg ||
+      slugNorm === tNorm ||
+      t === `ag · ${slug}` ||
+      t === `ag · ${slugNorm}` ||
+      rawT === `ag · ${slug}` ||
+      rawT === `ag · ${slugNorm}`
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function findCadenceScheduleForWorkspace(
+  workspaceId?: string | null,
+  workspaceTitle?: string | null,
+): ScheduleRunsSummary | null {
+  if (!workspaceId && !workspaceTitle) return null;
+  const cleanId = (workspaceId ?? "").replace(/^local:/, "").trim();
+  const cleanTitle = (workspaceTitle ?? "").trim().toLowerCase();
+
+  for (const sched of cachedSchedulesById.values()) {
+    if (cleanId && (sched.id === cleanId || sched.id.replace(/^sched_/, "") === cleanId)) {
+      return sched;
+    }
+    if (sched.runs) {
+      for (let i = 0; i < sched.runs.length; i += 1) {
+        const r = sched.runs[i];
+        if (cleanId && r?.workspaceId && r.workspaceId.replace(/^local:/, "").trim() === cleanId) {
+          return sched;
+        }
+        if (cleanTitle && r?.workspaceName && r.workspaceName.trim().toLowerCase() === cleanTitle) {
+          return sched;
+        }
+      }
+    }
+    if (cleanTitle && matchScheduleTitleOrSlug(cleanTitle, sched.name, sched.standbySlug)) {
+      return sched;
+    }
+  }
+  return null;
+}
+
+export function showDefaultCadenceToast(msg: string): void {
+  if (typeof document === "undefined" || !document.body) return;
+  const setTimer =
+    typeof globalThis.setTimeout === "function"
+      ? globalThis.setTimeout
+      : typeof window !== "undefined" && typeof window.setTimeout === "function"
+        ? window.setTimeout
+        : null;
+  const clearTimer =
+    typeof globalThis.clearTimeout === "function"
+      ? globalThis.clearTimeout
+      : typeof window !== "undefined" && typeof window.clearTimeout === "function"
+        ? window.clearTimeout
+        : null;
+
+  let toastEl = document.getElementById("paseo-finder-cadence-toast");
+  if (!toastEl) {
+    toastEl = document.createElement("div");
+    toastEl.id = "paseo-finder-cadence-toast";
+    toastEl.setAttribute("data-testid", "paseo-finder-cadence-toast");
+    Object.assign(toastEl.style, {
+      position: "fixed",
+      bottom: "24px",
+      right: "24px",
+      zIndex: "9999",
+      padding: "8px 14px",
+      borderRadius: "8px",
+      fontSize: "12px",
+      fontWeight: "500",
+      backgroundColor: "var(--surface-2, #1e293b)",
+      color: "var(--foreground, #f8fafc)",
+      border: "1px solid var(--border-accent, rgba(16, 185, 129, 0.3))",
+      boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.3)",
+      pointerEvents: "none",
+      transition: "opacity 180ms ease, transform 180ms ease",
+      opacity: "0",
+      transform: "translateY(8px)",
+    });
+    document.body.appendChild(toastEl);
+  }
+  toastEl.textContent = msg;
+  toastEl.style.opacity = "1";
+  toastEl.style.transform = "translateY(0)";
+  const timerKey = "__toast_timer";
+  const holder = toastEl as unknown as Record<string, ReturnType<typeof setTimeout> | undefined>;
+  if (holder[timerKey] && clearTimer) clearTimer(holder[timerKey] as never);
+  if (setTimer) {
+    holder[timerKey] = setTimer(() => {
+      if (toastEl) {
+        toastEl.style.opacity = "0";
+        toastEl.style.transform = "translateY(8px)";
+      }
+    }, 2600);
+  }
+}
+
+export async function triggerRunScheduleNow(
+  scheduleId: string,
+  clientOverride?: ScheduleRunsWebClient,
+  showToastOverride?: (msg: string) => void,
+): Promise<{ ok: boolean; message: string }> {
+  const activeClient = clientOverride ?? activeScheduleRunsClient;
+  if (!activeClient) {
+    return { ok: false, message: "Schedule client is not initialized" };
+  }
+  const isZh = isChineseLocale();
+  try {
+    const res = await activeClient.call(openScheduleRunSessionRpc, {
+      action: "run-now",
+      scheduleId,
+      dryRun: false,
+    });
+    const toast = showToastOverride ?? activeShowToast ?? showDefaultCadenceToast;
+    const msg = isZh
+      ? `已触发节奏 "${res.scheduleName || scheduleId}" 立即运行`
+      : (res.message || `Triggered run for schedule ${scheduleId}`);
+    toast(msg);
+    setTimeout(() => {
+      void refreshScheduleCache(activeClient, true);
+    }, 1500);
+    return { ok: res.ok, message: msg };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const toast = showToastOverride ?? activeShowToast ?? showDefaultCadenceToast;
+    const errText = isZh ? `触发节奏运行失败: ${errMsg}` : `Run failed: ${errMsg}`;
+    toast(errText);
+    return { ok: false, message: errMsg };
+  }
+}
 
 let activePrefsSourceBadge: "plugin-settings" | "localStorage" | "default" =
   "default";
@@ -511,6 +703,7 @@ export interface MinimalScheduleDomElement {
   id?: string;
   type?: string;
   title?: string;
+  innerHTML?: string;
   textContent: string | null;
   style: Record<string, string>;
   firstChild?: MinimalScheduleDomElement | null;
@@ -528,6 +721,7 @@ export interface MinimalScheduleDomElement {
   addEventListener(
     type: string,
     listener: (ev: {
+      key?: string;
       altKey?: boolean;
       preventDefault(): void;
       stopPropagation(): void;
@@ -547,12 +741,26 @@ export interface MinimalScheduleDomDocument {
 
 export type ScheduleRowSummarySlice = Pick<
   ScheduleRunsSummary,
-  "totalRuns" | "lastRunStatus"
+  "id" | "name" | "totalRuns" | "lastRunStatus"
 > &
-  Partial<Pick<ScheduleRunsSummary, "lastRunAt" | "nextRunAt" | "status">>;
+  Partial<
+    Pick<
+      ScheduleRunsSummary,
+      "lastRunAt" | "nextRunAt" | "status" | "runs" | "runningRuns" | "standbySlug"
+    >
+  >;
+
+export type ResolvedCadenceSchedule = {
+  id: string;
+  name?: string;
+  status?: string;
+  lastRunStatus?: string | null;
+  runningRuns?: number;
+  runs?: Array<Partial<ScheduleRunEntry>>;
+};
 
 export interface DecorateSchedulesDomOptions {
-  schedulesById: ReadonlyMap<string, ScheduleRowSummarySlice>;
+  schedulesById: ReadonlyMap<string, ScheduleRowSummarySlice | ScheduleRunsSummary>;
   totals: {
     totalSchedules: number;
     schedulesWithRuns: number;
@@ -563,6 +771,49 @@ export interface DecorateSchedulesDomOptions {
   nowMs?: number;
   projectLastActiveByKey?: Record<string, string>;
   onOpenDrawer: (scheduleId: string | null) => void;
+  onRunNow?: (scheduleId: string) => Promise<unknown> | void;
+  findCadenceForWorkspace?: (
+    workspaceId?: string | null,
+    workspaceTitle?: string | null,
+  ) => ResolvedCadenceSchedule | null;
+}
+
+function resolveCadenceSchedule(
+  cleanWorkspaceId: string,
+  rowTitle: string,
+  options: DecorateSchedulesDomOptions,
+): ResolvedCadenceSchedule | null {
+  if (options.findCadenceForWorkspace) {
+    const custom = options.findCadenceForWorkspace(cleanWorkspaceId, rowTitle);
+    if (custom) return custom;
+  }
+  const cleanTitle = rowTitle.trim().toLowerCase();
+  for (const [id, sched] of options.schedulesById.entries()) {
+    const fullSched = sched as Partial<ScheduleRunsSummary>;
+    if (
+      cleanWorkspaceId &&
+      (id === cleanWorkspaceId ||
+        fullSched.id === cleanWorkspaceId ||
+        id.replace(/^sched_/, "") === cleanWorkspaceId)
+    ) {
+      return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+    }
+    if (Array.isArray(fullSched.runs)) {
+      for (let i = 0; i < fullSched.runs.length; i += 1) {
+        const r = fullSched.runs[i];
+        if (cleanWorkspaceId && r?.workspaceId && r.workspaceId.replace(/^local:/, "").trim() === cleanWorkspaceId) {
+          return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+        }
+        if (cleanTitle && r?.workspaceName && r.workspaceName.trim().toLowerCase() === cleanTitle) {
+          return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+        }
+      }
+    }
+    if (cleanTitle && matchScheduleTitleOrSlug(cleanTitle, fullSched.name, fullSched.standbySlug)) {
+      return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+    }
+  }
+  return findCadenceScheduleForWorkspace(cleanWorkspaceId, rowTitle);
 }
 
 export function ensurePaseoSidebarTimestampSetting(
@@ -591,16 +842,64 @@ export function ensurePaseoSidebarTimestampSetting(
   }
 }
 
+export function setCachedSchedulesForTesting(
+  map: Map<string, ScheduleRunsSummary>,
+): void {
+  cachedSchedulesById = map;
+}
+
+function ensurePaseoCadenceStyles(doc: MinimalScheduleDomDocument): boolean {
+  const hoverStyle = doc.getElementById("paseo-finder-sidebar-ts-style");
+  if (!hoverStyle && typeof document !== "undefined" && doc === (document as unknown)) {
+    const headEl = document.head ?? document.body;
+    if (headEl) {
+      const styleEl = document.createElement("style");
+      styleEl.id = "paseo-finder-sidebar-ts-style";
+      styleEl.setAttribute("data-finder-runs-injected", "true");
+      styleEl.textContent = `
+[data-testid^="sidebar-project-row-"]:hover [data-testid^="sidebar-project-timestamp-"] {
+  opacity: 0 !important;
+}
+@keyframes paseoCadenceBadgeBreathe {
+  0%, 100% {
+    opacity: 0.65;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+[data-testid^="sidebar-workspace-cadence-badge-"][data-running="true"] {
+  animation: paseoCadenceBadgeBreathe 2s ease-in-out infinite;
+}
+`;
+      headEl.appendChild(styleEl);
+      return true;
+    }
+  }
+  return false;
+}
+
 export function decorateSchedulesDomOnDocument(
   doc: MinimalScheduleDomDocument,
   options: DecorateSchedulesDomOptions,
 ): { rowCount: number; domWrites: number } {
+  if (options.schedulesById && options.schedulesById.size > 0) {
+    for (const [id, s] of options.schedulesById.entries()) {
+      cachedSchedulesById.set(id, s as ScheduleRunsSummary);
+    }
+  }
   const copy = options.isZh ? COPY_ZH : COPY_EN;
   const theme = options.theme;
   const themeKey = theme?.name ?? "default";
   const nowMs = options.nowMs ?? Date.now();
   const minuteBucket = Math.floor(nowMs / 60_000);
   let domWrites = 0;
+
+  if (ensurePaseoCadenceStyles(doc)) {
+    domWrites += 1;
+  }
 
   // Decorate left-sidebar project folder rows (`sidebar-project-row-<viewKey>`) with compact relative age (`18h`, `2d`)
   const projMap = options.projectLastActiveByKey;
@@ -609,20 +908,6 @@ export function decorateSchedulesDomOnDocument(
       '[data-testid^="sidebar-project-row-"]',
     );
     if (projectRows && projectRows.length > 0) {
-      let hoverStyle = doc.getElementById("paseo-finder-sidebar-ts-style");
-      if (!hoverStyle && typeof document !== "undefined" && doc === (document as unknown)) {
-        const headEl = document.head ?? document.body;
-        if (headEl) {
-          const styleEl = document.createElement("style");
-          styleEl.id = "paseo-finder-sidebar-ts-style";
-          styleEl.setAttribute("data-finder-runs-injected", "true");
-          styleEl.textContent =
-            '[data-testid^="sidebar-project-row-"]:hover [data-testid^="sidebar-project-timestamp-"] { opacity: 0 !important; }';
-          headEl.appendChild(styleEl);
-          hoverStyle = styleEl as unknown as MinimalScheduleDomElement;
-          domWrites += 1;
-        }
-      }
       for (let p = 0; p < projectRows.length; p += 1) {
         const projRow = projectRows[p];
         if (!projRow) continue;
@@ -673,6 +958,157 @@ export function decorateSchedulesDomOnDocument(
             transition: "opacity 120ms ease",
           });
         }
+      }
+    }
+  }
+
+  // Decorate left-sidebar workspace rows with small stopwatch/clock cadence badge
+  const workspaceRows = doc.querySelectorAll<MinimalScheduleDomElement>(
+    '[data-testid^="sidebar-workspace-row-"]',
+  );
+  if (workspaceRows && workspaceRows.length > 0) {
+    for (let w = 0; w < workspaceRows.length; w += 1) {
+      const rowEl = workspaceRows[w];
+      if (!rowEl) continue;
+      const testId = rowEl.getAttribute("data-testid") ?? "";
+      const parsed = parseSidebarWorkspaceRowTestId(testId);
+      if (!parsed?.workspaceId) continue;
+      const cleanWorkspaceId = parsed.workspaceId;
+      const titleEl = findSidebarRowTitleElement(
+        rowEl as unknown as MinimalElement,
+        parsed.workspaceKey,
+      ) as MinimalScheduleDomElement | null;
+      if (!titleEl || !titleEl.parentElement) continue;
+
+      const sched = resolveCadenceSchedule(
+        cleanWorkspaceId,
+        (titleEl.textContent ?? "").trim(),
+        options,
+      );
+
+      const existingBadge = rowEl.querySelector<MinimalScheduleDomElement>(
+        `[data-testid="sidebar-workspace-cadence-badge-${cleanWorkspaceId}"]`,
+      );
+
+      if (!sched) {
+        if (existingBadge) {
+          existingBadge.remove?.();
+          domWrites += 1;
+        }
+        continue;
+      }
+
+      const isRunning =
+        Boolean(sched.runningRuns && sched.runningRuns > 0) ||
+        sched.lastRunStatus === "running";
+      const schedStatus = sched.status ?? "active";
+      const lastStatus = sched.lastRunStatus ?? "none";
+      const cadenceSig = `${cleanWorkspaceId}:${sched.id}:${themeKey}:${schedStatus}:${lastStatus}:${isRunning ? 1 : 0}:${options.isZh ? "zh" : "en"}`;
+
+      let badge = existingBadge;
+      if (!badge) {
+        badge = doc.createElement("span");
+        badge.setAttribute(
+          "data-testid",
+          `sidebar-workspace-cadence-badge-${cleanWorkspaceId}`,
+        );
+        badge.setAttribute("data-finder-runs-injected", "true");
+        badge.setAttribute("role", "button");
+        badge.setAttribute("tabindex", "0");
+        titleEl.parentElement.insertBefore(badge, titleEl);
+        domWrites += 1;
+      }
+
+      if (badge.getAttribute("data-finder-cadence-sig") !== cadenceSig) {
+        badge.setAttribute("data-finder-cadence-sig", cadenceSig);
+        badge.innerHTML = CADENCE_TIMER_SVG;
+        const schedName = sched.name || sched.id || "Cadence";
+        badge.title = options.isZh
+          ? (isRunning
+              ? `定时任务节奏: ${schedName} (运行中) · 单击查看运行记录，Alt+单击立即运行`
+              : `定时任务节奏: ${schedName} · 单击查看运行记录，Alt+单击立即运行`)
+          : (isRunning
+              ? `Cadence: ${schedName} (Running) · Click to view history, Alt+Click to run now`
+              : `Cadence: ${schedName} · Click to view history, Alt+Click to run now`);
+        badge.setAttribute("data-running", isRunning ? "true" : "false");
+        Object.assign(badge.style, {
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: "13px",
+          height: "13px",
+          marginRight: "4px",
+          flexShrink: "0",
+          verticalAlign: "middle",
+          cursor: "pointer",
+          userSelect: "none",
+          transformOrigin: "center",
+          color: isRunning
+            ? (theme?.primary ?? "#10b981")
+            : (theme?.foregroundMuted ?? "#9ca3af"),
+          opacity: isRunning ? "1" : "0.75",
+          animation: isRunning
+            ? "paseoCadenceBadgeBreathe 2s ease-in-out infinite"
+            : "none",
+          transition: "opacity 120ms ease, color 120ms ease, transform 120ms ease",
+        });
+        domWrites += 1;
+      }
+
+      if (!badge.hasAttribute("data-finder-cadence-bound")) {
+        badge.setAttribute("data-finder-cadence-bound", "1");
+        badge.addEventListener("mouseenter", () => {
+          badge.style.opacity = "1";
+        });
+        badge.addEventListener("mouseleave", () => {
+          badge.style.opacity = isRunning ? "1" : "0.75";
+        });
+        const stopEv = (e: unknown) => {
+          const me = e as {
+            stopPropagation?: () => void;
+            preventDefault?: () => void;
+          };
+          me.stopPropagation?.();
+          me.preventDefault?.();
+        };
+        badge.addEventListener("pointerdown", stopEv);
+        badge.addEventListener("mousedown", stopEv);
+        badge.addEventListener("click", (e) => {
+          const me = e as {
+            stopPropagation?: () => void;
+            preventDefault?: () => void;
+            altKey?: boolean;
+          };
+          me.stopPropagation?.();
+          me.preventDefault?.();
+          if (me.altKey) {
+            if (options.onRunNow) {
+              void options.onRunNow(sched.id);
+            }
+          } else {
+            options.onOpenDrawer(sched.id);
+          }
+        });
+        badge.addEventListener("keydown", (e) => {
+          const ke = e as {
+            key?: string;
+            stopPropagation?: () => void;
+            preventDefault?: () => void;
+            altKey?: boolean;
+          };
+          if (ke.key === "Enter" || ke.key === " ") {
+            ke.stopPropagation?.();
+            ke.preventDefault?.();
+            if (ke.altKey) {
+              if (options.onRunNow) {
+                void options.onRunNow(sched.id);
+              }
+            } else {
+              options.onOpenDrawer(sched.id);
+            }
+          }
+        });
+        domWrites += 1;
       }
     }
   }
@@ -2186,6 +2622,8 @@ export function installDesktopScheduleRunsEnhancer(
   };
 
   globalOpenScheduleRunsDrawer = openDrawer;
+  activeScheduleRunsClient = client;
+  activeShowToast = showToast ?? null;
 
   let observer: MutationObserver | null = null;
   let rafId: number | null = null;
@@ -2195,7 +2633,7 @@ export function installDesktopScheduleRunsEnhancer(
   const removeInjectedScheduleNodes = () => {
     document
       .querySelectorAll(
-        '#paseo-finder-all-runs-toolbar, #paseo-finder-schedules-col-header, #paseo-finder-sidebar-ts-style, [data-testid^="schedule-runs-pill-"], [data-testid^="schedule-time-cols-"], [data-testid^="sidebar-project-timestamp-"], [data-testid^="schedule-menu-runs-"]',
+        '#paseo-finder-all-runs-toolbar, #paseo-finder-schedules-col-header, #paseo-finder-sidebar-ts-style, [data-testid^="schedule-runs-pill-"], [data-testid^="schedule-time-cols-"], [data-testid^="sidebar-project-timestamp-"], [data-testid^="sidebar-workspace-cadence-badge-"], [data-testid^="schedule-menu-runs-"]',
       )
       .forEach((el) => el.remove());
     observer?.takeRecords();
@@ -2216,7 +2654,10 @@ export function installDesktopScheduleRunsEnhancer(
     const sidebarProbe = document.querySelector(
       '[data-testid^="sidebar-project-row-"]',
     );
-    if (!rowsProbe && !sidebarProbe) {
+    const workspaceProbe = document.querySelector(
+      '[data-testid^="sidebar-workspace-row-"]',
+    );
+    if (!rowsProbe && !sidebarProbe && !workspaceProbe) {
       domHealthState.lastDecoratedRowCount = 0;
       return;
     }
@@ -2240,6 +2681,9 @@ export function installDesktopScheduleRunsEnhancer(
           theme,
           onOpenDrawer: (scheduleId) => {
             void openDrawer(scheduleId);
+          },
+          onRunNow: (scheduleId) => {
+            void triggerRunScheduleNow(scheduleId, client, showToast);
           },
         },
       );
@@ -2397,6 +2841,8 @@ export function installDesktopScheduleRunsEnhancer(
     globalOpenScheduleRunsDrawer = null;
     globalReconnectAndRefreshEnhancer = null;
     globalCleanupInjectedScheduleNodes = null;
+    activeScheduleRunsClient = null;
+    activeShowToast = null;
   };
 }
 

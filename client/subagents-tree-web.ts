@@ -10,7 +10,20 @@ import {
   openFileTargetRpc,
 } from "../shared/contracts";
 import { isChineseLocale } from "./i18n";
-import { extractCurrentWorkspaceAndAgent } from "./session-lineage-web";
+import {
+  buildProviderSubagentTabTestId,
+  extractCurrentWorkspaceAndAgent,
+  extractFocusedWorkspaceTabTarget,
+  getMetroModuleList,
+  navigateToLineageNode,
+  openWorkspaceTargetTabViaStore,
+  parseProviderSubagentTabTestId,
+  resolveSessionReference,
+} from "./session-lineage-web";
+import {
+  formatConciseLocalFinishedTime,
+  formatFullLocalFinishedTooltip,
+} from "./session-time-web";
 import { syncPaseoThemeCssVariables } from "./theme-web";
 import { focusWorkspaceInApp } from "./web";
 
@@ -26,6 +39,10 @@ const KNOWN_SUBAGENT_TYPES = new Set([
   "deepcoder",
   "deepcoderworkerl0",
   "deepcoderimprovementworker",
+  "deepinvestigator",
+  "deepinvestigatorworkerl0",
+  "deepinvestigatorimprovementworker",
+  "orchestrator",
   "research",
   "self",
   "image-generator",
@@ -35,6 +52,436 @@ const KNOWN_SUBAGENT_TYPES = new Set([
 
 const DRAWER_MODE_STORAGE_KEY = "paseo:finder-plugin:subagents-drawer-mode";
 const LEFT_SIDEBAR_COLLAPSED_KEY = "paseo:finder-plugin:left-sidebar-subagents-collapsed";
+export const ARCHIVED_SUBAGENTS_STORAGE_KEY = "paseo:finder-plugin:archived-subagents-v1";
+
+function normalizeSubagentArchiveId(rawId: string | null | undefined): string {
+  const trimmed = String(rawId ?? "").trim();
+  if (!trimmed) return "";
+  return trimmed.replace(/^vec-subagent:/i, "").trim();
+}
+
+export function readArchivedSubagentIds(
+  agentId?: string | null,
+  win?: Window | null,
+): Set<string> {
+  const result = new Set<string>();
+  const key = String(agentId ?? "").trim();
+  if (!key) return result;
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  try {
+    const raw = w?.localStorage?.getItem(ARCHIVED_SUBAGENTS_STORAGE_KEY);
+    if (!raw) return result;
+    const parsed = JSON.parse(raw) as Record<string, string[]>;
+    const list = parsed?.[key] ?? parsed?.[key.slice(0, 8)] ?? [];
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        const norm = normalizeSubagentArchiveId(item);
+        if (norm) {
+          result.add(norm);
+          result.add(`vec-subagent:${norm}`);
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return result;
+}
+
+export function markSubagentsArchivedForAgent(
+  agentId: string | null | undefined,
+  subagentIds: string[],
+  win?: Window | null,
+): void {
+  const key = String(agentId ?? "").trim();
+  if (!key || !Array.isArray(subagentIds) || subagentIds.length === 0) return;
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  try {
+    const raw = w?.localStorage?.getItem(ARCHIVED_SUBAGENTS_STORAGE_KEY);
+    const parsed: Record<string, string[]> = raw ? JSON.parse(raw) : {};
+    const existing = new Set<string>(Array.isArray(parsed[key]) ? parsed[key] : []);
+    for (const id of subagentIds) {
+      const norm = normalizeSubagentArchiveId(id);
+      if (norm) existing.add(norm);
+    }
+    const merged = Array.from(existing);
+    parsed[key] = merged;
+    parsed[key.slice(0, 8)] = merged;
+    w?.localStorage?.setItem(ARCHIVED_SUBAGENTS_STORAGE_KEY, JSON.stringify(parsed));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function isAllSubagentsArchivedForTree(
+  tree: SubagentAgentTree | null | undefined,
+  win?: Window | null,
+): boolean {
+  if (!tree || tree.flatSubagents.length === 0) return false;
+  if (tree.subagentSummary.running > 0) return false;
+  if (tree.archived) return true;
+  const archivedSet = readArchivedSubagentIds(tree.agentId, win);
+  if (archivedSet.size === 0) return false;
+  const l1Subs = tree.flatSubagents.filter((s) => s.depth === 1);
+  const checkTargets = l1Subs.length > 0 ? l1Subs : tree.flatSubagents;
+  return checkTargets.every((s) =>
+    archivedSet.has(normalizeSubagentArchiveId(s.conversationId)),
+  );
+}
+
+export function patchPaseoSubagentTrackModules(
+  win?: Window | null,
+  onArchivedCallback?: (parentAgentId: string, subagentIds: string[]) => void,
+  onConversationUrlCallback?: (cid: string, rawUrl: string) => void,
+): boolean {
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  const modules = getMetroModuleList(w);
+  if (modules.length === 0) return false;
+  let patchedAny = false;
+
+  for (const mod of modules) {
+    if (!mod || mod.isInitialized !== true) continue;
+    const exp = mod.publicModule?.exports;
+    if (!exp || typeof exp !== "object") continue;
+
+    // 1. Patch buildSubagentPillPresentation & buildSubagentRowPresentationData (Metro module 5397)
+    if (
+      typeof exp.buildSubagentPillPresentation === "function" &&
+      !exp.__paseoSubagentPillDonePatched
+    ) {
+      const origBuildPill = exp.buildSubagentPillPresentation;
+      exp.buildSubagentPillPresentation = function patchedBuildSubagentPillPresentation(
+        rows: Array<Record<string, any>>,
+        t?: unknown,
+      ) {
+        const res = origBuildPill.call(this, rows, t);
+        if (!Array.isArray(rows) || rows.length === 0) return res;
+        const zh = isChineseLocale(w?.navigator?.language);
+        const total = rows.length;
+        const runningCount = rows.filter((r) => r && r.statusBucket === "running").length;
+        const doneCount = total - runningCount;
+        const baseSegText = String(
+          res?.segments?.[0]?.text ??
+            (total === 1 ? "1 subagent" : `${total} subagents`),
+        )
+          .replace(/\s*\u00b7\s*(?:Done|已完成)$/i, "")
+          .trim();
+
+        if (runningCount === 0) {
+          const doneWord = zh ? "已完成" : "Done";
+          return {
+            ...res,
+            segments: [
+              {
+                bucket: "done",
+                text: `${baseSegText} \u00b7 ${doneWord}`,
+              },
+            ],
+          };
+        }
+
+        if (doneCount > 0 && Array.isArray(res?.segments)) {
+          const hasDoneSeg = res.segments.some((s: any) => s?.bucket === "done");
+          if (!hasDoneSeg) {
+            return {
+              ...res,
+              segments: [
+                ...res.segments,
+                {
+                  bucket: "done",
+                  text: zh ? `${doneCount} 已完成` : `${doneCount} done`,
+                },
+              ],
+            };
+          }
+        }
+        return res;
+      };
+      exp.__paseoSubagentPillDonePatched = true;
+      patchedAny = true;
+    }
+
+    if (
+      typeof exp.buildSubagentRowPresentationData === "function" &&
+      !exp.__paseoSubagentRowDonePatched
+    ) {
+      const origBuildRow = exp.buildSubagentRowPresentationData;
+      exp.buildSubagentRowPresentationData = function patchedBuildSubagentRowPresentationData(
+        row: Record<string, any>,
+        t?: unknown,
+      ) {
+        const res = origBuildRow.call(this, row, t);
+        if (
+          row &&
+          row.statusBucket !== "running" &&
+          res &&
+          typeof res.detailText === "string"
+        ) {
+          res.detailText = res.detailText.replace(/\[Running\b/gi, "[Done");
+        }
+        return res;
+      };
+      exp.__paseoSubagentRowDonePatched = true;
+      patchedAny = true;
+    }
+
+    // 2. Patch getStatusDotColor (Metro module 4303) so "done" bucket shows a green status dot on ComposerTrackPill
+    if (
+      typeof exp.getStatusDotColor === "function" &&
+      !exp.__paseoStatusDotDonePatched
+    ) {
+      const origGetDot = exp.getStatusDotColor;
+      exp.getStatusDotColor = function patchedGetStatusDotColor(
+        theme: Record<string, any>,
+        bucket: string | null | undefined,
+        opts?: Record<string, any>,
+      ) {
+        if (bucket === "done") {
+          return theme?.colors?.statusDotSuccess ?? "#22c55e";
+        }
+        return origGetDot.call(this, theme, bucket, opts);
+      };
+      exp.__paseoStatusDotDonePatched = true;
+      patchedAny = true;
+    }
+
+    // 3. Patch useProviderSubagentStore (Metro module 4939) so archiving finished subagents persists & syncs
+    if (
+      typeof exp.useProviderSubagentStore?.getState === "function" &&
+      !exp.__paseoProviderSubagentStorePatched
+    ) {
+      try {
+        const storeState = exp.useProviderSubagentStore.getState();
+        if (storeState && typeof storeState.hideFromTrack === "function") {
+          const origHideFromTrack = storeState.hideFromTrack;
+          const wrappedHideFromTrack = function (
+            this: unknown,
+            serverId: string,
+            parentAgentId: string,
+            subagentIds: string[],
+          ) {
+            markSubagentsArchivedForAgent(parentAgentId, subagentIds, w);
+            const out = origHideFromTrack.call(this, serverId, parentAgentId, subagentIds);
+            onArchivedCallback?.(parentAgentId, subagentIds);
+            return out;
+          };
+          storeState.hideFromTrack = wrappedHideFromTrack;
+          if (typeof exp.useProviderSubagentStore.setState === "function") {
+            exp.useProviderSubagentStore.setState({ hideFromTrack: wrappedHideFromTrack });
+          }
+        }
+        exp.__paseoProviderSubagentStorePatched = true;
+        patchedAny = true;
+      } catch {
+        // ignore store patch errors
+      }
+    }
+
+    // 4. Patch openExternalUrl (Metro module 3687) so `conversation://<uuid>` Markdown links open our subagent / session inspector instead of being ignored
+    if (
+      typeof exp.openExternalUrl === "function" &&
+      !exp.__paseoConversationUrlPatched
+    ) {
+      const origOpenExternalUrl = exp.openExternalUrl;
+      exp.openExternalUrl = async function patchedOpenExternalUrl(
+        this: unknown,
+        url: string,
+      ) {
+        const rawUrl = String(url ?? "").trim();
+        const convMatch = rawUrl.match(/^conversation:\/\/([A-Za-z0-9-]+)/i);
+        if (convMatch?.[1]) {
+          const cid = convMatch[1];
+          onConversationUrlCallback?.(cid, rawUrl);
+          const refNode = resolveSessionReference(cid);
+          if (refNode && typeof document !== "undefined") {
+            navigateToLineageNode(refNode, document, w);
+            return;
+          }
+          triggerSubagentsTreeDrawer({
+            conversationId: cid,
+            layoutMode: "docked-right",
+          });
+          return;
+        }
+        return origOpenExternalUrl.call(this, url);
+      };
+      exp.__paseoConversationUrlPatched = true;
+      patchedAny = true;
+    }
+  }
+
+  return patchedAny;
+}
+
+const GENERIC_SUBAGENT_TYPES = new Set([
+  "self",
+  "subagent",
+  "research",
+  "orchestrator",
+  "agent",
+  "worker",
+]);
+
+export function formatSubagentDisplayName(
+  sub: { subAgentType: string; role?: string | null },
+  parentSub?: { subAgentType: string; role?: string | null } | null,
+  maxLen = 28,
+): string {
+  const rawType = (sub.subAgentType ?? "").trim();
+  const rawRole = (sub.role ?? "").trim();
+  const isGenericType = !rawType || GENERIC_SUBAGENT_TYPES.has(rawType.toLowerCase());
+  let chosen = isGenericType && rawRole ? rawRole : rawType || rawRole || "subagent";
+
+  if (!isGenericType && parentSub?.subAgentType) {
+    const parentType = parentSub.subAgentType.trim();
+    if (parentType && chosen.length > parentType.length && chosen.startsWith(parentType)) {
+      const rest = chosen.slice(parentType.length).replace(/^[-_\s]+/, "");
+      if (rest.length >= 3) {
+        chosen = rest;
+      }
+    }
+  }
+
+  if (maxLen > 0 && chosen.length > maxLen) {
+    return `${chosen.slice(0, Math.max(4, maxLen - 1)).trimEnd()}…`;
+  }
+  return chosen;
+}
+
+export function decorateConversationLinksAndSubagentMentionsInDom(
+  tree: SubagentAgentTree | null | undefined,
+  doc?: Document | null,
+  zh = false,
+): number {
+  const d = doc ?? (typeof document !== "undefined" ? document : null);
+  if (!d) return 0;
+  let decoratedCount = 0;
+  const subs = tree?.flatSubagents ?? [];
+
+  // 1. Decorate all `<a href="conversation://<cid>">` Markdown links rendered in assistant messages
+  const allLinks = Array.from(d.querySelectorAll<HTMLAnchorElement>("a[href]"));
+  for (const aEl of allLinks) {
+    const href = (aEl.getAttribute("href") ?? "").trim();
+    const convMatch = href.match(/conversation:\/\/([A-Za-z0-9-]+)/i);
+    if (!convMatch?.[1]) continue;
+    const rawCid = convMatch[1];
+    const linkText = (aEl.textContent ?? "")
+      .replace(/\s*↗$/, "")
+      .trim();
+    const matchedSub =
+      subs.find(
+        (s) =>
+          s.conversationId.toLowerCase() === rawCid.toLowerCase() ||
+          s.conversationId.toLowerCase().startsWith(rawCid.toLowerCase()),
+      ) ??
+      (linkText.length >= 4
+        ? subs.find(
+            (s) =>
+              Boolean(s.role) &&
+              s.role.trim().toLowerCase() === linkText.toLowerCase(),
+          )
+        : undefined) ??
+      null;
+
+    const effectiveCid = matchedSub?.conversationId ?? rawCid;
+    aEl.setAttribute("data-vec-conversation-cid", effectiveCid);
+    if (matchedSub) {
+      aEl.setAttribute("data-vec-subagent-cid", matchedSub.conversationId);
+    }
+    aEl.setAttribute(
+      "data-testid",
+      `paseo-finder-conversation-link-${effectiveCid.slice(0, 8)}`,
+    );
+    aEl.style.cursor = "pointer";
+    aEl.style.textDecoration = "underline";
+    aEl.style.textDecorationStyle = "dotted";
+    aEl.style.textUnderlineOffset = "3px";
+
+    if (matchedSub) {
+      const displayRole = formatSubagentDisplayName(matchedSub, null, 48);
+      const statusWord = formatStatusLabel(matchedSub.status, zh);
+      const stepsWord = zh ? `${matchedSub.stepCount} 步` : `${matchedSub.stepCount} steps`;
+      aEl.title = zh
+        ? `L${matchedSub.depth} ${displayRole} · ${statusWord} (${stepsWord}) — 点击在右侧栏查看子会话 (Alt/⌘+点击切换标签页)`
+        : `L${matchedSub.depth} ${displayRole} · ${statusWord} (${stepsWord}) — Click to inspect subagent in Right Sidebar (Alt/⌘+Click switches tab)`;
+    } else {
+      aEl.title = zh
+        ? `点击打开关联会话 (${effectiveCid.slice(0, 8)})`
+        : `Click to open linked conversation (${effectiveCid.slice(0, 8)})`;
+    }
+
+    if (!aEl.querySelector('[data-testid="paseo-finder-conv-link-badge"]')) {
+      const arrowSpan = d.createElement("span");
+      arrowSpan.setAttribute("data-testid", "paseo-finder-conv-link-badge");
+      arrowSpan.textContent = " ↗";
+      Object.assign(arrowSpan.style, {
+        fontSize: "11px",
+        opacity: "0.85",
+        userSelect: "none",
+      });
+      aEl.appendChild(arrowSpan);
+    }
+    decoratedCount += 1;
+  }
+
+  // 2. Also decorate inline `<strong>`, `<b>`, `<code>` mentions that match a subagent's exact Role or non-generic TypeName
+  if (subs.length > 0) {
+    const inlineCandidates = Array.from(
+      d.querySelectorAll<HTMLElement>("strong, b, code"),
+    );
+    for (const el of inlineCandidates) {
+      if (
+        el.closest(
+          'a[href], [data-vec-subagent-cid], [data-vec-conversation-cid], [data-testid^="paseo-finder-"], [data-testid^="sidebar-"], [data-testid="tool-call-badge"]',
+        )
+      ) {
+        continue;
+      }
+      const cleanTxt = (el.textContent ?? "")
+        .replace(/\s*↗$/, "")
+        .trim()
+        .replace(/^['"“”‘’`]+|['"“”‘’`：:]+$/g, "")
+        .trim();
+      if (cleanTxt.length < 4 || cleanTxt.length > 120) continue;
+      const lowerTxt = cleanTxt.toLowerCase();
+
+      const matchedSub =
+        subs.find(
+          (s) =>
+            s.role &&
+            s.role.trim().length >= 4 &&
+            s.role.trim().toLowerCase() === lowerTxt,
+        ) ??
+        subs.find(
+          (s) =>
+            !GENERIC_SUBAGENT_TYPES.has(s.subAgentType.trim().toLowerCase()) &&
+            s.subAgentType.trim().length >= 4 &&
+            s.subAgentType.trim().toLowerCase() === lowerTxt,
+        ) ??
+        null;
+
+      if (!matchedSub) continue;
+      el.setAttribute("data-vec-subagent-cid", matchedSub.conversationId);
+      el.setAttribute(
+        "data-testid",
+        `paseo-finder-role-mention-${matchedSub.conversationId.slice(0, 8)}`,
+      );
+      el.style.cursor = "pointer";
+      el.style.textDecoration = "underline";
+      el.style.textDecorationStyle = "dotted";
+      el.style.textUnderlineOffset = "3px";
+      const displayRole = formatSubagentDisplayName(matchedSub, null, 48);
+      const statusWord = formatStatusLabel(matchedSub.status, zh);
+      const stepsWord = zh ? `${matchedSub.stepCount} 步` : `${matchedSub.stepCount} steps`;
+      el.title = zh
+        ? `L${matchedSub.depth} ${displayRole} · ${statusWord} (${stepsWord}) — 点击在右侧栏查看子会话`
+        : `L${matchedSub.depth} ${displayRole} · ${statusWord} (${stepsWord}) — Click to inspect subagent in Right Sidebar`;
+      decoratedCount += 1;
+    }
+  }
+
+  return decoratedCount;
+}
 
 export type SubagentDrawerLayoutMode = "docked-right" | "wide-modal";
 
@@ -130,7 +577,7 @@ function statusColors(
   };
 }
 
-function classifyToolCallBadgeText(
+export function classifyToolCallBadgeText(
   rawText: string,
   tree: SubagentAgentTree | null,
 ): {
@@ -148,11 +595,28 @@ function classifyToolCallBadgeText(
     return { kind: "subagent", subagentName: firstToken };
   }
   if (
-    tree?.flatSubagents.some(
-      (s) => s.subAgentType.toLowerCase() === firstToken && firstToken.length >= 2,
-    )
+    /^(?:deep|worker|investigator|coder|research|subagent)/i.test(firstToken) ||
+    /(?:workerl\d|investigator|deepcoder|subagent)/i.test(firstToken) ||
+    /\[(?:Running|Done|Failed)\s*\u00b7\s*(?:\d+\s*steps?|Starting)/i.test(withoutRobot)
   ) {
     return { kind: "subagent", subagentName: firstToken };
+  }
+  if (
+    tree?.flatSubagents.some(
+      (s) =>
+        (s.subAgentType.toLowerCase() === firstToken && firstToken.length >= 2) ||
+        withoutRobot.toLowerCase().includes(s.subAgentType.toLowerCase()),
+    )
+  ) {
+    const matched = tree.flatSubagents.find(
+      (s) =>
+        s.subAgentType.toLowerCase() === firstToken ||
+        withoutRobot.toLowerCase().includes(s.subAgentType.toLowerCase()),
+    );
+    return {
+      kind: "subagent",
+      subagentName: matched ? matched.subAgentType.toLowerCase() : firstToken,
+    };
   }
   if (/^Timer\s*\(/i.test(withoutRobot) || /^schedule\b/i.test(withoutRobot)) {
     return { kind: "timer" };
@@ -164,6 +628,259 @@ function classifyToolCallBadgeText(
     return { kind: "message" };
   }
   return { kind: null };
+}
+
+export interface SubagentLineageChainResult {
+  activeSubagent: FlatSubagentNode | null;
+  immediateParentSubagent: FlatSubagentNode | null;
+  ancestorChain: FlatSubagentNode[];
+  directChildren: FlatSubagentNode[];
+}
+
+export function buildSubagentLineageChain(
+  tree: SubagentAgentTree | null | undefined,
+  activeSubagentId?: string | null,
+): SubagentLineageChainResult {
+  const empty: SubagentLineageChainResult = {
+    activeSubagent: null,
+    immediateParentSubagent: null,
+    ancestorChain: [],
+    directChildren: [],
+  };
+  if (!tree || !Array.isArray(tree.flatSubagents) || tree.flatSubagents.length === 0) {
+    return empty;
+  }
+  const cleanId = normalizeSubagentArchiveId(activeSubagentId);
+  if (!cleanId) {
+    return {
+      ...empty,
+      directChildren: tree.flatSubagents.filter((s) => s.depth === 1),
+    };
+  }
+  const byId = new Map<string, FlatSubagentNode>();
+  for (const s of tree.flatSubagents) {
+    byId.set(normalizeSubagentArchiveId(s.conversationId), s);
+  }
+  const activeSub =
+    byId.get(cleanId) ??
+    tree.flatSubagents.find(
+      (s) =>
+        s.conversationId === cleanId ||
+        s.conversationId.startsWith(cleanId) ||
+        cleanId.endsWith(s.conversationId),
+    ) ??
+    null;
+  if (!activeSub) {
+    return {
+      ...empty,
+      directChildren: tree.flatSubagents.filter((s) => s.depth === 1),
+    };
+  }
+
+  const chain: FlatSubagentNode[] = [activeSub];
+  const seen = new Set<string>([normalizeSubagentArchiveId(activeSub.conversationId)]);
+  let cur: FlatSubagentNode | null = activeSub;
+  while (cur && cur.depth > 1 && cur.parentConversationId) {
+    const pNorm = normalizeSubagentArchiveId(cur.parentConversationId);
+    if (!pNorm || seen.has(pNorm) || pNorm === normalizeSubagentArchiveId(tree.rootConversationId)) {
+      break;
+    }
+    const parentNode =
+      byId.get(pNorm) ??
+      tree.flatSubagents.find(
+        (s) =>
+          normalizeSubagentArchiveId(s.conversationId) === pNorm && s.depth < cur!.depth,
+      ) ??
+      null;
+    if (!parentNode) break;
+    chain.unshift(parentNode);
+    seen.add(normalizeSubagentArchiveId(parentNode.conversationId));
+    cur = parentNode;
+  }
+
+  const immediateParentSubagent = chain.length >= 2 ? chain[chain.length - 2] : null;
+  const activeNorm = normalizeSubagentArchiveId(activeSub.conversationId);
+  const directChildren = tree.flatSubagents.filter(
+    (s) => normalizeSubagentArchiveId(s.parentConversationId) === activeNorm,
+  );
+  return {
+    activeSubagent: activeSub,
+    immediateParentSubagent,
+    ancestorChain: chain,
+    directChildren,
+  };
+}
+
+export function resolveActiveSubagentNodeFromDom(
+  tree: SubagentAgentTree | null | undefined,
+  doc?: Document | null,
+  win?: Window | null,
+): FlatSubagentNode | null {
+  if (!tree || tree.flatSubagents.length === 0) return null;
+  const d = doc ?? (typeof document !== "undefined" ? document : null);
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  if (!d) return null;
+
+  // 1. Check active provider_subagent workspace tab in DOM
+  const ctx = extractCurrentWorkspaceAndAgent(d, w);
+  if (ctx.activeSubagentId) {
+    const norm = normalizeSubagentArchiveId(ctx.activeSubagentId);
+    const matched = tree.flatSubagents.find(
+      (s) =>
+        normalizeSubagentArchiveId(s.conversationId) === norm ||
+        s.conversationId.startsWith(norm),
+    );
+    if (matched) return matched;
+  }
+
+  // 2. If provider-subagent-panel is mounted, check focused tab in useWorkspaceLayoutStore / localStorage or subtitle
+  const subPanel = d.querySelector<HTMLElement>('[data-testid="provider-subagent-panel"]');
+  if (!subPanel) return null;
+
+  const focusedTarget = extractFocusedWorkspaceTabTarget(
+    ctx.workspaceId ?? tree.workspaceId,
+    w,
+  );
+  if (focusedTarget?.subagentId) {
+    const norm = normalizeSubagentArchiveId(focusedTarget.subagentId);
+    const matched = tree.flatSubagents.find(
+      (s) =>
+        normalizeSubagentArchiveId(s.conversationId) === norm ||
+        s.conversationId.startsWith(norm),
+    );
+    if (matched) return matched;
+  }
+
+  // 3. Fallback: match `[data-testid="provider-subagent-pane-subtitle"]` text against subAgentType / role / description
+  const subtitleEl = d.querySelector<HTMLElement>(
+    '[data-testid="provider-subagent-pane-subtitle"]',
+  );
+  const subtitleText = (subtitleEl?.textContent ?? "").trim();
+  if (subtitleText) {
+    const exactMatch = tree.flatSubagents.find(
+      (s) =>
+        subtitleText.includes(`L${s.depth} ${s.subAgentType}`) ||
+        subtitleText.includes(s.conversationId.slice(0, 8)),
+    );
+    if (exactMatch) return exactMatch;
+    const typeMatches = tree.flatSubagents.filter((s) =>
+      subtitleText.toLowerCase().includes(s.subAgentType.toLowerCase()),
+    );
+    if (typeMatches.length === 1) return typeMatches[0];
+  }
+
+  return null;
+}
+
+export function openOrFocusSubagentOrRootTabInApp(
+  opts: {
+    workspaceId?: string | null;
+    parentAgentId: string;
+    subagentId?: string | null;
+  },
+  doc?: Document | null,
+  win?: Window | null,
+): boolean {
+  const d = doc ?? (typeof document !== "undefined" ? document : null);
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  const parentAgentId = (opts.parentAgentId ?? "").trim();
+  if (!parentAgentId) return false;
+  const subagentId = normalizeSubagentArchiveId(opts.subagentId) || null;
+
+  if (!subagentId) {
+    // Jumping to Root / Main Agent (L0)
+    if (d) {
+      const rootTab = d.querySelector<HTMLElement>(
+        `[data-testid="workspace-tab-agent_${parentAgentId}"]`,
+      );
+      if (rootTab) {
+        rootTab.click();
+        return true;
+      }
+    }
+    if (
+      openWorkspaceTargetTabViaStore(
+        {
+          workspaceId: opts.workspaceId,
+          parentAgentId,
+          subagentId: null,
+        },
+        w,
+      )
+    ) {
+      return true;
+    }
+    if (d) {
+      const calloutOpenBtn = d.querySelector<HTMLElement>(
+        '[data-testid="parent-agent-callout-open"]',
+      );
+      if (calloutOpenBtn) {
+        calloutOpenBtn.setAttribute("data-vec-bypass-intercept", "1");
+        try {
+          calloutOpenBtn.click();
+        } finally {
+          calloutOpenBtn.removeAttribute("data-vec-bypass-intercept");
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Jumping to a Subagent Tab (L1 / L2 / L3)
+  if (d) {
+    const candidateIds = [subagentId, `vec-subagent:${subagentId}`];
+    for (const cid of candidateIds) {
+      const exactTestId = buildProviderSubagentTabTestId(parentAgentId, cid);
+      const tabEl = d.querySelector<HTMLElement>(`[data-testid="${exactTestId}"]`);
+      if (tabEl) {
+        tabEl.click();
+        return true;
+      }
+    }
+    const allSubTabs = Array.from(
+      d.querySelectorAll<HTMLElement>('[data-testid^="workspace-tab-provider_subagent_"]'),
+    );
+    for (const el of allSubTabs) {
+      const parsed = parseProviderSubagentTabTestId(el.getAttribute("data-testid"));
+      if (
+        parsed &&
+        normalizeSubagentArchiveId(parsed.subagentId) === subagentId
+      ) {
+        el.click();
+        return true;
+      }
+    }
+  }
+
+  if (
+    openWorkspaceTargetTabViaStore(
+      {
+        workspaceId: opts.workspaceId,
+        parentAgentId,
+        subagentId,
+      },
+      w,
+    )
+  ) {
+    return true;
+  }
+
+  if (d) {
+    const trackCandidates = [
+      `[data-testid="subagents-track-row-${subagentId}"]`,
+      `[data-testid="subagents-track-row-vec-subagent:${subagentId}"]`,
+    ];
+    for (const sel of trackCandidates) {
+      const row = d.querySelector<HTMLElement>(sel);
+      if (row) {
+        row.click();
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 export function installDesktopSubagentsTreeEnhancer(
@@ -792,7 +1509,7 @@ export function installDesktopSubagentsTreeEnhancer(
         visited.add(cursor.conversationId);
         chain.unshift({
           cid: cursor.conversationId,
-          label: `L${cursor.depth} ${cursor.subAgentType}`,
+          label: `L${cursor.depth} ${formatSubagentDisplayName(cursor, null, 28)}`,
           status: cursor.status,
           isCurrent: cursor.conversationId === activeNode?.conversationId,
         });
@@ -1074,8 +1791,9 @@ export function installDesktopSubagentsTreeEnhancer(
             });
 
             const nameSpan = document.createElement("span");
-            nameSpan.textContent = `L${sub.depth} · ${sub.subAgentType}${
-              sub.role ? ` (${sub.role})` : ""
+            const nodeDisplayName = formatSubagentDisplayName(sub, null, 48);
+            nameSpan.textContent = `L${sub.depth} · ${nodeDisplayName}${
+              sub.role && nodeDisplayName !== sub.role ? ` (${sub.role})` : ""
             }`;
             Object.assign(nameSpan.style, {
               fontSize: "12px",
@@ -1826,7 +2544,11 @@ export function installDesktopSubagentsTreeEnhancer(
 
     const zh = isZh();
     const tokens = syncPaseoThemeCssVariables(document as never, window as never);
-    const sig = `${tree.agentId}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${totalTimers}:${leftSidebarCollapsed}:${zh}`;
+    const activeSub = resolveActiveSubagentNodeFromDom(tree, document, window);
+    const activeSubCid = activeSub?.conversationId ?? "";
+    const allDone = tree.subagentSummary.running === 0;
+    const allArchived = allDone && isAllSubagentsArchivedForTree(tree, window);
+    const sig = `${tree.agentId}:${activeSubCid}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${totalTimers}:${allArchived}:${leftSidebarCollapsed}:${zh}`;
 
     let container = existingLeftTree;
     if (!container || container.previousElementSibling !== targetWsRow) {
@@ -1845,13 +2567,22 @@ export function installDesktopSubagentsTreeEnhancer(
     Object.assign(container.style, {
       display: "flex",
       flexDirection: "column",
-      gap: "2px",
-      margin: "2px 8px 6px 20px",
+      gap: "1px",
+      margin: "2px 8px 4px 18px",
       paddingLeft: "8px",
       borderLeft: `1px solid ${tokens.border}`,
       fontFamily:
         'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     });
+
+    const compactSubagentName = (name: string, parentName?: string | null): string => {
+      const trimmed = (name || "").trim();
+      if (parentName && trimmed.length > parentName.length && trimmed.startsWith(parentName)) {
+        const rest = trimmed.slice(parentName.length).replace(/^[-_\s]+/, "");
+        if (rest.length >= 3) return rest;
+      }
+      return trimmed;
+    };
 
     const headerRow = document.createElement("div");
     headerRow.setAttribute("data-testid", "paseo-finder-left-sidebar-subagents-toggle");
@@ -1865,27 +2596,48 @@ export function installDesktopSubagentsTreeEnhancer(
       userSelect: "none",
     });
 
+    const headerLeft = document.createElement("div");
+    Object.assign(headerLeft.style, {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: "6px",
+      minWidth: "0",
+    });
+
+    const headerDot = document.createElement("span");
+    Object.assign(headerDot.style, {
+      width: "5px",
+      height: "5px",
+      borderRadius: "999px",
+      backgroundColor: allDone ? tokens.statusSuccess : tokens.statusWarning,
+      flexShrink: "0",
+    });
+
+    const headerStateSuffix = allArchived
+      ? zh
+        ? " · 已归档"
+        : " · Archived"
+      : allDone
+        ? zh
+          ? " · 已完成"
+          : " · Done"
+        : zh
+          ? ` · ${tree.subagentSummary.running} 运行中`
+          : ` · ${tree.subagentSummary.running} running`;
+
     const headerLabel = document.createElement("span");
     headerLabel.textContent = zh
-      ? `${leftSidebarCollapsed ? "▸" : "▾"} 子会话树 (${tree.subagentSummary.total})`
-      : `${leftSidebarCollapsed ? "▸" : "▾"} Subagents (${tree.subagentSummary.total})`;
+      ? `${leftSidebarCollapsed ? "▸" : "▾"} 子会话 (${tree.subagentSummary.total}${headerStateSuffix})`
+      : `${leftSidebarCollapsed ? "▸" : "▾"} Subagents (${tree.subagentSummary.total}${headerStateSuffix})`;
     Object.assign(headerLabel.style, {
       fontSize: "11px",
-      fontWeight: "600",
+      fontWeight: "500",
       color: tokens.foregroundMuted,
     });
 
-    const headerSteps = document.createElement("span");
-    headerSteps.textContent = zh
-      ? `${tree.subagentSummary.totalSubagentSteps} 步`
-      : `${tree.subagentSummary.totalSubagentSteps} steps`;
-    Object.assign(headerSteps.style, {
-      fontSize: "10.5px",
-      color: tokens.foregroundMuted,
-    });
-
-    headerRow.appendChild(headerLabel);
-    headerRow.appendChild(headerSteps);
+    headerLeft.appendChild(headerDot);
+    headerLeft.appendChild(headerLabel);
+    headerRow.appendChild(headerLeft);
     headerRow.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1903,14 +2655,77 @@ export function installDesktopSubagentsTreeEnhancer(
       return;
     }
 
+    // Root L0 row inside Left Sidebar Subagents Tree (hidden when already on Main Agent so it doesn't duplicate workspace row)
+    const isRootActive = !activeSub;
+    const rootBtn = document.createElement("button");
+    rootBtn.type = "button";
+    rootBtn.setAttribute("data-testid", "paseo-finder-left-sidebar-subagent-root");
+    rootBtn.setAttribute("aria-current", isRootActive ? "true" : "false");
+    Object.assign(rootBtn.style, {
+      display: isRootActive ? "none" : "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: "6px",
+      padding: "3px 6px",
+      borderRadius: "5px",
+      border: "none",
+      backgroundColor: "transparent",
+      color: tokens.foregroundMuted,
+      fontSize: "11px",
+      cursor: "pointer",
+      textAlign: "left",
+    });
+    const rootLeft = document.createElement("span");
+    rootLeft.textContent = zh ? "↩ L0 主会话" : "↩ L0 Main Agent";
+    Object.assign(rootLeft.style, {
+      fontSize: "11px",
+      fontWeight: "500",
+      color: tokens.foregroundMuted,
+    });
+    rootBtn.appendChild(rootLeft);
+    rootBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (
+        !openOrFocusSubagentOrRootTabInApp(
+          {
+            workspaceId: tree.workspaceId,
+            parentAgentId: tree.agentId,
+            subagentId: null,
+          },
+          document,
+          window,
+        )
+      ) {
+        void openDrawer({
+          agentId: tree.agentId,
+          workspaceId: tree.workspaceId,
+          conversationId: tree.rootConversationId,
+          layoutMode: "docked-right",
+        });
+      }
+    });
+    container.appendChild(rootBtn);
+
     for (const sub of tree.flatSubagents) {
       const sc = statusColors(sub.status, tokens);
+      const isSubActive = activeSub?.conversationId === sub.conversationId;
+      const parentSub =
+        sub.depth >= 2
+          ? tree.flatSubagents.find(
+              (p) =>
+                normalizeSubagentArchiveId(p.conversationId) ===
+                normalizeSubagentArchiveId(sub.parentConversationId),
+            )
+          : null;
       const itemBtn = document.createElement("button");
       itemBtn.type = "button";
       itemBtn.setAttribute(
         "data-testid",
         `paseo-finder-left-sidebar-subagent-${sub.conversationId.slice(0, 8)}`,
       );
+      itemBtn.setAttribute("data-depth", String(sub.depth));
+      itemBtn.setAttribute("aria-current", isSubActive ? "true" : "false");
       const indentPx = Math.max(0, (sub.depth - 1) * 10);
       Object.assign(itemBtn.style, {
         display: "flex",
@@ -1918,12 +2733,12 @@ export function installDesktopSubagentsTreeEnhancer(
         justifyContent: "space-between",
         gap: "6px",
         marginLeft: `${indentPx}px`,
-        padding: "4px 6px",
+        padding: "3px 6px",
         borderRadius: "5px",
-        border: "1px solid transparent",
-        backgroundColor: "transparent",
-        color: tokens.foreground,
-        fontSize: "11.5px",
+        border: `1px solid ${isSubActive ? tokens.border : "transparent"}`,
+        backgroundColor: isSubActive ? tokens.surface2 : "transparent",
+        color: isSubActive ? tokens.foreground : tokens.foregroundMuted,
+        fontSize: "11px",
         cursor: "pointer",
         textAlign: "left",
       });
@@ -1939,19 +2754,21 @@ export function installDesktopSubagentsTreeEnhancer(
 
       const dot = document.createElement("span");
       Object.assign(dot.style, {
-        width: "6px",
-        height: "6px",
+        width: "5px",
+        height: "5px",
         borderRadius: "999px",
         backgroundColor: sc.dot,
         flexShrink: "0",
       });
 
       const nameEl = document.createElement("span");
-      nameEl.textContent = `L${sub.depth} ${sub.subAgentType}`;
+      const shortName = formatSubagentDisplayName(sub, parentSub, 24);
+      const fullSubTitle = formatSubagentDisplayName(sub, null, 60);
+      nameEl.textContent = `L${sub.depth} ${shortName}`;
       Object.assign(nameEl.style, {
-        fontSize: "11.5px",
-        fontWeight: "500",
-        color: tokens.foreground,
+        fontSize: "11px",
+        fontWeight: isSubActive ? "600" : "500",
+        color: isSubActive ? tokens.foreground : tokens.foregroundMuted,
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",
@@ -1961,10 +2778,20 @@ export function installDesktopSubagentsTreeEnhancer(
       leftPart.appendChild(nameEl);
 
       const metaEl = document.createElement("span");
-      metaEl.textContent = zh ? `${sub.stepCount}步` : `${sub.stepCount}s`;
+      const finishedClock =
+        sub.status !== "running" && sub.updatedAt
+          ? formatConciseLocalFinishedTime(sub.updatedAt)
+          : "";
+      const statusWord = formatStatusLabel(sub.status, zh);
+      metaEl.textContent = finishedClock || statusWord;
+      const fullParentHint = parentSub
+        ? `↖ L${parentSub.depth} ${formatSubagentDisplayName(parentSub, null, 28)} · `
+        : "";
+      const timeTip = sub.updatedAt ? ` · ${formatFullLocalFinishedTooltip(sub.updatedAt)}` : "";
+      itemBtn.title = `L${sub.depth} ${fullSubTitle} (${fullParentHint}${statusWord} · ${sub.stepCount} steps${timeTip})`;
       Object.assign(metaEl.style, {
-        fontSize: "10.5px",
-        color: sc.fg,
+        fontSize: "10px",
+        color: tokens.foregroundMuted,
         flexShrink: "0",
       });
 
@@ -1974,6 +2801,20 @@ export function installDesktopSubagentsTreeEnhancer(
       itemBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
+        if (
+          !ev.shiftKey &&
+          openOrFocusSubagentOrRootTabInApp(
+            {
+              workspaceId: tree.workspaceId,
+              parentAgentId: tree.agentId,
+              subagentId: sub.conversationId,
+            },
+            document,
+            window,
+          )
+        ) {
+          return;
+        }
         void openDrawer({
           agentId: tree.agentId,
           workspaceId: tree.workspaceId,
@@ -1986,6 +2827,170 @@ export function installDesktopSubagentsTreeEnhancer(
     }
   };
 
+  const archiveFinishedSubagentsForTree = (tree: SubagentAgentTree | null) => {
+    if (!tree || tree.flatSubagents.length === 0) return;
+    const finishedIds = tree.flatSubagents
+      .filter((s) => s.status !== "running")
+      .flatMap((s) => [s.conversationId, `vec-subagent:${s.conversationId}`]);
+    if (finishedIds.length === 0) return;
+    markSubagentsArchivedForAgent(tree.agentId, finishedIds, window);
+
+    // Also invoke Paseo's native useProviderSubagentStore.hideFromTrack or click the native Archive button if mounted
+    const nativeArchiveBtn = document.querySelector<HTMLElement>(
+      '[data-testid="subagents-track-archive-finished"]',
+    );
+    if (nativeArchiveBtn) {
+      nativeArchiveBtn.click();
+    } else {
+      const modules = getMetroModuleList(window);
+      for (const mod of modules) {
+        const exp = mod?.publicModule?.exports;
+        if (typeof exp?.useProviderSubagentStore?.getState === "function") {
+          try {
+            const st = exp.useProviderSubagentStore.getState();
+            if (typeof st?.hideFromTrack === "function") {
+              st.hideFromTrack("local", tree.agentId, finishedIds);
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+    leftSidebarCollapsed = true;
+    try {
+      window.localStorage?.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, "true");
+    } catch {
+      // ignore
+    }
+    decorateActiveAgentSubagentsDom(tree);
+  };
+
+  const enhanceNativeSubagentTrackDom = (
+    tree: SubagentAgentTree | null,
+    zh: boolean,
+    tokens: ReturnType<typeof syncPaseoThemeCssVariables>,
+  ) => {
+    const nativeHeader = document.querySelector<HTMLElement>(
+      '[data-testid="subagents-track-header"]',
+    );
+    const nativeArchiveBtn = document.querySelector<HTMLElement>(
+      '[data-testid="subagents-track-archive-finished"]',
+    );
+
+    if (nativeArchiveBtn && nativeArchiveBtn.getAttribute("data-vec-archive-hooked") !== "1") {
+      nativeArchiveBtn.setAttribute("data-vec-archive-hooked", "1");
+      nativeArchiveBtn.addEventListener("click", () => {
+        const curScope = resolveActiveScope();
+        const curTree = tree ?? getCachedTreeForScope(curScope);
+        if (curTree) {
+          const finishedIds = curTree.flatSubagents
+            .filter((s) => s.status !== "running")
+            .map((s) => s.conversationId);
+          markSubagentsArchivedForAgent(curTree.agentId, finishedIds, window);
+          leftSidebarCollapsed = true;
+          setTimeout(() => {
+            decorateActiveAgentSubagentsDom(curTree);
+          }, 40);
+        }
+      });
+    }
+
+    const nativeRows = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid^="subagents-track-row-"]'),
+    );
+    let anyNativeRowRunning = false;
+    for (const rowEl of nativeRows) {
+      const tid = rowEl.getAttribute("data-testid") ?? "";
+      const rawCid = tid
+        .replace(/^subagents-track-row-(?:vec-subagent:)?/i, "")
+        .trim();
+      const matchedSub = tree?.flatSubagents.find(
+        (s) => s.conversationId === rawCid || rawCid.endsWith(s.conversationId),
+      );
+      const isRowDone = matchedSub
+        ? matchedSub.status !== "running"
+        : Boolean(tree && tree.subagentSummary.running === 0) ||
+          /\[Done\b/i.test(rowEl.textContent ?? "");
+      if (!isRowDone && /\[Running\b/i.test(rowEl.textContent ?? "")) {
+        anyNativeRowRunning = true;
+      }
+      if (isRowDone && typeof document.createTreeWalker === "function") {
+        const walker = document.createTreeWalker(rowEl, 4 /* NodeFilter.SHOW_TEXT */);
+        let tNode = walker.nextNode();
+        while (tNode) {
+          const val = tNode.nodeValue ?? "";
+          if (/\[Running\b/i.test(val)) {
+            tNode.nodeValue = val.replace(/\[Running\b/gi, "[Done");
+          }
+          tNode = walker.nextNode();
+        }
+      }
+    }
+
+    if (!nativeHeader) return;
+
+    // If user already archived all finished subagents for this agent, hide the stale native pill
+    if (tree && isAllSubagentsArchivedForTree(tree, window)) {
+      const trackContainer =
+        nativeHeader.closest<HTMLElement>('[data-testid="subagents-track"]') ??
+        nativeHeader;
+      trackContainer.style.display = "none";
+      return;
+    }
+
+    const isAllDone =
+      (tree && tree.subagentSummary.total > 0 && tree.subagentSummary.running === 0) ||
+      (Boolean(nativeArchiveBtn) && !anyNativeRowRunning && (!tree || tree.subagentSummary.running === 0));
+
+    if (!isAllDone) return;
+
+    const doneWord = zh ? "已完成" : "Done";
+    const textLeaves = Array.from(nativeHeader.querySelectorAll<HTMLElement>("div, span")).filter(
+      (el) => el.children.length === 0 && (el.textContent ?? "").trim().length > 0,
+    );
+    const pillTextEl =
+      textLeaves.find((el) =>
+        /^\d+\s+subagents?(?:\s*\u00b7\s*(?:Done|已完成))?$|^\d+\s*个子智能体(?:\s*\u00b7\s*(?:Done|已完成))?$/i.test(
+          (el.textContent ?? "").trim(),
+        ),
+      ) ?? textLeaves[0];
+
+    if (pillTextEl) {
+      const rawTxt = (pillTextEl.textContent ?? "").trim();
+      const strippedBase = rawTxt.replace(/\s*\u00b7\s*(?:Done|已完成)$/i, "").trim();
+      const totalFromTree = tree?.subagentSummary?.total ?? 0;
+      const baseTxt =
+        totalFromTree > 0
+          ? zh
+            ? `${totalFromTree} 个子智能体`
+            : `${totalFromTree} ${totalFromTree === 1 ? "subagent" : "subagents"}`
+          : strippedBase;
+      const targetTxt = `${baseTxt} \u00b7 ${doneWord}`;
+      if (rawTxt !== targetTxt) {
+        pillTextEl.textContent = targetTxt;
+      }
+      const parentFlex = pillTextEl.parentElement ?? nativeHeader;
+      let doneDot = parentFlex.querySelector<HTMLElement>(
+        '[data-testid="paseo-finder-native-pill-done-dot"]',
+      );
+      if (!doneDot) {
+        doneDot = document.createElement("span");
+        doneDot.setAttribute("data-testid", "paseo-finder-native-pill-done-dot");
+        parentFlex.insertBefore(doneDot, pillTextEl);
+      }
+      Object.assign(doneDot.style, {
+        display: "inline-block",
+        width: "6px",
+        height: "6px",
+        borderRadius: "999px",
+        backgroundColor: tokens.statusSuccess,
+        marginRight: "6px",
+        flexShrink: "0",
+      });
+    }
+  };
+
   // Decorate inline `[data-testid="tool-call-badge"]` rows for subagents / timers
   // and render Connected Subagents Bar above composer + Left Sidebar Subagents Tree
   const decorateActiveAgentSubagentsDom = (tree: SubagentAgentTree | null) => {
@@ -1993,10 +2998,136 @@ export function installDesktopSubagentsTreeEnhancer(
     const tokens = syncPaseoThemeCssVariables(document as never, window as never);
     const scope = resolveActiveScope();
 
+    patchPaseoSubagentTrackModules(window, (parentAgentId) => {
+      const curScope = resolveActiveScope();
+      const curTree = getCachedTreeForScope(curScope);
+      if (curTree && (!parentAgentId || curTree.agentId.startsWith(parentAgentId))) {
+        leftSidebarCollapsed = true;
+        decorateActiveAgentSubagentsDom(curTree);
+      }
+    });
+    enhanceNativeSubagentTrackDom(tree, zh, tokens);
+
     // 1. Left Sidebar Subagents Tree under the active workspace row
     renderLeftSidebarSubagentsTree(tree, scope);
 
-    // 2. Connected Subagents Bar right above the composer
+    const activeSub = resolveActiveSubagentNodeFromDom(tree, document, window);
+    const lineageInfo = buildSubagentLineageChain(tree, activeSub?.conversationId ?? null);
+
+    // 1b. Upgrade Paseo's bottom `[data-testid="parent-agent-callout"]` inside `[data-testid="provider-subagent-panel"]`
+    // so Subagent 2 (L2+) clearly shows its immediate parent Subagent 1 (L1) and jumps L2 -> L1 -> Main Agent step by step!
+    const parentCallout = document.querySelector<HTMLElement>(
+      '[data-testid="parent-agent-callout"]',
+    );
+    const parentCalloutOpenBtn = document.querySelector<HTMLElement>(
+      '[data-testid="parent-agent-callout-open"]',
+    );
+    if (parentCallout && parentCalloutOpenBtn && tree && activeSub) {
+      const immediateParent = lineageInfo.immediateParentSubagent;
+      const chainLabels = [
+        zh ? "L0 主会话" : "L0 Main",
+        ...lineageInfo.ancestorChain.map((n) => `L${n.depth} ${n.subAgentType}`),
+      ];
+      const chainText = chainLabels.join(" › ");
+
+      if (immediateParent && activeSub.depth >= 2) {
+        parentCalloutOpenBtn.setAttribute(
+          "data-vec-parent-subagent-cid",
+          immediateParent.conversationId,
+        );
+        parentCalloutOpenBtn.setAttribute("data-vec-parent-agent-id", tree.agentId);
+        parentCalloutOpenBtn.setAttribute("data-vec-workspace-id", tree.workspaceId);
+        const btnLabel = zh
+          ? `↩ 返回上一级 L${immediateParent.depth} ${immediateParent.subAgentType}`
+          : `↩ Back to L${immediateParent.depth} ${immediateParent.subAgentType}`;
+        const btnTextLeaf =
+          Array.from(parentCalloutOpenBtn.querySelectorAll<HTMLElement>("div, span")).find(
+            (el) => el.children.length === 0 && (el.textContent ?? "").trim().length > 0,
+          ) ?? parentCalloutOpenBtn;
+        if (btnTextLeaf.textContent !== btnLabel) {
+          btnTextLeaf.textContent = btnLabel;
+        }
+        parentCalloutOpenBtn.title = zh
+          ? `逐级返回上一级子会话: L${immediateParent.depth} ${immediateParent.subAgentType} (${immediateParent.conversationId.slice(0, 8)})`
+          : `Jump one level up to parent subagent: L${immediateParent.depth} ${immediateParent.subAgentType} (${immediateParent.conversationId.slice(0, 8)})`;
+
+        // Also update the callout description text on the left so it doesn't mislead with Main Agent's title alone
+        const calloutLeaves = Array.from(
+          parentCallout.querySelectorAll<HTMLElement>("div, span"),
+        ).filter(
+          (el) =>
+            el.children.length === 0 &&
+            !parentCalloutOpenBtn.contains(el) &&
+            !el.closest('[data-testid="paseo-finder-callout-open-root"]') &&
+            (el.textContent ?? "").trim().length > 0,
+        );
+        const titleLeaf = calloutLeaves[calloutLeaves.length - 1];
+        if (titleLeaf) {
+          const expectedCalloutTitle = zh
+            ? `上级: L${immediateParent.depth} ${immediateParent.subAgentType} (${chainText})`
+            : `Parent: L${immediateParent.depth} ${immediateParent.subAgentType} (${chainText})`;
+          if (titleLeaf.textContent !== expectedCalloutTitle) {
+            titleLeaf.textContent = expectedCalloutTitle;
+          }
+        }
+
+        // Mount a secondary `[⇈ 主会话]` button right next to `parent-agent-callout-open` for direct root jump
+        let rootJumpBtn = parentCallout.querySelector<HTMLButtonElement>(
+          '[data-testid="paseo-finder-callout-open-root"]',
+        );
+        if (!rootJumpBtn && parentCalloutOpenBtn.parentElement) {
+          rootJumpBtn = document.createElement("button");
+          rootJumpBtn.type = "button";
+          rootJumpBtn.setAttribute("data-testid", "paseo-finder-callout-open-root");
+          parentCalloutOpenBtn.insertAdjacentElement("afterend", rootJumpBtn);
+          rootJumpBtn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            openOrFocusSubagentOrRootTabInApp(
+              {
+                workspaceId: tree.workspaceId,
+                parentAgentId: tree.agentId,
+                subagentId: null,
+              },
+              document,
+              window,
+            );
+          });
+        }
+        if (rootJumpBtn) {
+          rootJumpBtn.textContent = zh ? "⇈ 直达主会话" : "⇈ Main Agent";
+          rootJumpBtn.title = zh
+            ? `跳过中间层级直接返回 L0 主会话 (${tree.title || tree.agentId.slice(0, 8)})`
+            : `Jump directly to L0 Main Agent (${tree.title || tree.agentId.slice(0, 8)})`;
+          Object.assign(rootJumpBtn.style, {
+            marginLeft: "6px",
+            padding: "4px 9px",
+            borderRadius: "6px",
+            fontSize: "11.5px",
+            fontWeight: "600",
+            cursor: "pointer",
+            backgroundColor: tokens.surface2,
+            color: tokens.foregroundMuted,
+            border: `1px solid ${tokens.border}`,
+            flexShrink: "0",
+          });
+        }
+      } else {
+        parentCalloutOpenBtn.removeAttribute("data-vec-parent-subagent-cid");
+        parentCallout.querySelector('[data-testid="paseo-finder-callout-open-root"]')?.remove();
+        const btnLabel = zh ? "↩ 返回 L0 主会话" : "↩ Back to L0 Main Agent";
+        const btnTextLeaf =
+          Array.from(parentCalloutOpenBtn.querySelectorAll<HTMLElement>("div, span")).find(
+            (el) => el.children.length === 0 && (el.textContent ?? "").trim().length > 0,
+          ) ?? parentCalloutOpenBtn;
+        if (btnTextLeaf.textContent !== btnLabel) {
+          btnTextLeaf.textContent = btnLabel;
+        }
+      }
+    }
+
+    // 2. Penetrated Multi-Level Subagents Hierarchy Bar:
+    // Mounts above `[data-testid="agent-composer"]` on Main Agent (L0) AND above `[data-testid="parent-agent-callout"]` inside Subagent 1 / Subagent 2!
     const existingBar = document.querySelector<HTMLElement>(
       '[data-testid="paseo-finder-subagents-bar"]',
     );
@@ -2006,89 +3137,349 @@ export function installDesktopSubagentsTreeEnhancer(
         tree.subagentSummary.total > 0 &&
         tree.flatSubagents.length > 0,
     );
-    if (!hasSubagents || !tree) {
+    const isArchivedDone = Boolean(
+      !activeSub && tree && isAllSubagentsArchivedForTree(tree, window),
+    );
+    if (!hasSubagents || !tree || isArchivedDone) {
       existingBar?.remove();
     } else {
       const composer = document.querySelector<HTMLElement>(
         '[data-testid="agent-composer"], [data-testid="message-input-root"]',
       );
-      const hostParent = composer?.parentElement ?? null;
-      if (hostParent && composer) {
+      const calloutAnchor = document.querySelector<HTMLElement>(
+        '[data-testid="parent-agent-callout"]',
+      );
+      const subPanel = document.querySelector<HTMLElement>(
+        '[data-testid="provider-subagent-panel"]',
+      );
+      const anchorEl = composer ?? calloutAnchor ?? null;
+      const hostParent = anchorEl?.parentElement ?? subPanel ?? null;
+
+      if (hostParent) {
         let bar = existingBar;
         if (!bar || bar.parentElement !== hostParent) {
           existingBar?.remove();
           bar = document.createElement("div");
           bar.setAttribute("data-testid", "paseo-finder-subagents-bar");
-          hostParent.insertBefore(bar, composer);
+          if (anchorEl && anchorEl.parentElement === hostParent) {
+            hostParent.insertBefore(bar, anchorEl);
+          } else {
+            hostParent.appendChild(bar);
+          }
         }
 
-        const sig = `${tree.agentId}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${zh}`;
+        const allDone = tree.subagentSummary.running === 0;
+        const activeCidKey = activeSub?.conversationId ?? "root";
+        const sig = `${tree.agentId}:${activeCidKey}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${allDone}:${zh}`;
         if (bar.getAttribute("data-render-sig") !== sig) {
           bar.setAttribute("data-render-sig", sig);
           bar.innerHTML = "";
           Object.assign(bar.style, {
             display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "8px",
-            flexWrap: "wrap",
-            margin: "0 16px 8px 16px",
-            padding: "7px 11px",
-            borderRadius: "8px",
-            backgroundColor: tokens.surface1,
-            border: `1px solid ${tokens.border}`,
+            flexDirection: "column",
+            gap: "4px",
+            margin: "0 16px 6px 16px",
+            padding: "0",
+            borderRadius: "0",
+            backgroundColor: "transparent",
+            border: "none",
             fontFamily:
               'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
           });
 
-          const leftSide = document.createElement("div");
-          Object.assign(leftSide.style, {
-            display: "flex",
+          const compactBarSubName = (name: string, parentName?: string | null): string => {
+            const trimmed = (name || "").trim();
+            if (parentName && trimmed.length > parentName.length && trimmed.startsWith(parentName)) {
+              const rest = trimmed.slice(parentName.length).replace(/^[-_\s]+/, "");
+              if (rest.length >= 3) return rest;
+            }
+            return trimmed;
+          };
+
+          // Row A: Active Lineage Breadcrumb (visible when inside an L1/L2+ subagent tab; hidden on L0 Main Agent to keep single-row minimalism)
+          const topRow = document.createElement("div");
+          topRow.setAttribute("data-testid", "paseo-finder-subagents-lineage-row");
+          Object.assign(topRow.style, {
+            display: activeSub ? "flex" : "none",
             alignItems: "center",
+            justifyContent: "space-between",
             gap: "6px",
             flexWrap: "wrap",
           });
 
-          const labelEl = document.createElement("span");
-          labelEl.textContent = zh
-            ? `关联子会话 (${tree.subagentSummary.total} 个 · 共 ${tree.subagentSummary.totalSubagentSteps} 步):`
-            : `Connected Subagents (${tree.subagentSummary.total} · ${tree.subagentSummary.totalSubagentSteps} steps):`;
-          Object.assign(labelEl.style, {
-            fontSize: "11.5px",
-            fontWeight: "600",
-            color: tokens.foregroundMuted,
+          const breadcrumbWrap = document.createElement("div");
+          Object.assign(breadcrumbWrap.style, {
+            display: "flex",
+            alignItems: "center",
+            gap: "5px",
+            flexWrap: "wrap",
           });
-          leftSide.appendChild(labelEl);
 
-          for (const sub of tree.flatSubagents) {
+          // Root L0 pill in breadcrumb
+          const isRootCurrent = !activeSub;
+          const rootCrumb = document.createElement("button");
+          rootCrumb.type = "button";
+          rootCrumb.setAttribute("data-testid", "paseo-finder-breadcrumb-root");
+          rootCrumb.setAttribute("aria-current", isRootCurrent ? "true" : "false");
+          rootCrumb.textContent = isRootCurrent
+            ? zh
+              ? "L0 主会话 · 当前"
+              : "L0 Main · Current"
+            : zh
+              ? "L0 主会话"
+              : "L0 Main";
+          Object.assign(rootCrumb.style, {
+            height: "22px",
+            padding: "0 8px",
+            borderRadius: "999px",
+            fontSize: "11px",
+            fontWeight: isRootCurrent ? "600" : "500",
+            cursor: "pointer",
+            backgroundColor: isRootCurrent ? tokens.surface2 : tokens.surface1,
+            color: isRootCurrent ? tokens.foreground : tokens.foregroundMuted,
+            border: `1px solid ${isRootCurrent ? tokens.accent : tokens.border}`,
+          });
+          rootCrumb.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (
+              !openOrFocusSubagentOrRootTabInApp(
+                {
+                  workspaceId: tree.workspaceId,
+                  parentAgentId: tree.agentId,
+                  subagentId: null,
+                },
+                document,
+                window,
+              )
+            ) {
+              void openDrawer({
+                agentId: tree.agentId,
+                workspaceId: tree.workspaceId,
+                conversationId: tree.rootConversationId,
+                layoutMode: "docked-right",
+              });
+            }
+          });
+          breadcrumbWrap.appendChild(rootCrumb);
+
+          for (const anc of lineageInfo.ancestorChain) {
+            const sep = document.createElement("span");
+            sep.textContent = "›";
+            Object.assign(sep.style, {
+              fontSize: "11px",
+              color: tokens.foregroundMuted,
+              fontWeight: "500",
+            });
+            breadcrumbWrap.appendChild(sep);
+
+            const isAncCurrent = anc.conversationId === activeSub?.conversationId;
+            const ancBtn = document.createElement("button");
+            ancBtn.type = "button";
+            ancBtn.setAttribute(
+              "data-testid",
+              `paseo-finder-breadcrumb-node-${anc.conversationId.slice(0, 8)}`,
+            );
+            ancBtn.setAttribute("aria-current", isAncCurrent ? "true" : "false");
+            ancBtn.textContent = isAncCurrent
+              ? `L${anc.depth} ${anc.subAgentType} · ${zh ? "当前" : "Current"}`
+              : `L${anc.depth} ${anc.subAgentType}`;
+            Object.assign(ancBtn.style, {
+              height: "22px",
+              padding: "0 8px",
+              borderRadius: "999px",
+              fontSize: "11px",
+              fontWeight: isAncCurrent ? "600" : "500",
+              cursor: "pointer",
+              backgroundColor: isAncCurrent ? tokens.surface2 : tokens.surface1,
+              color: isAncCurrent ? tokens.foreground : tokens.foregroundMuted,
+              border: `1px solid ${isAncCurrent ? tokens.accent : tokens.border}`,
+            });
+            ancBtn.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              if (
+                !openOrFocusSubagentOrRootTabInApp(
+                  {
+                    workspaceId: tree.workspaceId,
+                    parentAgentId: tree.agentId,
+                    subagentId: anc.conversationId,
+                  },
+                  document,
+                  window,
+                )
+              ) {
+                void openDrawer({
+                  agentId: tree.agentId,
+                  workspaceId: tree.workspaceId,
+                  conversationId: anc.conversationId,
+                  layoutMode: "docked-right",
+                });
+              }
+            });
+            breadcrumbWrap.appendChild(ancBtn);
+          }
+
+          // When viewing a subagent (L1 or L2+), render explicit step-up button (`↖ 返回上一级`) right in the bar
+          if (activeSub) {
+            const stepUpBtn = document.createElement("button");
+            stepUpBtn.type = "button";
+            stepUpBtn.setAttribute("data-testid", "paseo-finder-step-up-parent");
+            const parentSub = lineageInfo.immediateParentSubagent;
+            stepUpBtn.textContent = parentSub
+              ? zh
+                ? `↖ 返回上一级 · L${parentSub.depth} ${parentSub.subAgentType}`
+                : `↖ Up to L${parentSub.depth} ${parentSub.subAgentType}`
+              : zh
+                ? "↖ 返回 L0 主会话"
+                : "↖ Up to L0 Main";
+            Object.assign(stepUpBtn.style, {
+              marginLeft: "4px",
+              height: "22px",
+              padding: "0 8px",
+              borderRadius: "999px",
+              fontSize: "11px",
+              fontWeight: "600",
+              cursor: "pointer",
+              backgroundColor: tokens.surface2,
+              color: tokens.foreground,
+              border: `1px solid ${tokens.border}`,
+            });
+            stepUpBtn.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              const targetSubId = parentSub ? parentSub.conversationId : null;
+              if (
+                !openOrFocusSubagentOrRootTabInApp(
+                  {
+                    workspaceId: tree.workspaceId,
+                    parentAgentId: tree.agentId,
+                    subagentId: targetSubId,
+                  },
+                  document,
+                  window,
+                )
+              ) {
+                void openDrawer({
+                  agentId: tree.agentId,
+                  workspaceId: tree.workspaceId,
+                  conversationId: targetSubId ?? tree.rootConversationId,
+                  layoutMode: "docked-right",
+                });
+              }
+            });
+            breadcrumbWrap.appendChild(stepUpBtn);
+          }
+
+          topRow.appendChild(breadcrumbWrap);
+          bar.appendChild(topRow);
+
+          // Row B: Single-Row Compact Subagent Track (Paseo ComposerTrackPill geometry)
+          const pillsRow = document.createElement("div");
+          pillsRow.setAttribute("data-testid", "paseo-finder-subagents-penetrated-pills");
+          Object.assign(pillsRow.style, {
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            flexWrap: "nowrap",
+            overflowX: "auto",
+            scrollbarWidth: "none",
+          });
+
+          const MAX_VISIBLE_SUBAGENT_PILLS = 2;
+          const visibleSubagents =
+            tree.flatSubagents.length <= MAX_VISIBLE_SUBAGENT_PILLS + 1
+              ? tree.flatSubagents
+              : tree.flatSubagents.slice(0, MAX_VISIBLE_SUBAGENT_PILLS);
+          const overflowCount = Math.max(0, tree.flatSubagents.length - visibleSubagents.length);
+
+          for (let idx = 0; idx < tree.flatSubagents.length; idx += 1) {
+            const sub = tree.flatSubagents[idx]!;
+            const isOverflowHidden =
+              idx >= visibleSubagents.length && activeSub?.conversationId !== sub.conversationId;
             const sc = statusColors(sub.status, tokens);
+            const isSubCurrent = activeSub?.conversationId === sub.conversationId;
+            const parentSub =
+              sub.depth >= 2
+                ? tree.flatSubagents.find(
+                    (p) =>
+                      normalizeSubagentArchiveId(p.conversationId) ===
+                      normalizeSubagentArchiveId(sub.parentConversationId),
+                  )
+                : null;
+
             const pill = document.createElement("button");
             pill.type = "button";
             pill.setAttribute(
               "data-testid",
               `paseo-finder-subagent-pill-${sub.conversationId.slice(0, 8)}`,
             );
-            pill.textContent = `L${sub.depth} ${sub.subAgentType} · ${formatStatusLabel(
-              sub.status,
-              zh,
-            )} (${zh ? `${sub.stepCount} 步` : `${sub.stepCount} steps`})`;
+            pill.setAttribute("data-depth", String(sub.depth));
+            pill.setAttribute("aria-current", isSubCurrent ? "true" : "false");
+            if (parentSub) {
+              pill.setAttribute("data-parent-cid", parentSub.conversationId);
+            }
+            const finishedClock =
+              sub.status !== "running" && sub.updatedAt
+                ? formatConciseLocalFinishedTime(sub.updatedAt)
+                : "";
+            const stepsPart = zh ? `${sub.stepCount} 步` : `${sub.stepCount} steps`;
+            const parentBadge = parentSub
+              ? ` ↖ L${parentSub.depth} ${formatSubagentDisplayName(parentSub, null, 28)}`
+              : "";
+            const shortLabel = formatSubagentDisplayName(sub, parentSub, 26);
+            const fullSubLabel = formatSubagentDisplayName(sub, null, 60);
+            const baseTip = sub.updatedAt ? formatFullLocalFinishedTooltip(sub.updatedAt) : "";
+            pill.title = zh
+              ? `L${sub.depth} ${fullSubLabel}${parentBadge} · ${formatStatusLabel(sub.status, zh)} (${finishedClock ? `${stepsPart} · ${finishedClock}` : stepsPart}) — 点击切换标签页 (Shift+点击打开右侧面板)${baseTip ? ` · ${baseTip}` : ""}`
+              : `L${sub.depth} ${fullSubLabel}${parentBadge} · ${formatStatusLabel(sub.status, zh)} (${finishedClock ? `${stepsPart} · ${finishedClock}` : stepsPart}) — Click to switch tab (Shift+Click opens Right Sidebar)${baseTip ? ` · ${baseTip}` : ""}`;
             Object.assign(pill.style, {
-              display: "inline-flex",
+              display: isOverflowHidden ? "none" : "inline-flex",
               alignItems: "center",
-              gap: "4px",
-              padding: "2px 8px",
+              gap: "6px",
+              height: "24px",
+              padding: "0 9px",
               borderRadius: "999px",
-              fontSize: "11px",
-              fontWeight: "600",
+              fontSize: "11.5px",
+              lineHeight: "15px",
+              fontWeight: isSubCurrent ? "600" : "500",
               cursor: "pointer",
-              backgroundColor: sc.bg,
-              color: sc.fg,
-              border: `1px solid ${sc.border}`,
+              backgroundColor: isSubCurrent ? tokens.surface2 : tokens.surface1,
+              color: isSubCurrent ? tokens.foreground : tokens.foregroundMuted,
+              border: `1px solid ${isSubCurrent ? tokens.accent : tokens.border}`,
+              whiteSpace: "nowrap",
+              flexShrink: "0",
             });
+
+            const dot = document.createElement("span");
+            Object.assign(dot.style, {
+              width: "6px",
+              height: "6px",
+              borderRadius: "999px",
+              backgroundColor: sc.dot,
+              flexShrink: "0",
+            });
+            pill.appendChild(dot);
+
+            const txt = document.createElement("span");
+            txt.textContent = `${sub.depth >= 2 ? "↳ " : ""}L${sub.depth} ${shortLabel}`;
+            pill.appendChild(txt);
+
             pill.addEventListener("click", (ev) => {
               ev.preventDefault();
               ev.stopPropagation();
-              if (ev.altKey && tryClickNativeSubagentTrackRow(sub.conversationId)) {
+              if (
+                !ev.shiftKey &&
+                openOrFocusSubagentOrRootTabInApp(
+                  {
+                    workspaceId: tree.workspaceId,
+                    parentAgentId: tree.agentId,
+                    subagentId: sub.conversationId,
+                  },
+                  document,
+                  window,
+                )
+              ) {
                 return;
               }
               void openDrawer({
@@ -2098,21 +3489,101 @@ export function installDesktopSubagentsTreeEnhancer(
                 layoutMode: "docked-right",
               });
             });
-            leftSide.appendChild(pill);
+            pillsRow.appendChild(pill);
+          }
+
+          if (overflowCount > 0) {
+            const moreBtn = document.createElement("button");
+            moreBtn.type = "button";
+            moreBtn.setAttribute("data-testid", "paseo-finder-subagent-pill-more");
+            moreBtn.textContent = zh ? `+${overflowCount} 更多` : `+${overflowCount} more`;
+            moreBtn.title = zh
+              ? `点击展开全部 ${tree.flatSubagents.length} 个子会话详情 (⌘⇧B)`
+              : `Click to inspect all ${tree.flatSubagents.length} subagents (⌘⇧B)`;
+            Object.assign(moreBtn.style, {
+              display: "inline-flex",
+              alignItems: "center",
+              height: "24px",
+              padding: "0 9px",
+              borderRadius: "999px",
+              fontSize: "11.5px",
+              fontWeight: "500",
+              cursor: "pointer",
+              backgroundColor: tokens.surface1,
+              color: tokens.foregroundMuted,
+              border: `1px solid ${tokens.border}`,
+              whiteSpace: "nowrap",
+              flexShrink: "0",
+            });
+            moreBtn.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              void openDrawer({
+                agentId: tree.agentId,
+                workspaceId: tree.workspaceId,
+                conversationId: activeSub?.conversationId ?? undefined,
+                layoutMode: "docked-right",
+              });
+            });
+            pillsRow.appendChild(moreBtn);
+          }
+
+          const rightControls = document.createElement("div");
+          Object.assign(rightControls.style, {
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            marginLeft: "auto",
+            flexShrink: "0",
+          });
+
+          if (allDone && !activeSub) {
+            const archiveBtn = document.createElement("button");
+            archiveBtn.type = "button";
+            archiveBtn.setAttribute("data-testid", "paseo-finder-archive-finished-subagents");
+            archiveBtn.textContent = zh ? "归档" : "Archive";
+            archiveBtn.title = zh
+              ? "将已完成的子会话归档收起，不再在输入框上方占用空间"
+              : "Archive finished subagents and hide this bar above the composer";
+            Object.assign(archiveBtn.style, {
+              display: "inline-flex",
+              alignItems: "center",
+              height: "24px",
+              padding: "0 9px",
+              borderRadius: "999px",
+              fontSize: "11.5px",
+              fontWeight: "500",
+              cursor: "pointer",
+              backgroundColor: "transparent",
+              color: tokens.foregroundMuted,
+              border: `1px solid ${tokens.border}`,
+            });
+            archiveBtn.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              archiveFinishedSubagentsForTree(tree);
+            });
+            rightControls.appendChild(archiveBtn);
           }
 
           const openTreeBtn = document.createElement("button");
           openTreeBtn.type = "button";
           openTreeBtn.setAttribute("data-testid", "paseo-finder-open-subagents-sidebar");
-          openTreeBtn.textContent = zh ? "展开子会话侧边栏 (⌘⇧B)" : "Open Subagent Sidebar (⌘⇧B)";
+          openTreeBtn.textContent = zh ? "侧边栏" : "Inspector";
+          openTreeBtn.title = zh
+            ? "展开右侧子会话与定时器树侧边栏 (⌘⇧B)"
+            : "Open Right-Docked Subagent & Timer Sidebar (⌘⇧B)";
           Object.assign(openTreeBtn.style, {
-            padding: "3px 9px",
-            borderRadius: "6px",
-            fontSize: "11px",
-            fontWeight: "600",
+            display: "inline-flex",
+            alignItems: "center",
+            height: "24px",
+            padding: "0 9px",
+            borderRadius: "999px",
+            fontSize: "11.5px",
+            fontWeight: "500",
             cursor: "pointer",
-            backgroundColor: tokens.surface2,
-            color: tokens.foreground,
+            backgroundColor: tokens.surface1,
+            color: tokens.foregroundMuted,
             border: `1px solid ${tokens.border}`,
             flexShrink: "0",
           });
@@ -2122,20 +3593,28 @@ export function installDesktopSubagentsTreeEnhancer(
             void openDrawer({
               agentId: tree.agentId,
               workspaceId: tree.workspaceId,
+              conversationId: activeSub?.conversationId ?? undefined,
               layoutMode: "docked-right",
             });
           });
+          rightControls.appendChild(openTreeBtn);
 
-          bar.appendChild(leftSide);
-          bar.appendChild(openTreeBtn);
+          pillsRow.appendChild(rightControls);
+          bar.appendChild(pillsRow);
         }
       }
     }
 
-    // 3. Decorate inline `[data-testid="tool-call-badge"]` rows for DeepCoder, Timers, Tasks, etc.
+    // 3. Decorate inline `[data-testid="tool-call-badge"]` rows for DeepCoder, DeepInvestigator, Timers, Tasks, etc.
     const badges = document.querySelectorAll<HTMLElement>('[data-testid="tool-call-badge"]');
     let subCallOccurrenceIdx = 0;
-    const l1Subagents = (tree?.flatSubagents ?? []).filter((s) => s.depth === 1);
+    const contextDepth = activeSub ? activeSub.depth + 1 : 1;
+    const contextSubagents = (tree?.flatSubagents ?? []).filter((s) =>
+      activeSub
+        ? normalizeSubagentArchiveId(s.parentConversationId) ===
+          normalizeSubagentArchiveId(activeSub.conversationId)
+        : s.depth === 1,
+    );
 
     for (let i = 0; i < badges.length; i += 1) {
       const badge = badges[i];
@@ -2166,7 +3645,12 @@ export function installDesktopSubagentsTreeEnhancer(
       let matchedSub: FlatSubagentNode | null = null;
       if (classified.kind === "subagent") {
         matchedSub =
-          l1Subagents[subCallOccurrenceIdx] ??
+          contextSubagents[subCallOccurrenceIdx] ??
+          tree?.flatSubagents.find(
+            (s) =>
+              s.depth === contextDepth &&
+              s.subAgentType.toLowerCase() === classified.subagentName,
+          ) ??
           tree?.flatSubagents.find(
             (s) => s.subAgentType.toLowerCase() === classified.subagentName,
           ) ??
@@ -2174,7 +3658,7 @@ export function installDesktopSubagentsTreeEnhancer(
           null;
         subCallOccurrenceIdx += 1;
       } else {
-        matchedSub = tree?.flatSubagents[0] ?? null;
+        matchedSub = activeSub ?? tree?.flatSubagents[0] ?? null;
       }
 
       badge.style.cursor = "pointer";
@@ -2183,8 +3667,20 @@ export function installDesktopSubagentsTreeEnhancer(
         badge.setAttribute("data-paseo-finder-subagent-cid", matchedSub.conversationId);
       }
 
+      const directNestedChildren =
+        matchedSub && tree
+          ? tree.flatSubagents.filter(
+              (c) =>
+                normalizeSubagentArchiveId(c.parentConversationId) ===
+                normalizeSubagentArchiveId(matchedSub.conversationId),
+            )
+          : [];
+      const nestedChildrenSig = directNestedChildren
+        .map((c) => `${c.conversationId.slice(0, 8)}:${c.status}:${c.stepCount}`)
+        .join(",");
+
       const chipSig = matchedSub
-        ? `${classified.kind}:${matchedSub.conversationId}:${matchedSub.status}:${matchedSub.stepCount}:${matchedSub.nestedSubagentCount}:${zh}`
+        ? `${classified.kind}:${matchedSub.conversationId}:${matchedSub.status}:${matchedSub.stepCount}:${matchedSub.nestedSubagentCount}:${nestedChildrenSig}:${zh}`
         : `generic:${classified.kind}:${classified.subagentName ?? ""}:${zh}`;
 
       if (existingChip && existingChip.getAttribute("data-sig") === chipSig) {
@@ -2198,41 +3694,105 @@ export function installDesktopSubagentsTreeEnhancer(
 
       if (matchedSub && classified.kind === "subagent") {
         const sc = statusColors(matchedSub.status, tokens);
-        const nestedPart =
-          matchedSub.nestedSubagentCount > 0
-            ? zh
-              ? ` · 派生 ${matchedSub.nestedSubagentCount} 个子会话 (共 ${tree?.subagentSummary.totalSubagentSteps ?? matchedSub.stepCount} 步)`
-              : ` · +${matchedSub.nestedSubagentCount} nested (${tree?.subagentSummary.totalSubagentSteps ?? matchedSub.stepCount} total steps)`
-            : "";
-        chip.textContent = `${formatStatusLabel(matchedSub.status, zh)} · ${
-          zh ? `${matchedSub.stepCount} 步` : `${matchedSub.stepCount} steps`
-        }${nestedPart} · ${zh ? "弹出侧边栏 ↗" : "Open Sidebar ↗"}`;
         Object.assign(chip.style, {
           display: "inline-flex",
           alignItems: "center",
-          marginLeft: "8px",
-          padding: "2px 8px",
-          borderRadius: "999px",
-          fontSize: "11px",
-          fontWeight: "600",
-          backgroundColor: sc.bg,
-          color: sc.fg,
-          border: `1px solid ${sc.border}`,
-          cursor: "pointer",
+          gap: "5px",
+          flexWrap: "wrap",
+          marginLeft: "6px",
           userSelect: "none",
         });
+
+        const primaryPill = document.createElement("span");
+        Object.assign(primaryPill.style, {
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "5px",
+          height: "20px",
+          padding: "0 7px",
+          borderRadius: "999px",
+          fontSize: "11px",
+          fontWeight: "500",
+          backgroundColor: tokens.surface1,
+          color: tokens.foregroundMuted,
+          border: `1px solid ${tokens.border}`,
+          cursor: "pointer",
+        });
+        const pDot = document.createElement("span");
+        Object.assign(pDot.style, {
+          width: "5px",
+          height: "5px",
+          borderRadius: "999px",
+          backgroundColor: sc.dot,
+          flexShrink: "0",
+        });
+        primaryPill.appendChild(pDot);
+        const pTxt = document.createElement("span");
+        pTxt.textContent = `${formatStatusLabel(matchedSub.status, zh)} · ${
+          zh ? `${matchedSub.stepCount} 步` : `${matchedSub.stepCount} steps`
+        } ↗`;
+        primaryPill.appendChild(pTxt);
+        chip.appendChild(primaryPill);
+
+        // Penetrated nested child chips (`↳ L2 WorkerL0`) right on the parent's tool_call row
+        for (const nestedChild of directNestedChildren) {
+          const nsc = statusColors(nestedChild.status, tokens);
+          const nestedShort = nestedChild.subAgentType.startsWith(matchedSub.subAgentType)
+            ? nestedChild.subAgentType.slice(matchedSub.subAgentType.length).replace(/^[-_\s]+/, "") ||
+              nestedChild.subAgentType
+            : nestedChild.subAgentType;
+          const nestedBtn = document.createElement("button");
+          nestedBtn.type = "button";
+          nestedBtn.setAttribute(
+            "data-testid",
+            `paseo-finder-inline-nested-chip-${nestedChild.conversationId.slice(0, 8)}`,
+          );
+          nestedBtn.setAttribute("data-nested-subagent-cid", nestedChild.conversationId);
+          nestedBtn.title = `L${nestedChild.depth} ${nestedChild.subAgentType} · ${formatStatusLabel(
+            nestedChild.status,
+            zh,
+          )} (${nestedChild.stepCount} steps)`;
+          Object.assign(nestedBtn.style, {
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "5px",
+            height: "20px",
+            padding: "0 7px",
+            borderRadius: "999px",
+            fontSize: "11px",
+            fontWeight: "500",
+            backgroundColor: tokens.surface1,
+            color: tokens.foregroundMuted,
+            border: `1px solid ${tokens.border}`,
+            cursor: "pointer",
+          });
+          const nDot = document.createElement("span");
+          Object.assign(nDot.style, {
+            width: "5px",
+            height: "5px",
+            borderRadius: "999px",
+            backgroundColor: nsc.dot,
+            flexShrink: "0",
+          });
+          nestedBtn.appendChild(nDot);
+          const nTxt = document.createElement("span");
+          nTxt.textContent = `↳ L${nestedChild.depth} ${nestedShort} ↗`;
+          nestedBtn.appendChild(nTxt);
+          chip.appendChild(nestedBtn);
+        }
       } else {
-        chip.textContent = zh ? "弹出子会话侧边栏 ↗" : "Open Subagent Sidebar ↗";
+        chip.textContent = zh ? "侧边栏 ↗" : "Inspector ↗";
         Object.assign(chip.style, {
           display: "inline-flex",
           alignItems: "center",
-          marginLeft: "8px",
-          padding: "2px 8px",
+          marginLeft: "6px",
+          height: "20px",
+          padding: "0 7px",
           borderRadius: "999px",
           fontSize: "11px",
-          fontWeight: "600",
-          backgroundColor: tokens.surface2,
-          color: tokens.foreground,
+          fontWeight: "500",
+          backgroundColor: tokens.surface1,
+          color: tokens.foregroundMuted,
           border: `1px solid ${tokens.border}`,
           cursor: "pointer",
           userSelect: "none",
@@ -2241,10 +3801,15 @@ export function installDesktopSubagentsTreeEnhancer(
 
       badge.appendChild(chip);
     }
+
+    // 4. Decorate `<a href="conversation://<cid>">` Markdown links and inline subagent `Role` mentions in assistant prose
+    decorateConversationLinksAndSubagentMentionsInDom(tree, document, zh);
   };
 
-  // Document-level capture-phase click listener so clicking ANY inline subagent / timer tool call badge
-  // reliably pops out the Right-Docked Subagent Sidebar even across virtualized list re-renders!
+  // Document-level capture-phase click listener so clicking:
+  // 0. `[data-testid="parent-agent-callout-open"]` inside L2+ subagent jumps step-by-step (`Subagent 2 -> Subagent 1 -> Main Agent`)!
+  // 1. Any penetrated nested chip (`[data-nested-subagent-cid]`) jumps directly to that L2/L3 subagent tab!
+  // 2. Any inline `conversationId: <uuid>` code span or `[data-testid="tool-call-badge"]` opens the subagent tab or Right-Docked Sidebar!
   const onDocumentClickCapture = (ev: MouseEvent) => {
     const target = ev.target as HTMLElement | null;
     if (!target) return;
@@ -2254,6 +3819,149 @@ export function installDesktopSubagentsTreeEnhancer(
 
     const scope = resolveActiveScope();
     const curTree = getCachedTreeForScope(scope);
+
+    // 0. Intercept Paseo's `[data-testid="parent-agent-callout-open"]` (`↩ Open parent`) when viewing an L2+ subagent
+    // so clicking it jumps from `Subagent 2 (L2)` -> `Subagent 1 (L1)` instead of skipping straight to `Main Agent (L0)`!
+    const calloutOpenBtn = target.closest<HTMLElement>(
+      '[data-testid="parent-agent-callout-open"]',
+    );
+    if (calloutOpenBtn && calloutOpenBtn.getAttribute("data-vec-bypass-intercept") !== "1") {
+      const explicitParentSubCid = calloutOpenBtn.getAttribute("data-vec-parent-subagent-cid");
+      const activeSub = resolveActiveSubagentNodeFromDom(curTree, document, window);
+      const lineage = buildSubagentLineageChain(
+        curTree,
+        activeSub?.conversationId ?? null,
+      );
+      const targetParentSubCid =
+        explicitParentSubCid || lineage.immediateParentSubagent?.conversationId || null;
+      const parentAgentId =
+        calloutOpenBtn.getAttribute("data-vec-parent-agent-id") ||
+        curTree?.agentId ||
+        scope.agentId ||
+        "";
+      const workspaceId =
+        calloutOpenBtn.getAttribute("data-vec-workspace-id") ||
+        curTree?.workspaceId ||
+        scope.workspaceId ||
+        null;
+
+      if (targetParentSubCid && parentAgentId) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (
+          !openOrFocusSubagentOrRootTabInApp(
+            {
+              workspaceId,
+              parentAgentId,
+              subagentId: targetParentSubCid,
+            },
+            document,
+            window,
+          )
+        ) {
+          void openDrawer({
+            agentId: parentAgentId,
+            workspaceId,
+            conversationId: targetParentSubCid,
+            layoutMode: "docked-right",
+          });
+        }
+        return;
+      }
+    }
+
+    // 0b. Check if clicking a penetrated nested child chip (`[data-nested-subagent-cid]`) inside a tool_call row
+    const nestedChipBtn = target.closest<HTMLElement>("[data-nested-subagent-cid]");
+    if (nestedChipBtn) {
+      const nestedCid = nestedChipBtn.getAttribute("data-nested-subagent-cid");
+      if (nestedCid) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const parentAgentId = curTree?.agentId ?? scope.agentId ?? "";
+        const workspaceId = curTree?.workspaceId ?? scope.workspaceId ?? null;
+        if (
+          !ev.shiftKey &&
+          parentAgentId &&
+          openOrFocusSubagentOrRootTabInApp(
+            {
+              workspaceId,
+              parentAgentId,
+              subagentId: nestedCid,
+            },
+            document,
+            window,
+          )
+        ) {
+          return;
+        }
+        void openDrawer({
+          agentId: parentAgentId || null,
+          workspaceId,
+          conversationId: nestedCid,
+          layoutMode: "docked-right",
+        });
+        return;
+      }
+    }
+
+    // 0c. Check if clicking a `[label](conversation://<cid>)` Markdown link or decorated inline subagent `Role` mention
+    const convOrRoleEl = target.closest<HTMLElement>(
+      'a[href^="conversation://"], a[href*="conversation://"], [data-vec-subagent-cid], [data-vec-conversation-cid]',
+    );
+    if (convOrRoleEl) {
+      const attrSubCid = convOrRoleEl.getAttribute("data-vec-subagent-cid")?.trim() || "";
+      const attrConvCid = convOrRoleEl.getAttribute("data-vec-conversation-cid")?.trim() || "";
+      const hrefVal = convOrRoleEl.getAttribute("href")?.trim() || "";
+      const hrefMatch = hrefVal.match(/conversation:\/\/([A-Za-z0-9-]+)/i);
+      const rawCid = attrSubCid || attrConvCid || hrefMatch?.[1] || "";
+
+      if (rawCid) {
+        ev.preventDefault();
+        ev.stopPropagation();
+
+        const matchedSub =
+          curTree?.flatSubagents.find(
+            (s) =>
+              s.conversationId.toLowerCase() === rawCid.toLowerCase() ||
+              s.conversationId.toLowerCase().startsWith(rawCid.toLowerCase()),
+          ) ?? null;
+        const targetCid = matchedSub?.conversationId ?? rawCid;
+
+        if (!matchedSub) {
+          const refNode = resolveSessionReference(targetCid);
+          if (refNode) {
+            navigateToLineageNode(refNode, document, window);
+            return;
+          }
+        }
+
+        const parentAgentId = curTree?.agentId ?? scope.agentId ?? "";
+        const workspaceId = curTree?.workspaceId ?? scope.workspaceId ?? null;
+        if (
+          (ev.altKey || ev.metaKey || ev.ctrlKey) &&
+          parentAgentId &&
+          openOrFocusSubagentOrRootTabInApp(
+            {
+              workspaceId,
+              parentAgentId,
+              subagentId: targetCid,
+            },
+            document,
+            window,
+          )
+        ) {
+          return;
+        }
+
+        void openDrawer({
+          agentId: parentAgentId || null,
+          workspaceId,
+          conversationId: targetCid,
+          layoutMode: "docked-right",
+        });
+        return;
+      }
+    }
 
     // 1. Check if clicking an inline `conversationId: <uuid>` code span or subagent UUID token in assistant text
     const codeEl = target.closest<HTMLElement>("code");
@@ -2322,9 +4030,28 @@ export function installDesktopSubagentsTreeEnhancer(
       return;
     }
 
+    const parentAgentId = curTree?.agentId ?? scope.agentId ?? "";
+    const workspaceId = curTree?.workspaceId ?? scope.workspaceId ?? null;
+    if (
+      !ev.shiftKey &&
+      targetSub &&
+      parentAgentId &&
+      openOrFocusSubagentOrRootTabInApp(
+        {
+          workspaceId,
+          parentAgentId,
+          subagentId: targetSub.conversationId,
+        },
+        document,
+        window,
+      )
+    ) {
+      return;
+    }
+
     void openDrawer({
-      agentId: curTree?.agentId ?? scope.agentId,
-      workspaceId: curTree?.workspaceId ?? scope.workspaceId,
+      agentId: parentAgentId || null,
+      workspaceId,
       conversationId: targetSub?.conversationId ?? null,
       layoutMode: "docked-right",
     });

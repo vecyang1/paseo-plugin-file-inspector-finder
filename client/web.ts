@@ -18,6 +18,11 @@ import {
   resolveSidebarProjectVisual,
   syncPaseoThemeCssVariables,
 } from "./theme-web";
+import {
+  findCadenceScheduleForWorkspace,
+  triggerRunScheduleNow,
+  CADENCE_TIMER_SVG,
+} from "./schedule-runs-web";
 
 export const LABEL_COLOR_HEX: Record<WorkspaceLabelColor, string> = PASEO_IDENTITY_BG_HEX;
 
@@ -140,6 +145,7 @@ export interface MinimalDocument {
   createElement(tag: string): MinimalElement;
   querySelector(selector: string): MinimalElement | null;
   querySelectorAll(selector: string): ArrayLike<MinimalElement>;
+  elementFromPoint?(x: number, y: number): MinimalElement | null;
   addEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   removeEventListener(type: string, listener: (ev: unknown) => void, useCapture?: boolean): void;
   dispatchEvent?(event: unknown): boolean;
@@ -3270,9 +3276,10 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
   }
 
   // 3. Archive item: [data-testid^="sidebar-workspace-menu-archive-"]
+  let archiveItems: MinimalElement[] = [];
   if (prefs.enableSidebarDeleteKeyArchive !== false) {
     const rawArchiveItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-archive-"]');
-    const archiveItems = dedupeMenuContainers(rawArchiveItems ? Array.from(rawArchiveItems) : []);
+    archiveItems = dedupeMenuContainers(rawArchiveItems ? Array.from(rawArchiveItems) : []);
     for (const item of archiveItems) {
       if (!item) continue;
 
@@ -3337,6 +3344,141 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
         item.appendChild?.(badge);
       }
       annotatedCount += 1;
+    }
+  }
+
+  // 4. Cadence Run item: [data-testid^="sidebar-workspace-menu-run-cadence-"]
+  const allMenuRows = dedupeMenuContainers([
+    ...renameItems,
+    ...labelItems,
+    ...archiveItems,
+  ]);
+  const processedMenus = new Set<MinimalElement>();
+  for (const sampleMenuRow of allMenuRows) {
+    if (!sampleMenuRow || !sampleMenuRow.parentElement) continue;
+    const parentMenu = sampleMenuRow.parentElement;
+    if (processedMenus.has(parentMenu)) continue;
+    processedMenus.add(parentMenu);
+
+    const testId = sampleMenuRow.getAttribute?.("data-testid") ?? "";
+    const workspaceKey = testId
+      .replace(/^sidebar-workspace-menu-(?:rename|labels|archive)-/, "")
+      .trim();
+    if (workspaceKey) {
+      const parsed = parseSidebarWorkspaceRowTestId(
+        `sidebar-workspace-row-${workspaceKey}`,
+      );
+      const cleanWorkspaceId = parsed?.workspaceId ?? workspaceKey;
+      const titleEl = doc.querySelector?.(
+        `[data-testid="sidebar-workspace-title-${workspaceKey}"]`,
+      ) ?? doc.querySelector?.(
+        `[data-testid="sidebar-workspace-title-local:${cleanWorkspaceId}"]`,
+      );
+      const wsTitle = titleEl?.textContent?.trim() || null;
+      const cadenceSched = findCadenceScheduleForWorkspace(cleanWorkspaceId, wsTitle);
+      const existingCadenceItem = parentMenu.querySelector?.(
+        `[data-testid="sidebar-workspace-menu-run-cadence-${workspaceKey}"]`,
+      );
+      if (cadenceSched) {
+        if (!existingCadenceItem) {
+          const runCadenceItem = doc.createElement("div");
+          runCadenceItem.setAttribute?.(
+            "data-testid",
+            `sidebar-workspace-menu-run-cadence-${workspaceKey}`,
+          );
+          runCadenceItem.setAttribute?.("role", "menuitem");
+          runCadenceItem.setAttribute?.("tabindex", "-1");
+          runCadenceItem.setAttribute?.("data-paseo-shortcut-annotated", "true");
+          const isZh = (win?.navigator?.language ?? "").toLowerCase().startsWith("zh");
+
+          if (sampleMenuRow.className) {
+            runCadenceItem.className = sampleMenuRow.className;
+          }
+          if (runCadenceItem.style) {
+            runCadenceItem.style.display = "flex";
+            runCadenceItem.style.alignItems = "center";
+            runCadenceItem.style.gap = "8px";
+            runCadenceItem.style.padding = "6px 8px";
+            runCadenceItem.style.fontSize = "13px";
+            runCadenceItem.style.lineHeight = "18px";
+            runCadenceItem.style.cursor = "pointer";
+            runCadenceItem.style.userSelect = "none";
+            runCadenceItem.style.borderRadius = "4px";
+            runCadenceItem.style.transition = "background-color 100ms ease";
+          }
+
+          runCadenceItem.addEventListener?.("mouseenter", () => {
+            if (runCadenceItem.style) {
+              runCadenceItem.style.backgroundColor = "var(--paseo-hover-bg, rgba(128, 128, 128, 0.12))";
+            }
+          });
+          runCadenceItem.addEventListener?.("mouseleave", () => {
+            if (runCadenceItem.style) {
+              runCadenceItem.style.backgroundColor = "transparent";
+            }
+          });
+
+          const iconWrap = doc.createElement("span");
+          iconWrap.innerHTML = CADENCE_TIMER_SVG;
+          if (iconWrap.style) {
+            iconWrap.style.display = "inline-flex";
+            iconWrap.style.alignItems = "center";
+            iconWrap.style.justifyContent = "center";
+            iconWrap.style.marginRight = "6px";
+            iconWrap.style.flexShrink = "0";
+            iconWrap.style.opacity = "0.75";
+          }
+          runCadenceItem.appendChild?.(iconWrap);
+
+          const textSpan = doc.createElement("span");
+          textSpan.textContent = isZh ? "立即运行节奏" : "Run Cadence Now";
+          runCadenceItem.appendChild?.(textSpan);
+
+          const hintBadge = doc.createElement("span");
+          hintBadge.textContent = "Alt+↵";
+          hintBadge.setAttribute?.(
+            "data-testid",
+            "sidebar-workspace-menu-run-cadence-shortcut-hint",
+          );
+          if (hintBadge.style) {
+            hintBadge.style.marginLeft = "auto";
+            hintBadge.style.marginRight = "4px";
+            hintBadge.style.fontSize = "11px";
+            hintBadge.style.lineHeight = "14px";
+            hintBadge.style.padding = "1px 5px";
+            hintBadge.style.borderRadius = "4px";
+            hintBadge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
+            hintBadge.style.color = "currentColor";
+            hintBadge.style.opacity = "0.65";
+            hintBadge.style.pointerEvents = "none";
+            hintBadge.style.userSelect = "none";
+            hintBadge.style.fontWeight = "400";
+            hintBadge.style.letterSpacing = "0.02em";
+            hintBadge.style.display = "inline-flex";
+            hintBadge.style.alignItems = "center";
+          }
+          runCadenceItem.appendChild?.(hintBadge);
+
+          runCadenceItem.addEventListener?.("click", (ev) => {
+            const me = ev as { stopPropagation?: () => void; preventDefault?: () => void };
+            me.stopPropagation?.();
+            me.preventDefault?.();
+            void triggerRunScheduleNow(cadenceSched.id);
+            const menuRoot = doc.querySelector?.('[data-radix-popper-content-wrapper], [role="menu"]');
+            menuRoot?.remove?.();
+          });
+
+          if (sampleMenuRow && parentMenu.insertBefore) {
+            parentMenu.insertBefore(runCadenceItem, sampleMenuRow);
+          } else {
+            parentMenu.appendChild?.(runCadenceItem);
+          }
+          annotatedCount += 1;
+        }
+      } else if (existingCadenceItem) {
+        existingCadenceItem.remove?.();
+        annotatedCount += 1;
+      }
     }
   }
 
@@ -3982,16 +4124,36 @@ export async function openQuickWorkspaceSwitcherModal(
   return backdrop;
 }
 
+const INLINE_ELIGIBLE_BUILTIN_COMMANDS = new Set([
+  "plan",
+  "goal",
+  "boost",
+  "teamwork",
+  "swarm",
+  "council",
+  "deepagent",
+  "grill-me",
+  "browser",
+  "schedule",
+  "learn",
+  "review",
+  "compact",
+]);
+
 function upgradeSkillCommandsArrayInPlace(commands: unknown[]): boolean {
   let changed = false;
   for (const item of commands) {
     if (!item || typeof item !== "object") continue;
     const cmd = item as Record<string, unknown>;
+    const name = typeof cmd.name === "string" ? cmd.name.trim().toLowerCase() : "";
     const hint = typeof cmd.argumentHint === "string" ? cmd.argumentHint : "";
     if (hint === "[skill]" || hint.startsWith("[skill] ")) {
       cmd.kind = "skill";
       const restHint = hint.slice(7).trim();
       cmd.argumentHint = restHint || "";
+      changed = true;
+    } else if (INLINE_ELIGIBLE_BUILTIN_COMMANDS.has(name) && cmd.kind !== "skill") {
+      cmd.kind = "skill";
       changed = true;
     }
   }
@@ -4084,11 +4246,14 @@ function syncQueryClientAgentCommandsCache(queryClient: unknown): void {
     let needsUpgrade = false;
     for (const item of data) {
       if (!item || typeof item !== "object") continue;
-      const hint =
-        typeof (item as Record<string, unknown>).argumentHint === "string"
-          ? ((item as Record<string, unknown>).argumentHint as string)
-          : "";
-      if (hint === "[skill]" || hint.startsWith("[skill] ")) {
+      const rec = item as Record<string, unknown>;
+      const name = typeof rec.name === "string" ? rec.name.trim().toLowerCase() : "";
+      const hint = typeof rec.argumentHint === "string" ? rec.argumentHint : "";
+      if (
+        hint === "[skill]" ||
+        hint.startsWith("[skill] ") ||
+        (INLINE_ELIGIBLE_BUILTIN_COMMANDS.has(name) && rec.kind !== "skill")
+      ) {
         needsUpgrade = true;
         break;
       }
@@ -4097,11 +4262,14 @@ function syncQueryClientAgentCommandsCache(queryClient: unknown): void {
     const cloned = data.map((item) => {
       if (!item || typeof item !== "object") return item;
       const cmd = { ...(item as Record<string, unknown>) };
+      const name = typeof cmd.name === "string" ? cmd.name.trim().toLowerCase() : "";
       const hint = typeof cmd.argumentHint === "string" ? cmd.argumentHint : "";
       if (hint === "[skill]" || hint.startsWith("[skill] ")) {
         cmd.kind = "skill";
         const restHint = hint.slice(7).trim();
         cmd.argumentHint = restHint || "";
+      } else if (INLINE_ELIGIBLE_BUILTIN_COMMANDS.has(name) && cmd.kind !== "skill") {
+        cmd.kind = "skill";
       }
       return cmd;
     });
@@ -4306,10 +4474,12 @@ export function installDesktopRevealHelpers(
   let activeMenuCleanup: (() => void) | null = null;
   let quickMetadataBarSeq = 0;
   let isFetchingThreadMetadata = false;
+  let activeQuickThreadBarWsId: string | null = null;
 
   const removeMenu = () => {
     quickMetadataBarSeq += 1;
     isFetchingThreadMetadata = false;
+    activeQuickThreadBarWsId = null;
     if (activeMenuCleanup) {
       try {
         activeMenuCleanup();
@@ -4549,7 +4719,32 @@ export function installDesktopRevealHelpers(
     }
 
     const onBackdropDismiss = (ev: unknown) => {
+      const pe = ev as MinimalMouseEvent;
       removeMenu();
+      if (
+        typeof doc.elementFromPoint === "function" &&
+        typeof pe?.clientX === "number" &&
+        typeof pe?.clientY === "number"
+      ) {
+        try {
+          const underlying = doc.elementFromPoint(pe.clientX, pe.clientY) as MinimalElement | null;
+          if (underlying && !container.contains?.(underlying)) {
+            let curr: MinimalElement | null = underlying;
+            for (let d = 0; curr && d < 10; d += 1) {
+              const tid = (curr.getAttribute?.("data-testid") ?? "").toLowerCase();
+              if (
+                tid.startsWith("sidebar-workspace-row-") ||
+                tid.startsWith("sidebar-project-row-") ||
+                tid.startsWith("workspace-tab-")
+              ) {
+                (curr as unknown as { click?: () => void })?.click?.();
+                break;
+              }
+              curr = curr.parentElement ?? null;
+            }
+          }
+        } catch {}
+      }
     };
     backdrop.addEventListener?.("pointerdown", onBackdropDismiss);
     backdrop.addEventListener?.("mousedown", onBackdropDismiss);
@@ -4573,6 +4768,9 @@ export function installDesktopRevealHelpers(
     const container = doc.createElement("div");
     container.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar");
     container.setAttribute?.("role", "dialog");
+    container.addEventListener?.("pointerdown", (ev) => (ev as MinimalMouseEvent)?.stopPropagation?.());
+    container.addEventListener?.("mousedown", (ev) => (ev as MinimalMouseEvent)?.stopPropagation?.());
+    container.addEventListener?.("click", (ev) => (ev as MinimalMouseEvent)?.stopPropagation?.());
     const winW = win.innerWidth ?? 1200;
     const leftPx = Math.max(16, Math.floor((winW - 440) / 2));
 
@@ -5027,6 +5225,7 @@ export function installDesktopRevealHelpers(
     doc.body.appendChild?.(backdrop);
     doc.body.appendChild?.(container);
     activeMenuEl = container;
+    activeQuickThreadBarWsId = activeWsId ?? null;
 
     setTimeout(() => {
       if (mode === "labels") {
@@ -5130,6 +5329,9 @@ export function installDesktopRevealHelpers(
       return;
     }
     lastObservedWorkspaceId = currentWsId;
+    if (activeMenuEl) {
+      removeMenu();
+    }
     if (
       lastSidebarDirectClickWsId === currentWsId &&
       Date.now() - lastSidebarDirectClickAtMs < 650
@@ -5217,7 +5419,22 @@ export function installDesktopRevealHelpers(
     return decorated;
   };
 
+  let lastObservedRoutePath = win.location?.pathname ?? "";
+
   const runTabMenuInjectPass = () => {
+    const currentWsId = resolveCurrentActiveWorkspaceId(doc, win);
+    const currentPath = win.location?.pathname ?? "";
+    if (activeMenuEl) {
+      if (
+        (activeQuickThreadBarWsId && currentWsId && currentWsId !== activeQuickThreadBarWsId) ||
+        (lastObservedRoutePath && currentPath && currentPath !== lastObservedRoutePath)
+      ) {
+        removeMenu();
+      }
+    }
+    if (currentPath) {
+      lastObservedRoutePath = currentPath;
+    }
     checkActiveWorkspaceRouteSync();
     const renamePrefs = readInlineRenamePreferences(win.localStorage);
     const count =
@@ -5342,6 +5559,9 @@ export function installDesktopRevealHelpers(
     // Detect clicks on Workspace or Agent rows inside Paseo's native Search / CommandCenter (⌘K / ⌘F)
     const ccHint = isUserClick ? extractCommandCenterSelectionHint(me.target, doc) : null;
     if (ccHint) {
+      if (activeMenuEl) {
+        removeMenu();
+      }
       pendingCommandCenterHint = {
         ...ccHint,
         atMs: Date.now(),
@@ -5603,6 +5823,29 @@ export function installDesktopRevealHelpers(
         setTimeout(() => {
           checkActiveWorkspaceRouteSync();
         }, delayMs);
+      }
+    }
+    // Alt+Enter / Option+Enter: Trigger immediate run for active/focused cadence workspace
+    if (
+      ke.altKey &&
+      (ke.key === "Enter" || ke.key === "Return") &&
+      !ke.metaKey &&
+      !ke.ctrlKey &&
+      !ke.shiftKey &&
+      !ke.isComposing &&
+      ke.keyCode !== 229 &&
+      !isEditableInput(ke.target ?? null)
+    ) {
+      const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, callbacks.getFallbackWorkspaceId?.());
+      const renameTarget = findF2InlineRenameTarget(doc, win, activeWsId);
+      const targetWsId = renameTarget?.workspaceId ?? activeWsId;
+      const targetTitle = renameTarget?.initialTitle ?? renameTarget?.titleEl?.textContent?.trim() ?? null;
+      const sched = findCadenceScheduleForWorkspace(targetWsId, targetTitle);
+      if (sched) {
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        void triggerRunScheduleNow(sched.id);
+        return;
       }
     }
     // Cmd+Shift+R reveals active file tab in Finder
@@ -6030,6 +6273,9 @@ export function installDesktopRevealHelpers(
   };
 
   const onPopState = () => {
+    if (activeMenuEl) {
+      removeMenu();
+    }
     checkActiveWorkspaceRouteSync();
   };
 
@@ -6045,6 +6291,7 @@ export function installDesktopRevealHelpers(
   doc.addEventListener("drop", onDropCapture, true);
   win.addEventListener("keydown", onKeyDownCapture, true);
   win.addEventListener("popstate", onPopState, false);
+  win.addEventListener("hashchange", onPopState, false);
   win.addEventListener("blur", hideSidebarDropOverlay, false);
 
   return () => {
@@ -6074,6 +6321,7 @@ export function installDesktopRevealHelpers(
     doc.removeEventListener("drop", onDropCapture, true);
     win.removeEventListener("keydown", onKeyDownCapture, true);
     win.removeEventListener("popstate", onPopState, false);
+    win.removeEventListener("hashchange", onPopState, false);
     win.removeEventListener("blur", hideSidebarDropOverlay, false);
   };
 }

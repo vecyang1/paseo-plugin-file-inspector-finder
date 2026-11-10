@@ -32,6 +32,7 @@ import {
   importFolderWorkspaceRpc,
   inspectScheduleRunsRpc,
   manageAgentHistoryRpc,
+  managePeerAgentsRpc,
   manageSlashSkillsRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
@@ -127,6 +128,15 @@ import {
   syncMarkdownTablePreferences,
 } from "./markdown-table-web";
 import {
+  SESSION_TIME_EVENT,
+  type SessionTimeClockFormat,
+  type SessionTimeHealthSnapshot,
+  type SessionTimeSelfTestResult,
+  getSessionTimeHealthSnapshot,
+  runSessionTimeSelfTest,
+  syncSessionTimePreferences,
+} from "./session-time-web";
+import {
   applyInlineInputCaret,
   computeDoneToggledTitle,
   findF2InlineRenameTarget,
@@ -162,6 +172,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const manageSlashSkills = useRpc(manageSlashSkillsRpc);
   const manageWritebackHook = useRpc(manageWritebackHookRpc);
   const reconcilePaseoRecovery = useRpc(reconcilePaseoRecoveryRpc);
+  const managePeerAgents = useRpc(managePeerAgentsRpc);
   const isZh = isChineseLocale(
     typeof navigator !== "undefined" ? navigator.language : undefined,
   );
@@ -271,6 +282,17 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     window.addEventListener(MARKDOWN_TABLE_EVENT, onReceipt);
     return () => window.removeEventListener(MARKDOWN_TABLE_EVENT, onReceipt);
   }, []);
+  const [sessionTimeHealth, setSessionTimeHealth] =
+    useState<SessionTimeHealthSnapshot | null>(() => getSessionTimeHealthSnapshot());
+  const [sessionTimeSelfTest, setSessionTimeSelfTest] =
+    useState<SessionTimeSelfTestResult | null>(null);
+  useEffect(() => {
+    setSessionTimeHealth(getSessionTimeHealthSnapshot());
+    if (typeof window === "undefined") return;
+    const onReceipt = () => setSessionTimeHealth(getSessionTimeHealthSnapshot());
+    window.addEventListener(SESSION_TIME_EVENT, onReceipt);
+    return () => window.removeEventListener(SESSION_TIME_EVENT, onReceipt);
+  }, []);
   const [agentHistoryQueryInput, setAgentHistoryQueryInput] = useState("");
   const [agentHistorySnapData, setAgentHistorySnapData] = useState<
     Awaited<ReturnType<typeof manageAgentHistory>> | null
@@ -293,6 +315,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   );
   const [writebackSnapData, setWritebackSnapData] = useState<
     Awaited<ReturnType<typeof manageWritebackHook>> | null
+  >(null);
+  const [peerProfileQueryInput, setPeerProfileQueryInput] = useState("gemini4, opus 5.5");
+  const [peerAgentsSnapData, setPeerAgentsSnapData] = useState<
+    Awaited<ReturnType<typeof managePeerAgents>> | null
   >(null);
 
   useEffect(() => {
@@ -347,6 +373,17 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       syncMarkdownTablePreferences({
         enabled: settings.values.enableMarkdownTableEnhancer ?? true,
       });
+      syncSessionTimePreferences(
+        {
+          enabled: settings.values.enableSessionFinishedTimeEnhancer ?? true,
+          clockFormat: settings.values.sessionTimeClockFormat ?? "24h",
+          showFinishedTimeInSidebar: settings.values.showFinishedTimeInSidebar ?? true,
+          showRelativeAgeInTurnFooter:
+            settings.values.showRelativeAgeInTurnFooter ?? true,
+        },
+        "plugin-settings",
+      );
+      setSessionTimeHealth(getSessionTimeHealthSnapshot());
     }
   }, [settings]);
 
@@ -385,12 +422,21 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         setWritebackSnapData(res);
       })
       .catch(() => {});
+    void managePeerAgents({
+      action: "status",
+      source: "settings-ui",
+    })
+      .then((res) => {
+        setPeerAgentsSnapData(res);
+      })
+      .catch(() => {});
   }, [
     manageVoiceStt,
     manageAgentHistory,
     reconcilePaseoRecovery,
     manageSlashSkills,
     manageWritebackHook,
+    managePeerAgents,
   ]);
 
   const resolveActiveWsId = (): string | undefined => {
@@ -1227,13 +1273,13 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           <SettingsSwitch
             label={
               isZh
-                ? "在 Schedules 页面显示「运行记录 (Runs)」胶囊与抽屉 (⌘⇧H)"
-                : "Enhance Schedules screen with Runs (N) pills & Runs Drawer (⌘⇧H)"
+                ? "侧边栏节奏小秒表图标 (Cadence Timer) 与 Schedules 运行记录抽屉 (⌘⇧H)"
+                : "Sidebar Cadence Timer Badges, 1-Click Run Now & Schedules Runs Drawer (⌘⇧H)"
             }
             hint={
               isZh
-                ? "采用 rAF 帧合并 + 签名幂等防抖 + 熔断保护器，零微任务重入地注入历史运行次数与会话穿透入口"
-                : "Idempotent rAF-coalesced DOM decorator with rolling-window circuit breaker for 1-click schedule run drill-down"
+                ? "在左侧边栏为自动定时运行的工作区标注小秒表图标以减少不必要注意力，支持 Alt+单击或右键菜单一键立即运行；Schedules 页面支持运行记录抽屉穿透"
+                : "Decorate cadence workspaces in left sidebar with small timer badges to reduce human attention, 1-click Run Now via Alt+Click or context menu, and Runs Drawer in Schedules"
             }
             value={values.enableScheduleRunsInspector}
             onValueChange={(next) => {
@@ -3441,6 +3487,310 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 Row Repaired: {markdownTableSelfTest.truncatedRowRepaired ? "✓ Yes" : "✕ No"} ·
                 Inline `&lt;br&gt;` Guard:{" "}
                 {markdownTableSelfTest.codeSpanBrPreserved ? "✓ Preserved" : "✕ Failed"}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "会话完成时间与本地时区展示对账器 (能读 / 能试 / 能调)"
+            : "Session Finished Time & Local Timezone Reconciler"
+        }
+      >
+        <SettingsCard>
+          <SettingsSwitch
+            label={
+              isZh
+                ? "显示会话与回合完成的具体本地时间 (如 Worked for 1h 29m · 01:38 / 7h ago · 01:38)"
+                : "Show concise finished clock time in user timezone alongside relative age"
+            }
+            hint={
+              isZh
+                ? "开启后：不再只显示笼统的 xxh ago 或仅显示 Worked for 耗时。今日完成直接显示 HH:mm（如 01:38），跨日完成显示 MM/DD HH:mm（如 11/09 23:48），覆盖对话回合底部、左侧边栏、⌘K 搜索、Sessions 列表与标签页悬停提示。"
+                : "Displays concise local finished time (HH:mm today, MM/DD HH:mm cross-day) across chat turn footers, left sidebar, Command Center (⌘K), Sessions list, and tab tooltips."
+            }
+            value={values.enableSessionFinishedTimeEnhancer ?? true}
+            onValueChange={(next) => {
+              syncSessionTimePreferences({ enabled: next }, "plugin-settings");
+              setSessionTimeHealth(getSessionTimeHealthSnapshot());
+              void save({ ...values, enableSessionFinishedTimeEnhancer: next }, revision);
+            }}
+          />
+
+          <SettingsSelect
+            label={isZh ? "时间显示制式 (Clock Format)" : "Clock Format"}
+            hint={
+              isZh
+                ? "24 小时制（推荐，极简紧凑如 01:38 / 11/09 23:48）或 12 小时制（如 1:38 AM）"
+                : "24-hour concise clock (01:38 / 11/09 23:48) or 12-hour clock (1:38 AM)"
+            }
+            value={(values.sessionTimeClockFormat ?? "24h") as SessionTimeClockFormat}
+            options={[
+              {
+                label: isZh
+                  ? "24 小时制 (01:38 / 11/09 23:48 · 推荐)"
+                  : "24-Hour Concise (01:38 / 11/09 23:48 · Recommended)",
+                value: "24h",
+              },
+              {
+                label: isZh
+                  ? "12 小时制 (1:38 AM / 11/09 11:48 PM)"
+                  : "12-Hour Clock (1:38 AM / 11/09 11:48 PM)",
+                value: "12h",
+              },
+            ]}
+            onValueChange={(next) => {
+              syncSessionTimePreferences({ clockFormat: next }, "plugin-settings");
+              setSessionTimeHealth(getSessionTimeHealthSnapshot());
+              void save({ ...values, sessionTimeClockFormat: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={
+              isZh
+                ? "在左侧边栏会话行同步显示完成时间 (如 7h · 01:38)"
+                : "Show finished time in Left Sidebar workspace rows (e.g. 7h · 01:38)"
+            }
+            hint={
+              isZh
+                ? "开启后左侧边栏已结束会话行同时呈现相对时长与本地完成时刻；悬停可查看完整秒级时间戳与时区。"
+                : "Appends concise local finished time to compact sidebar timestamps with full timezone tooltip on hover."
+            }
+            value={values.showFinishedTimeInSidebar ?? true}
+            onValueChange={(next) => {
+              syncSessionTimePreferences(
+                { showFinishedTimeInSidebar: next },
+                "plugin-settings",
+              );
+              setSessionTimeHealth(getSessionTimeHealthSnapshot());
+              void save({ ...values, showFinishedTimeInSidebar: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={
+              isZh
+                ? "在对话回合底部同时附带相对距今时长 (如 Worked for 1h 29m · 01:38 (7h ago))"
+                : "Include relative age in chat turn footer (e.g. Worked for 1h 29m · 01:38 (7h ago))"
+            }
+            hint={
+              isZh
+                ? "开启后，完成超过 1 分钟的回合底部在显示执行耗时与完成时刻的同时，括号内补充距今时长。"
+                : "Shows both the local finished clock time and relative age on finished assistant turns."
+            }
+            value={values.showRelativeAgeInTurnFooter ?? true}
+            onValueChange={(next) => {
+              syncSessionTimePreferences(
+                { showRelativeAgeInTurnFooter: next },
+                "plugin-settings",
+              );
+              setSessionTimeHealth(getSessionTimeHealthSnapshot());
+              void save({ ...values, showRelativeAgeInTurnFooter: next }, revision);
+            }}
+          />
+        </SettingsCard>
+
+        <View style={styles.diagBox}>
+          <Text style={styles.detail}>
+            • {isZh ? "当前时区与状态 (能读)" : "Active Timezone & Status"}:{" "}
+            {sessionTimeHealth?.enabled !== false ? "✓ Enabled" : "✕ Disabled"} · Timezone:{" "}
+            {sessionTimeHealth?.timeZone ?? "Local"} ({sessionTimeHealth?.offsetLabel ?? "GMT"}) ·
+            Format: {sessionTimeHealth?.clockFormat ?? "24h"} · Source:{" "}
+            {sessionTimeHealth?.sourceBadge ?? "default"} · Metro Hooks:{" "}
+            {sessionTimeHealth?.metroHookInstalled
+              ? `✓ (${sessionTimeHealth.hookedModules.join(", ")})`
+              : "DOM-Enhancer Active"}{" "}
+            · Decorated (Turns={sessionTimeHealth?.turnFootersDecorated ?? 0}, Sidebar=
+            {sessionTimeHealth?.sidebarTimestampsDecorated ?? 0}, ⌘K=
+            {sessionTimeHealth?.commandCenterTimestampsDecorated ?? 0}, AgentList=
+            {sessionTimeHealth?.agentRowsDecorated ?? 0})
+          </Text>
+
+          <View style={styles.row}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                const res = runSessionTimeSelfTest();
+                setSessionTimeSelfTest(res);
+                setSessionTimeHealth(getSessionTimeHealthSnapshot());
+                toast.show(res.summary);
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "验算本地时区格式 (能试)" : "Run Timezone Self-Test"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                syncSessionTimePreferences(
+                  {
+                    enabled: true,
+                    clockFormat: "24h",
+                    showFinishedTimeInSidebar: true,
+                    showRelativeAgeInTurnFooter: true,
+                  },
+                  "plugin-settings",
+                );
+                void save(
+                  {
+                    ...values,
+                    enableSessionFinishedTimeEnhancer: true,
+                    sessionTimeClockFormat: "24h",
+                    showFinishedTimeInSidebar: true,
+                    showRelativeAgeInTurnFooter: true,
+                  },
+                  revision,
+                );
+                setSessionTimeHealth(getSessionTimeHealthSnapshot());
+                toast.show(
+                  isZh
+                    ? "已恢复会话完成时间默认配置 (24h)"
+                    : "Restored session finished time defaults (24h)",
+                );
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "恢复默认 (能调)" : "Restore Defaults"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {sessionTimeSelfTest ? (
+            <View style={{ gap: 4, marginTop: 6 }}>
+              <Text style={styles.label}>• {sessionTimeSelfTest.summary}</Text>
+              <Text style={styles.detail}>
+                • Turn Footer: "{sessionTimeSelfTest.turnFooterSample}" · Left Sidebar: "
+                {sessionTimeSelfTest.sidebarCompactSample}" · ⌘K / Sessions List: "
+                {sessionTimeSelfTest.proseRelativeSample}"
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          isZh
+            ? "跨模型同伴调用与反伪造门禁 (Peer Agents & Cross-Model Review v5)"
+            : "Peer Agents & Cross-Model Review Reconciler (v5)"
+        }
+      >
+        <View style={styles.diagBox}>
+          <Text style={styles.detail}>
+            • {isZh ? "同伴感知块与通道状态 (能读)" : "Peer Block & Channel Status"}:{" "}
+            v{peerAgentsSnapData?.blockVersion ?? 5} · Channel:{" "}
+            {peerAgentsSnapData?.antigravityChannel ?? "cli-fallback"} · Active Peers:{" "}
+            {peerAgentsSnapData?.activePeersCount ?? 0} (Closed Folded:{" "}
+            {peerAgentsSnapData?.closedPeersCount ?? 0})
+          </Text>
+          <Text style={styles.detail}>
+            • {isZh ? "指令表面同步状态" : "Harness Surfaces"}:{" "}
+            {(peerAgentsSnapData?.surfaces ?? [])
+              .map((s) => `${s.name}=${s.state}${s.version ? `(v${s.version})` : ""}`)
+              .join(" · ") || "loading..."}
+          </Text>
+          <Text style={styles.detail}>
+            • {isZh ? "已配置跨模型画像" : "Configured Profiles"} (
+            {peerAgentsSnapData?.profiles?.length ?? 0}):{" "}
+            {(peerAgentsSnapData?.profiles ?? [])
+              .map((p) => `${p.name} [${p.provider}/${p.model}]`)
+              .join(" · ") || "none"}
+          </Text>
+          <Text style={styles.detail}>
+            • {isZh ? "发件箱与队列对账" : "Outbox Summary"}:{" "}
+            {peerAgentsSnapData?.outboxSummary ?? "outbox: ok"}
+          </Text>
+
+          <View style={styles.row}>
+            <View style={{ flex: 1, minWidth: 220 }}>
+              <TextInput
+                placeholder={
+                  isZh
+                    ? "输入模型简写测试解析，如 gemini4, opus 5.5"
+                    : "Enter model shorthands to test, e.g. gemini4, opus 5.5"
+                }
+                value={peerProfileQueryInput}
+                onChangeText={setPeerProfileQueryInput}
+              />
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void managePeerAgents({
+                  action: "test_resolve",
+                  profileQuery: peerProfileQueryInput,
+                  source: "settings-ui",
+                }).then((res) => {
+                  setPeerAgentsSnapData(res);
+                  toast.show(res.message);
+                });
+              }}
+              style={styles.btn}
+            >
+              <Text style={styles.btnText}>
+                {isZh ? "试跑画像解析 (能试)" : "Dry-Run Profile Resolve"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void managePeerAgents({
+                  action: "enable_all",
+                  source: "settings-ui",
+                }).then((res) => {
+                  setPeerAgentsSnapData(res);
+                  toast.show(
+                    isZh
+                      ? "已同步 v5 反伪造同伴感知块至全部指令表面"
+                      : "Synced v5 peer-awareness block across all harnesses",
+                  );
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "同步 v5 感知块 (能调)" : "Sync v5 Block"}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                void managePeerAgents({
+                  action: "heal_outbox",
+                  source: "settings-ui",
+                }).then((res) => {
+                  setPeerAgentsSnapData(res);
+                  toast.show(
+                    isZh
+                      ? "已执行发件箱治愈与侧边栏标题血缘对账"
+                      : "Healed peer outbox and reconciled workspace titles",
+                  );
+                });
+              }}
+              style={styles.secondaryBtn}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {isZh ? "治愈发件箱与血缘 (能调)" : "Heal Outbox & Lineage"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {peerAgentsSnapData?.resolvedPreview ? (
+            <View style={{ gap: 4, marginTop: 6 }}>
+              <Text style={styles.label}>
+                • {isZh ? "解析命中画像" : "Matched Profiles"}:{" "}
+                {peerAgentsSnapData.resolvedPreview.matchedProfiles.join(" + ")}
+              </Text>
+              <Text style={styles.detail}>
+                • {isZh ? "一键跨模型评审命令" : "1-Command Cross-Model Review"}:{" "}
+                {peerAgentsSnapData.resolvedPreview.sampleReviewCommand}
               </Text>
             </View>
           ) : null}

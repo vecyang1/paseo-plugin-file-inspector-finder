@@ -143,6 +143,10 @@ export const pluginSettings = defineSettings({
     smartCopyBulletMarker: SmartCopyBulletMarkerSchema.default("bullet"),
     smartCopyLinkFormat: SmartCopyLinkFormatSchema.default("label-only"),
     enableMarkdownTableEnhancer: z.boolean().default(true),
+    enableSessionFinishedTimeEnhancer: z.boolean().default(true),
+    sessionTimeClockFormat: z.enum(["24h", "12h"]).default("24h"),
+    showFinishedTimeInSidebar: z.boolean().default(true),
+    showRelativeAgeInTurnFooter: z.boolean().default(true),
     enableSidebarFolderDrop: z.boolean().default(true),
     sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),
     enableWorkspaceQuickJump: z.boolean().default(true),
@@ -1160,6 +1164,18 @@ export function scoreProjectJumpQuery(
   return totalScore;
 }
 
+export const SessionRelationKindSchema = z.enum([
+  "subagent",
+  "colleague",
+  "referenced",
+  "intake-routed",
+  "project-peer",
+  "parent",
+  "self",
+]);
+
+export type SessionRelationKind = z.infer<typeof SessionRelationKindSchema>;
+
 export const SessionLineageNodeSchema = z.object({
   agentId: z.string(),
   shortId: z.string(),
@@ -1172,6 +1188,8 @@ export const SessionLineageNodeSchema = z.object({
   provider: z.string(),
   model: z.string(),
   providerSessionId: z.string().nullable().optional(),
+  relationKind: SessionRelationKindSchema.optional(),
+  routedByAgentId: z.string().nullable().optional(),
   createdAt: z.string().nullable(),
   updatedAt: z.string().nullable(),
   briefPath: z.string().nullable(),
@@ -1199,8 +1217,10 @@ export const manageSessionLineageRpc = defineRpc({
     action: z.string(),
     current: SessionLineageNodeSchema.nullable(),
     parent: SessionLineageNodeSchema.nullable(),
+    routedOrigin: SessionLineageNodeSchema.nullable().optional(),
     siblings: z.array(SessionLineageNodeSchema),
     children: z.array(SessionLineageNodeSchema),
+    colleagues: z.array(SessionLineageNodeSchema).optional(),
     projectPeers: z.array(SessionLineageNodeSchema).optional(),
     directory: z.array(SessionLineageNodeSchema).optional(),
     reconcileSummary: z.object({
@@ -1208,6 +1228,7 @@ export const manageSessionLineageRpc = defineRpc({
       renamedCount: z.number(),
       unlinkedFound: z.number(),
       linkedCount: z.number(),
+      detachedCount: z.number().optional(),
       renamedWorkspaces: z.array(
         z.object({
           workspaceId: z.string(),
@@ -1247,6 +1268,57 @@ export const forkSessionRpc = defineRpc({
     stepsCopied: z.number().nullable(),
     message: z.string(),
     error: z.string().nullable(),
+    durationMs: z.number(),
+  }),
+});
+
+export const PeerSurfaceStateSchema = z.object({
+  name: z.string(),
+  state: z.string(),
+  version: z.number().nullable().optional(),
+  covers: z.string(),
+  target: z.string(),
+});
+
+export const PeerAgentProfileItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  launchFlags: z.string().optional(),
+});
+
+export const managePeerAgentsRpc = defineRpc({
+  name: "finder.manage_peer_agents",
+  input: z.object({
+    action: z
+      .enum(["status", "test_resolve", "enable_all", "heal_outbox"])
+      .default("status"),
+    profileQuery: z.string().optional(),
+    cwd: z.string().optional(),
+    source: z
+      .enum(["settings-ui", "slash-command", "command-center", "agent-tool"])
+      .optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.string(),
+    blockVersion: z.number(),
+    antigravityChannel: z.string(),
+    surfaces: z.array(PeerSurfaceStateSchema),
+    profiles: z.array(PeerAgentProfileItemSchema),
+    activePeersCount: z.number(),
+    closedPeersCount: z.number(),
+    outboxSummary: z.string(),
+    resolvedPreview: z
+      .object({
+        query: z.string(),
+        matchedProfiles: z.array(z.string()),
+        sampleReviewCommand: z.string(),
+      })
+      .nullable()
+      .optional(),
+    message: z.string(),
     durationMs: z.number(),
   }),
 });

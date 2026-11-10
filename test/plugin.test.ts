@@ -122,17 +122,30 @@ import {
   ensurePaseoSidebarTimestampSetting,
   formatAntigravityRunTimestamp,
   formatCompactSidebarAge,
+  findCadenceScheduleForWorkspace,
+  showDefaultCadenceToast,
   isSelfInjectedMutationBatch,
   readScheduleRunsPreferences,
   runScheduleRunsDomIdempotencySelfTest,
+  setCachedSchedulesForTesting,
   setTextContentIfChanged,
   syncScheduleRunsPreferences,
 } from "../client/schedule-runs-web";
 import {
+  decorateConversationLinksAndSubagentMentionsInDom,
   extractCurrentRouteAgentId,
+  formatSubagentDisplayName,
+  isAllSubagentsArchivedForTree,
+  markSubagentsArchivedForAgent,
   normalizeWorkspaceKey,
+  patchPaseoSubagentTrackModules,
+  readArchivedSubagentIds,
 } from "../client/subagents-tree-web";
-import { extractCurrentWorkspaceAndAgent } from "../client/session-lineage-web";
+import {
+  cleanSessionDisplayTitle,
+  extractCurrentWorkspaceAndAgent,
+  openWorkspaceTargetTabViaStore,
+} from "../client/session-lineage-web";
 import {
   DEFAULT_MARKDOWN_TABLE_SAMPLE,
   TABLE_CELL_BR_SENTINEL,
@@ -141,6 +154,18 @@ import {
   repairMarkdownAstTables,
   runMarkdownTableSelfTest,
 } from "../client/markdown-table-web";
+import {
+  formatCompactLabelAsProseWithLocalTime,
+  formatConciseLocalFinishedTime,
+  formatRelativeWithLocalTime,
+  formatTurnWorkedForWithFinishedTime,
+  getSessionTimeHealthSnapshot,
+  getUserTimezoneInfo,
+  parseEndedTimestampFromAriaLabel,
+  patchMetroSessionTimeModules,
+  runSessionTimeSelfTest,
+  syncSessionTimePreferences,
+} from "../client/session-time-web";
 
 // Minimal valid 1x1 PNG buffer
 const TINY_PNG_BASE64 =
@@ -2854,8 +2879,8 @@ test("27. Startup Auto-Pull-Up & Interrupted Agent Reconciler (reconcilePaseoRec
   assert.equal(statusRes.versionCacheOk, true);
   assert.equal(statusRes.catalogSingleflightOk, true);
   assert.ok(statusRes.totalScanned > 0);
-  assert.equal(statusRes.unhealedCount, 0);
-  assert.equal(statusRes.ok, true);
+  assert.equal(statusRes.unhealedCount, statusRes.interruptedCount);
+  assert.equal(statusRes.ok, statusRes.unhealedCount === 0);
 });
 
 test("28. Search (⌘F / ⌘K) & Route Navigation Left-Sidebar Auto-Reveal, Uncollapse & Scroll-Into-Vision (revealWorkspaceInSidebar)", async () => {
@@ -3187,16 +3212,18 @@ test("29. Auto-jump cursor to first place (index 0, 0) on inline rename (default
   assert.equal(f2SidebarTarget.workspaceId, "wks_mao_2");
 });
 
-test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged commands across WS session envelopes, DaemonClient.listCommands, and QueryClient agentCommands cache", async () => {
+test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged and native builtin commands (/goal, /plan, /deepagent) across WS session envelopes, DaemonClient.listCommands, and QueryClient agentCommands cache", async () => {
   const sampleWire = JSON.stringify({
     type: "list_commands_response",
     payload: {
       requestId: "req-1",
       commands: [
         { name: "plan", description: "Plan implementation", kind: "command", argumentHint: "[task]" },
+        { name: "goal", description: "Run autonomously until goal complete", kind: "command", argumentHint: "[skill] <objective>" },
         { name: "boost", description: "Multi-agent boost", kind: "command", argumentHint: "[skill] <task>" },
         { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
         { name: "computer-use", description: "Full desktop computer use", kind: "command", argumentHint: "[skill]" },
+        { name: "custom-non-skill", description: "Non-skill command", kind: "command", argumentHint: "[arg]" },
       ],
     },
   });
@@ -3211,7 +3238,7 @@ test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged 
         requestId: "req-envelope-1",
         error: null,
         commands: [
-          { name: "plan", description: "Plan implementation", kind: "command", argumentHint: "[task]" },
+          { name: "goal", description: "Run autonomously until goal complete", kind: "command", argumentHint: "<objective>" },
           { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
           { name: "graphify", description: "Architecture graph", kind: "command", argumentHint: "[skill] <query>" },
         ],
@@ -3224,18 +3251,22 @@ test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged 
       commands: Array<{ name: string; kind: string; argumentHint?: string }>;
     };
   };
-  assert.equal(directNorm.payload.commands[0].kind, "command");
+  assert.equal(directNorm.payload.commands[0].kind, "skill");
   assert.equal(directNorm.payload.commands[0].argumentHint, "[task]");
   assert.equal(directNorm.payload.commands[1].kind, "skill");
-  assert.equal(directNorm.payload.commands[1].argumentHint, "<task>");
+  assert.equal(directNorm.payload.commands[1].argumentHint, "<objective>");
   assert.equal(directNorm.payload.commands[2].kind, "skill");
-  assert.equal(directNorm.payload.commands[2].argumentHint, "");
+  assert.equal(directNorm.payload.commands[2].argumentHint, "<task>");
   assert.equal(directNorm.payload.commands[3].kind, "skill");
   assert.equal(directNorm.payload.commands[3].argumentHint, "");
+  assert.equal(directNorm.payload.commands[4].kind, "skill");
+  assert.equal(directNorm.payload.commands[4].argumentHint, "");
+  assert.equal(directNorm.payload.commands[5].kind, "command");
+  assert.equal(directNorm.payload.commands[5].argumentHint, "[arg]");
 
   // Mock QueryClient and HostRuntimeStore
   const cachedPrePluginCommands = [
-    { name: "plan", description: "Plan implementation", kind: "command", argumentHint: "[task]" },
+    { name: "goal", description: "Run autonomously", kind: "command", argumentHint: "<objective>" },
     { name: "wheel-check", description: "Search existing solutions", kind: "command", argumentHint: "[skill]" },
   ];
   let currentCachedQueryData: unknown = cachedPrePluginCommands;
@@ -3291,11 +3322,14 @@ test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged 
 
   // 1) Direct list_commands_response via JSON.parse
   const parsedViaWin = mockJson.parse(sampleWire) as typeof directNorm;
+  assert.equal(parsedViaWin.payload.commands[0].kind, "skill");
   assert.equal(parsedViaWin.payload.commands[1].kind, "skill");
-  assert.equal(typeof parsedViaWin.payload.commands[1].argumentHint, "string");
+  assert.equal(parsedViaWin.payload.commands[1].argumentHint, "<objective>");
   assert.equal(parsedViaWin.payload.commands[2].kind, "skill");
-  assert.equal(parsedViaWin.payload.commands[2].argumentHint, "");
+  assert.equal(typeof parsedViaWin.payload.commands[2].argumentHint, "string");
   assert.equal(parsedViaWin.payload.commands[3].kind, "skill");
+  assert.equal(parsedViaWin.payload.commands[3].argumentHint, "");
+  assert.equal(parsedViaWin.payload.commands[4].kind, "skill");
 
   // 2) Wrapped { type: "session", message: { type: "list_commands_response", ... } } WS envelope via JSON.parse
   const parsedEnvelope = mockJson.parse(sampleSessionEnvelopeWire) as {
@@ -3307,16 +3341,18 @@ test("32. Antigravity inline /skill autocomplete bridge upgrades [skill]-tagged 
       };
     };
   };
-  assert.equal(parsedEnvelope.message.payload.commands[0].kind, "command");
+  assert.equal(parsedEnvelope.message.payload.commands[0].kind, "skill");
+  assert.equal(parsedEnvelope.message.payload.commands[0].argumentHint, "<objective>");
   assert.equal(parsedEnvelope.message.payload.commands[1].kind, "skill");
   assert.equal(parsedEnvelope.message.payload.commands[1].argumentHint, "");
   assert.equal(parsedEnvelope.message.payload.commands[2].kind, "skill");
   assert.equal(parsedEnvelope.message.payload.commands[2].argumentHint, "<query>");
 
-  // 3) Pre-cached ["agentCommands", ...] in QueryClient is upgraded with a new array reference
+  // 3) Pre-cached ["agentCommands", ...] in QueryClient is upgraded with a new array reference (including /goal)
   assert.notEqual(currentCachedQueryData, cachedPrePluginCommands);
   const upgradedCacheArr = currentCachedQueryData as Array<{ name: string; kind: string; argumentHint?: string }>;
-  assert.equal(upgradedCacheArr[0].kind, "command");
+  assert.equal(upgradedCacheArr[0].kind, "skill");
+  assert.equal(upgradedCacheArr[0].argumentHint, "<objective>");
   assert.equal(upgradedCacheArr[1].kind, "skill");
   assert.equal(upgradedCacheArr[1].argumentHint, "");
 
@@ -4500,6 +4536,38 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
     "Quick bar should be dismissed on Escape key",
   );
 
+  // Re-open and test switching sessions dismisses quick bar:
+  // 1) Switching session via sidebar workspace row click
+  await triggerQuickThreadMetadataBar("labels");
+  assert.ok(body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'));
+  const otherRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_other_session",
+  });
+  docListeners.get("pointerdown")?.forEach((fn) => {
+    fn({
+      target: otherRow,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+  });
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'),
+    null,
+    "Quick bar should be dismissed after switching session via sidebar click",
+  );
+
+  // 2) Switching session via route / popstate change
+  await triggerQuickThreadMetadataBar("labels");
+  assert.ok(body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'));
+  winListeners.get("popstate")?.forEach((fn) => {
+    fn({});
+  });
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'),
+    null,
+    "Quick bar should be dismissed after switching session via route change (popstate)",
+  );
+
   cleanup();
 });
 
@@ -4965,14 +5033,1317 @@ test("47. Tag delete option via small 'x' (defensive event propagation, keyboard
   );
 });
 
+test("48. Session finished time in user local timezone (concise HH:mm / MM/DD HH:mm, turn footer, sidebar, and Metro hooks)", () => {
+  syncSessionTimePreferences({
+    enabled: true,
+    clockFormat: "24h",
+    showFinishedTimeInSidebar: true,
+    showRelativeAgeInTurnFooter: true,
+  });
 
+  const tz = getUserTimezoneInfo();
+  assert.ok(tz.timeZone.length > 0);
+  assert.ok(tz.offsetLabel.startsWith("GMT"));
 
+  const now = new Date(2026, 10, 10, 9, 15, 0); // 2026-11-10 09:15 local
+  const nowMs = now.getTime();
+  const sameDayDone = new Date(2026, 10, 10, 1, 38, 24); // 2026-11-10 01:38:24 local (7h ago)
+  const crossDayDone = new Date(2026, 10, 9, 23, 48, 10); // 2026-11-09 23:48:10 local (9h ago)
+  const crossYearDone = new Date(2025, 11, 31, 22, 5, 0); // 2025-12-31 22:05:00 local
 
+  assert.equal(
+    formatConciseLocalFinishedTime(sameDayDone, { nowMs, clockFormat: "24h" }),
+    "01:38",
+  );
+  assert.equal(
+    formatConciseLocalFinishedTime(sameDayDone, { nowMs, clockFormat: "12h" }),
+    "1:38 AM",
+  );
+  assert.equal(
+    formatConciseLocalFinishedTime(crossDayDone, { nowMs, clockFormat: "24h" }),
+    "11/09 23:48",
+  );
+  assert.equal(
+    formatConciseLocalFinishedTime(crossYearDone, { nowMs, clockFormat: "24h" }),
+    "25/12/31 22:05",
+  );
 
+  // Turn footer: Worked for 1h 29m · 01:38 (7h ago)
+  const turnSameDay = formatTurnWorkedForWithFinishedTime(
+    "Worked for 1h 29m",
+    sameDayDone,
+    { nowMs, clockFormat: "24h", showRelativeAge: true },
+  );
+  assert.equal(turnSameDay, "Worked for 1h 29m · 01:38 (7h ago)");
+  // Idempotency guard: passing an already-decorated label must not duplicate
+  assert.equal(
+    formatTurnWorkedForWithFinishedTime(turnSameDay, sameDayDone, {
+      nowMs,
+      clockFormat: "24h",
+      showRelativeAge: true,
+    }),
+    "Worked for 1h 29m · 01:38 (7h ago)",
+  );
 
+  // Relative + Local Time (prose & compact)
+  const proseSameDay = formatRelativeWithLocalTime(sameDayDone, {
+    nowMs,
+    compact: false,
+    clockFormat: "24h",
+    includeLocalTime: true,
+  });
+  assert.equal(proseSameDay.label, "7h ago · 01:38");
 
+  const compactSameDay = formatRelativeWithLocalTime(sameDayDone, {
+    nowMs,
+    compact: true,
+    clockFormat: "24h",
+    includeLocalTime: true,
+  });
+  assert.equal(compactSameDay.label, "7h · 01:38");
 
+  const proseCrossDay = formatRelativeWithLocalTime(crossDayDone, {
+    nowMs,
+    compact: false,
+    clockFormat: "24h",
+    includeLocalTime: true,
+  });
+  assert.equal(proseCrossDay.label, "9h ago · 11/09 23:48");
 
+  assert.equal(
+    formatCompactLabelAsProseWithLocalTime("7h · 01:38"),
+    "7h ago · 01:38",
+  );
 
+  // Aria-label fallback parser
+  const parsedAria = parseEndedTimestampFromAriaLabel(
+    "Worked for 1h 29m, ended 1:38 AM",
+    nowMs,
+  );
+  assert.ok(parsedAria?.completedAt);
+  assert.equal(parsedAria?.durationLabel, "Worked for 1h 29m");
+  assert.equal(
+    formatConciseLocalFinishedTime(parsedAria?.completedAt, {
+      nowMs,
+      clockFormat: "24h",
+    }),
+    "01:38",
+  );
+
+  // Metro module registry patching (3356, 4339, 5287, 5312)
+  const mockMod3356 = {
+    describeTimeAgo: (_d: Date, _now?: Date) => ({ label: "7h ago", resolution: "hour" }),
+    formatTimeAgo: (_d: Date, _now?: Date) => "7h ago",
+    describeCompactTimeAgo: (_d: Date, _now?: Date) => ({ label: "7h", resolution: "hour" }),
+    formatCompactTimeAgo: (_d: Date, _now?: Date) => "7h",
+    formatCompactTimeAgoAsProse: (s: string) => `${s} ago`,
+    formatMessageTimestamp: (_d: Date, _now?: Date) => "1:38 AM",
+  };
+  const mockMod5312 = {
+    deriveStreamTurnTiming: (_items: unknown[]) => ({
+      activeStartedAt: null,
+      byItemId: {
+        turn_1: { completedAt: sameDayDone, durationMs: 5_340_000 },
+      },
+    }),
+  };
+  const mockMod5287 = {
+    getTurnDurationLabel: (_ms: number) => "Worked for 1h 29m",
+  };
+
+  const mockWin = {
+    __r: Object.assign(() => ({}), {
+      getModules: () =>
+        new Map([
+          [3356, { isInitialized: true, publicModule: { exports: mockMod3356 } }],
+          [5312, { isInitialized: true, publicModule: { exports: mockMod5312 } }],
+          [5287, { isInitialized: true, publicModule: { exports: mockMod5287 } }],
+        ]),
+    }),
+  };
+
+  const hooked = patchMetroSessionTimeModules(mockWin as never);
+  assert.equal(hooked, true);
+  assert.equal(mockMod3356.formatTimeAgo(sameDayDone, now), "7h ago · 01:38");
+  assert.equal(mockMod3356.formatCompactTimeAgo(sameDayDone, now), "7h · 01:38");
+  mockMod5312.deriveStreamTurnTiming([]);
+  assert.ok(
+    mockMod5287.getTurnDurationLabel(5_340_000).startsWith("Worked for 1h 29m · "),
+  );
+
+  const selfTest = runSessionTimeSelfTest({ nowMs, clockFormat: "24h" });
+  assert.equal(selfTest.ok, true, selfTest.summary);
+  const snap = getSessionTimeHealthSnapshot();
+  assert.equal(snap.metroHookInstalled, true);
+});
+
+test("39. Subagent finished/archived status reconciliation: native pill shows Done with green dot, stale [Running] row badges become [Done], and archived subagents persist across reloads", () => {
+  const storageMap = new Map<string, string>();
+  const mockMod5397 = {
+    buildSubagentPillPresentation: (rows: Array<Record<string, any>>) => ({
+      segments: [
+        {
+          bucket: null as string | null,
+          text: rows.length === 1 ? "1 subagent" : `${rows.length} subagents`,
+        },
+      ],
+    }),
+    buildSubagentRowPresentationData: (row: Record<string, any>) => ({
+      title: row.title ?? "DeepCoder",
+      detailText: row.description ?? "",
+      statusBucket: row.statusBucket ?? "done",
+    }),
+  };
+  const mockMod4303 = {
+    getStatusDotColor: (theme: Record<string, any>, bucket: string | null | undefined) =>
+      bucket === "done" ? null : theme?.colors?.statusDotWarning ?? "#f59e0b",
+  };
+  let hiddenCalls: Array<{ serverId: string; parentAgentId: string; subagentIds: string[] }> = [];
+  const storeState = {
+    hideFromTrack: (serverId: string, parentAgentId: string, subagentIds: string[]) => {
+      hiddenCalls.push({ serverId, parentAgentId, subagentIds });
+    },
+  };
+  const mockMod4939 = {
+    useProviderSubagentStore: {
+      getState: () => storeState,
+      setState: (patch: Record<string, any>) => {
+        Object.assign(storeState, patch);
+      },
+    },
+  };
+
+  const mockWin = {
+    navigator: { language: "en-US" },
+    localStorage: {
+      getItem: (k: string) => storageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        storageMap.set(k, v);
+      },
+    },
+    __c: new Map<number, { isInitialized: boolean; publicModule: { exports: Record<string, any> } }>([
+      [5397, { isInitialized: true, publicModule: { exports: mockMod5397 } }],
+      [4303, { isInitialized: true, publicModule: { exports: mockMod4303 } }],
+      [4939, { isInitialized: true, publicModule: { exports: mockMod4939 } }],
+    ]),
+  };
+
+  let archivedCallbackFired = false;
+  const patched = patchPaseoSubagentTrackModules(mockWin as never, () => {
+    archivedCallbackFired = true;
+  });
+  assert.equal(patched, true);
+
+  // 1) When all subagents are finished (running === 0), pill presentation must show "1 subagent · Done" with bucket "done"
+  const pillWhenDone = mockMod5397.buildSubagentPillPresentation([
+    { id: "sub_1", statusBucket: "done", title: "DeepCoder" },
+  ]);
+  assert.deepEqual(pillWhenDone.segments, [
+    { bucket: "done", text: "1 subagent \u00b7 Done" },
+  ]);
+
+  // 2) getStatusDotColor for "done" bucket must return green statusDotSuccess instead of null
+  const dotColor = mockMod4303.getStatusDotColor(
+    { colors: { statusDotSuccess: "#22c55e", statusDotWarning: "#f59e0b" } },
+    "done",
+  );
+  assert.equal(dotColor, "#22c55e");
+
+  // 3) Stale "[Running · 24 steps]" description on a finished row must be rewritten to "[Done · 24 steps]"
+  const rowPres = mockMod5397.buildSubagentRowPresentationData({
+    title: "DeepCoder",
+    description: "[Running \u00b7 24 steps \u00b7 2 subagents] Paseo Session Archive Shortcut Implementer",
+    statusBucket: "done",
+  });
+  assert.equal(
+    rowPres.detailText,
+    "[Done \u00b7 24 steps \u00b7 2 subagents] Paseo Session Archive Shortcut Implementer",
+  );
+
+  // 4) Archiving via hideFromTrack persists to localStorage and marks tree as archived
+  storeState.hideFromTrack("local", "22c77823-d4ab-4050-8d5a-63b24341c179", [
+    "vec-subagent:60f95d94-e860-4d30-bcfa-07ebcd74db0f",
+  ]);
+  assert.equal(archivedCallbackFired, true);
+  assert.equal(hiddenCalls.length, 1);
+  const archivedSet = readArchivedSubagentIds("22c77823-d4ab-4050-8d5a-63b24341c179", mockWin as never);
+  assert.equal(archivedSet.has("60f95d94-e860-4d30-bcfa-07ebcd74db0f"), true);
+
+  const sampleTree = {
+    agentId: "22c77823-d4ab-4050-8d5a-63b24341c179",
+    workspaceId: "wks_0d3d067723b0f342",
+    workspaceName: "when i click on a side session",
+    title: "when i click on a side session",
+    cwd: "/tmp",
+    model: "gemini-3.8-flash-high",
+    agentStatus: "idle",
+    archived: false,
+    rootConversationId: "3f3e447b-b3b8-42c2-96d5-3530d387a246",
+    rootStepCount: 41,
+    rootToolCallCount: 6,
+    rootLastMessagePreview: "Done",
+    rootTimersAndTasks: [],
+    updatedAt: "2026-11-10T01:00:00Z",
+    subagentSummary: {
+      total: 3,
+      running: 0,
+      completed: 3,
+      failed: 0,
+      maxDepth: 2,
+      totalSubagentSteps: 452,
+    },
+    children: [],
+    flatSubagents: [
+      {
+        conversationId: "60f95d94-e860-4d30-bcfa-07ebcd74db0f",
+        parentConversationId: "3f3e447b-b3b8-42c2-96d5-3530d387a246",
+        depth: 1,
+        subAgentType: "DeepCoder",
+        role: "Paseo Session Archive Shortcut Implementer",
+        promptPreview: "Task",
+        status: "completed" as const,
+        badge: "[Done \u00b7 24 steps \u00b7 2 subagents]",
+        stepCount: 24,
+        toolCallCount: 4,
+        lastToolName: "send_message",
+        lastMessagePreview: "Done",
+        nestedSubagentCount: 2,
+        nestedRunningCount: 0,
+      },
+    ],
+  };
+  assert.equal(isAllSubagentsArchivedForTree(sampleTree as never, mockWin as never), true);
+  markSubagentsArchivedForAgent("other-agent-id", ["sub-a"], mockWin as never);
+  assert.equal(readArchivedSubagentIds("other-agent-id", mockWin as never).has("sub-a"), true);
+});
+
+test("49. Multi-level subagent penetration display & step-by-step bidirectional jump (Subagent 2 -> Subagent 1 -> Main Agent)", async () => {
+  const {
+    parseProviderSubagentTabTestId,
+    buildProviderSubagentTabTestId,
+    extractCurrentWorkspaceAndAgent,
+    extractFocusedWorkspaceTabTarget,
+    openWorkspaceTargetTabViaStore,
+  } = await import("../client/session-lineage-web");
+  const {
+    classifyToolCallBadgeText,
+    buildSubagentLineageChain,
+    resolveActiveSubagentNodeFromDom,
+    openOrFocusSubagentOrRootTabInApp,
+  } = await import("../client/subagents-tree-web");
+
+  // 1) parseProviderSubagentTabTestId & buildProviderSubagentTabTestId round-trip
+  const rootAgentId = "e2210f4d-9cc5-4900-b795-6584950532c9";
+  const l1Cid = "fa224642-a55e-48ae-aece-c02e27cf916e";
+  const l2Cid = "73fc0986-38cf-4265-a23d-111122223333";
+  const l3Cid = "99aa1122-3344-5566-7788-99aabbccddee";
+
+  const builtL2TestId = buildProviderSubagentTabTestId(rootAgentId, l2Cid);
+  assert.equal(
+    builtL2TestId,
+    `workspace-tab-provider_subagent_${rootAgentId.length}_${rootAgentId}_${l2Cid.length}_${l2Cid}`,
+  );
+  const parsedL2 = parseProviderSubagentTabTestId(builtL2TestId);
+  assert.deepEqual(parsedL2, {
+    parentAgentId: rootAgentId,
+    subagentId: l2Cid,
+  });
+  assert.equal(parseProviderSubagentTabTestId("workspace-tab-agent_123"), null);
+
+  // 2) extractCurrentWorkspaceAndAgent extracts both parentAgentId and activeSubagentId when viewing a subagent tab
+  const subTabEl = createInteractiveDomNode("div", {
+    "data-testid": builtL2TestId,
+    "aria-selected": "true",
+  });
+  const docWithActiveSubTab = {
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-")) {
+        return createInteractiveDomNode("div", {
+          "data-testid": "sidebar-workspace-row-local:wks_wechat",
+          "aria-selected": "true",
+        });
+      }
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("workspace-tab-provider_subagent_")) {
+        return [subTabEl];
+      }
+      return [];
+    },
+  } as unknown as Document;
+
+  const extractedCtx = extractCurrentWorkspaceAndAgent(docWithActiveSubTab, {
+    location: { pathname: "/workspace/local:wks_wechat" },
+  } as unknown as Window);
+  assert.equal(extractedCtx.workspaceId, "local:wks_wechat");
+  assert.equal(extractedCtx.agentId, rootAgentId);
+  assert.equal(extractedCtx.activeSubagentId, l2Cid);
+
+  // 3) buildSubagentLineageChain reconstructs full L0 -> L1 -> L2 -> L3 hierarchy & immediateParentSubagent
+  const multiLevelTree = {
+    agentId: rootAgentId,
+    workspaceId: "wks_wechat",
+    workspaceName: "WeChat Cron Audit",
+    title: "看一下我有哪些关于微信的循环任务",
+    cwd: "/tmp",
+    model: "gemini-3.1-pro-high",
+    agentStatus: "running",
+    archived: false,
+    rootConversationId: "00000000-0000-4000-8000-000000000000",
+    rootStepCount: 15,
+    rootToolCallCount: 3,
+    rootLastMessagePreview: "Investigating...",
+    rootTimersAndTasks: [],
+    updatedAt: "2026-11-10T01:25:00Z",
+    subagentSummary: {
+      total: 3,
+      running: 2,
+      completed: 1,
+      failed: 0,
+      maxDepth: 3,
+      totalSubagentSteps: 47,
+    },
+    rootTimeline: [],
+    flatSubagents: [
+      {
+        conversationId: l1Cid,
+        parentConversationId: "00000000-0000-4000-8000-000000000000",
+        depth: 1,
+        subAgentType: "DeepInvestigator",
+        role: "Lead Investigator",
+        promptPreview: "Investigate WeChat tasks",
+        status: "running" as const,
+        badge: "[Running · 6 steps · 2 subagents]",
+        stepCount: 6,
+        toolCallCount: 2,
+        lastToolName: "invoke_subagent",
+        lastMessagePreview: "Spawning worker...",
+        lastErrorText: "",
+        updatedAt: "2026-11-10T01:24:00Z",
+        mtimeAgeSeconds: 3,
+        transcriptPath: "/tmp/l1.jsonl",
+        nestedSubagentCount: 2,
+        nestedRunningCount: 1,
+      },
+      {
+        conversationId: l2Cid,
+        parentConversationId: l1Cid,
+        depth: 2,
+        subAgentType: "DeepInvestigatorWorkerL0",
+        role: "L0 Investigation Worker",
+        promptPreview: "Check scheduled-task-rescheduler",
+        status: "running" as const,
+        badge: "[Running · 35 steps · run_command]",
+        stepCount: 35,
+        toolCallCount: 18,
+        lastToolName: "run_command",
+        lastMessagePreview: "Checking crontab...",
+        lastErrorText: "",
+        updatedAt: "2026-11-10T01:25:00Z",
+        mtimeAgeSeconds: 1,
+        transcriptPath: "/tmp/l2.jsonl",
+        nestedSubagentCount: 1,
+        nestedRunningCount: 0,
+      },
+      {
+        conversationId: l3Cid,
+        parentConversationId: l2Cid,
+        depth: 3,
+        subAgentType: "research",
+        role: "Doc Verifier",
+        promptPreview: "Verify WeChat docs",
+        status: "completed" as const,
+        badge: "[Done · 6 steps]",
+        stepCount: 6,
+        toolCallCount: 3,
+        lastToolName: "read_file",
+        lastMessagePreview: "Verified.",
+        lastErrorText: "",
+        updatedAt: "2026-11-10T01:23:00Z",
+        mtimeAgeSeconds: 10,
+        transcriptPath: "/tmp/l3.jsonl",
+        nestedSubagentCount: 0,
+        nestedRunningCount: 0,
+      },
+    ],
+  };
+
+  // When inside Subagent 2 (L2), immediateParentSubagent MUST be Subagent 1 (L1), NOT Main Agent!
+  const chainAtL2 = buildSubagentLineageChain(multiLevelTree as never, l2Cid);
+  assert.equal(chainAtL2.activeSubagent?.conversationId, l2Cid);
+  assert.equal(
+    chainAtL2.immediateParentSubagent?.conversationId,
+    l1Cid,
+    "Immediate parent of Subagent 2 (L2) must be Subagent 1 (L1)",
+  );
+  assert.deepEqual(
+    chainAtL2.ancestorChain.map((n) => `L${n.depth}:${n.subAgentType}`),
+    ["L1:DeepInvestigator", "L2:DeepInvestigatorWorkerL0"],
+  );
+  assert.deepEqual(
+    chainAtL2.directChildren.map((n) => n.conversationId),
+    [l3Cid],
+  );
+
+  // When inside Subagent 3 (L3), immediateParentSubagent MUST be Subagent 2 (L2)
+  const chainAtL3 = buildSubagentLineageChain(multiLevelTree as never, l3Cid);
+  assert.equal(chainAtL3.immediateParentSubagent?.conversationId, l2Cid);
+  assert.deepEqual(
+    chainAtL3.ancestorChain.map((n) => n.depth),
+    [1, 2, 3],
+  );
+
+  // When inside Subagent 1 (L1), immediateParentSubagent is null (its parent is L0 Main Agent)
+  const chainAtL1 = buildSubagentLineageChain(multiLevelTree as never, l1Cid);
+  assert.equal(chainAtL1.activeSubagent?.conversationId, l1Cid);
+  assert.equal(chainAtL1.immediateParentSubagent, null);
+  assert.deepEqual(
+    chainAtL1.directChildren.map((n) => n.conversationId),
+    [l2Cid],
+  );
+
+  // 4) classifyToolCallBadgeText recognizes DeepInvestigatorWorkerL0 and [Running · 35 steps] without robot emoji
+  const classifiedWorker = classifyToolCallBadgeText(
+    "DeepInvestigatorWorkerL0 [Running · 35 steps · run_command] L0 Investigation Worker",
+    multiLevelTree as never,
+  );
+  assert.equal(classifiedWorker.kind, "subagent");
+  assert.equal(classifiedWorker.subagentName, "deepinvestigatorworkerl0");
+
+  // 5) Step-by-step reverse jump: Subagent 2 (L2) -> Subagent 1 (L1) -> Main Agent (L0)
+  const openedTabTargets: Array<{ workspaceKey: string; target: Record<string, any> }> = [];
+  const mockLayoutStore = {
+    layoutByWorkspace: {
+      "local:wks_wechat": {
+        focusedPaneId: "pane_1",
+        panes: [
+          {
+            id: "pane_1",
+            activeTabId: "tab_l2",
+            tabs: [
+              {
+                id: "tab_l2",
+                target: {
+                  kind: "provider_subagent",
+                  parentAgentId: rootAgentId,
+                  subagentId: l2Cid,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+    sheetsByWorkspace: {},
+    openTab: (payload: { workspaceKey: string; target: Record<string, any> }) => {
+      openedTabTargets.push(payload);
+    },
+  };
+  const winWithLayoutStore = {
+    location: { pathname: "/workspace/local:wks_wechat" },
+    __c: new Map([
+      [
+        3380,
+        {
+          isInitialized: true,
+          publicModule: {
+            exports: {
+              useWorkspaceLayoutStore: {
+                getState: () => mockLayoutStore,
+              },
+            },
+          },
+        },
+      ],
+    ]),
+  } as unknown as Window;
+
+  const focusedSnap = extractFocusedWorkspaceTabTarget("wks_wechat", winWithLayoutStore);
+  assert.equal(focusedSnap?.kind, "provider_subagent");
+  assert.equal(focusedSnap?.parentAgentId, rootAgentId);
+  assert.equal(focusedSnap?.subagentId, l2Cid);
+
+  const resolvedFromSingleTab = resolveActiveSubagentNodeFromDom(
+    multiLevelTree as never,
+    {
+      querySelector: (sel: string) =>
+        sel === '[data-testid="provider-subagent-panel"]'
+          ? createInteractiveDomNode("div")
+          : null,
+      querySelectorAll: () => [],
+    } as unknown as Document,
+    winWithLayoutStore,
+  );
+  assert.equal(
+    resolvedFromSingleTab?.conversationId,
+    l2Cid,
+    "Must resolve active L2 subagent from useWorkspaceLayoutStore even when only 1 tab is open",
+  );
+
+  // Jump 1: From Subagent 2 (L2) -> Subagent 1 (L1) (`chainAtL2.immediateParentSubagent.conversationId`)
+  const jumpedL2ToL1 = openOrFocusSubagentOrRootTabInApp(
+    {
+      workspaceId: "wks_wechat",
+      parentAgentId: rootAgentId,
+      subagentId: chainAtL2.immediateParentSubagent?.conversationId ?? null,
+    },
+    null,
+    winWithLayoutStore,
+  );
+  assert.equal(jumpedL2ToL1, true);
+  assert.deepEqual(openedTabTargets[0], {
+    workspaceKey: "local:wks_wechat",
+    target: {
+      kind: "provider_subagent",
+      parentAgentId: rootAgentId,
+      subagentId: l1Cid,
+    },
+  });
+
+  // Jump 2: From Subagent 1 (L1) -> Main Agent (L0) (`chainAtL1.immediateParentSubagent` is null)
+  const jumpedL1ToMain = openOrFocusSubagentOrRootTabInApp(
+    {
+      workspaceId: "wks_wechat",
+      parentAgentId: rootAgentId,
+      subagentId: (chainAtL1.immediateParentSubagent as { conversationId?: string } | null)?.conversationId ?? null,
+    },
+    null,
+    winWithLayoutStore,
+  );
+  assert.equal(jumpedL1ToMain, true);
+  assert.deepEqual(openedTabTargets[1], {
+    workspaceKey: "local:wks_wechat",
+    target: {
+      kind: "agent",
+      agentId: rootAgentId,
+    },
+  });
+});
+
+test("50. Subagents vs Colleagues vs Referenced Sessions taxonomy & Notion Task ID inline mention resolution", async () => {
+  const {
+    ingestSessionLineageResponse,
+    resolveSessionReference,
+  } = await import("../client/session-lineage-web");
+  const { handleManageSessionLineage } = await import("../server/agent-history-handlers");
+
+  // 1) Ingest directory with Intake session carrying notionTaskId (8-char suffix and full UUID)
+  const intakeNodeFullUuid = {
+    agentId: "a27c694b-277c-410c-851c-111122223333",
+    shortId: "a27c694",
+    agentTitle: "Intake · Let settings in Paseo become searchable",
+    workspaceId: "wks_intake_search",
+    workspaceTitle: "Intake · Let settings in Paseo become searchable",
+    projectId: "proj_meta",
+    projectName: "2026-11-08 Meta harness",
+    status: "idle",
+    provider: "claude",
+    model: "claude-sonnet-4-6",
+    providerSessionId: null,
+    createdAt: "2026-11-09T18:00:00Z",
+    updatedAt: "2026-11-09T18:30:00Z",
+    briefPath: null,
+    reportPath: null,
+    reportExists: false,
+    notionUrl: "https://www.notion.so/413e1b432393815aae85f013049cb5fb",
+    notionTaskId: "413e1b43-2393-815a-ae85-f013049cb5fb",
+    relationKind: "intake-routed" as const,
+    routedByAgentId: null,
+  };
+
+  const intakeNodeShortSuffix = {
+    ...intakeNodeFullUuid,
+    agentId: "3220586e-4fb8-4bc4-836c-900498df23c4",
+    shortId: "3220586",
+    agentTitle: "Intake · Complete session jump and search",
+    workspaceId: "wks_intake_96e2",
+    workspaceTitle: "Intake · Complete session jump and search",
+    notionUrl: null,
+    notionTaskId: "96e2e779",
+    relationKind: "intake-routed" as const,
+  };
+
+  const mainNode = {
+    ...intakeNodeFullUuid,
+    agentId: "3e907bec-8da9-4d52-a28c-3fa4b4b121a5",
+    shortId: "3e907be",
+    agentTitle: "Fix cadence Notion sync from Slack thread",
+    workspaceId: "wks_23b9a39ee3a6dc69",
+    workspaceTitle: "Fix cadence Notion sync from Slack thread",
+    notionUrl: null,
+    notionTaskId: null,
+    relationKind: "self" as const,
+  };
+
+  ingestSessionLineageResponse({
+    ok: true,
+    action: "inspect",
+    current: mainNode,
+    parent: null,
+    routedOrigin: null,
+    siblings: [],
+    children: [],
+    colleagues: [],
+    projectPeers: [intakeNodeFullUuid, intakeNodeShortSuffix],
+    directory: [mainNode, intakeNodeFullUuid, intakeNodeShortSuffix],
+    reconcileSummary: {
+      untitledFound: 0,
+      renamedCount: 0,
+      unlinkedFound: 0,
+      linkedCount: 0,
+      detachedCount: 0,
+      renamedWorkspaces: [],
+    },
+    message: "ok",
+    durationMs: 1,
+  });
+
+  // Full Notion Task UUID, 8-char suffix (049cb5fb), and 8-char brief suffix (96e2e779) all resolve to their sessions!
+  assert.equal(
+    resolveSessionReference("413e1b43-2393-815a-ae85-f013049cb5fb")?.agentId,
+    intakeNodeFullUuid.agentId,
+    "Full Notion Task UUID must resolve to the corresponding Intake session",
+  );
+  assert.equal(
+    resolveSessionReference("049cb5fb")?.agentId,
+    intakeNodeFullUuid.agentId,
+    "8-char suffix of Notion Task UUID must resolve to the corresponding Intake session",
+  );
+  assert.equal(
+    resolveSessionReference("96e2e779")?.agentId,
+    intakeNodeShortSuffix.agentId,
+    "8-char Notion Task ID from intake brief must resolve to the corresponding Intake session",
+  );
+
+  // 2) Live handleManageSessionLineage on 3e907bec-8da9-4d52-a28c-3fa4b4b121a5 must NOT classify Intake tasks as children (subagents)
+  const mockCtx = createMockContext([]) as never;
+  const liveLineage = await handleManageSessionLineage(
+    {
+      action: "inspect",
+      workspaceId: "wks_23b9a39ee3a6dc69",
+      agentId: "3e907bec-8da9-4d52-a28c-3fa4b4b121a5",
+    },
+    mockCtx,
+  );
+  assert.equal(liveLineage.ok, true);
+  const intakeChildren = liveLineage.children.filter((c) =>
+    c.workspaceTitle.startsWith("Intake ·") || c.agentTitle.startsWith("Intake ·"),
+  );
+  assert.equal(
+    intakeChildren.length,
+    0,
+    "Standalone Intake tasks must never be classified as child subagents of 3e907bec",
+  );
+});
+
+test("51. Sidebar Cadence Timer Badge: mounts SVG stopwatch on cadence workspaces, 0 DOM writes on re-render idempotency, event stopPropagation, and run-now interaction", async () => {
+  interface TestNode extends MinimalScheduleDomElement {
+    childrenList: TestNode[];
+    listeners: Map<string, Array<(ev: unknown) => void>>;
+    querySelectorAll?<T = MinimalScheduleDomElement>(sel: string): ArrayLike<T>;
+  }
+
+  const makeTestNode = (tag: string, attrs: Record<string, string> = {}): TestNode => {
+    const map = new Map<string, string>(Object.entries(attrs));
+    const listeners = new Map<string, Array<(ev: unknown) => void>>();
+    let rawText = "";
+    const n: TestNode = {
+      id: attrs.id,
+      style: {},
+      childrenList: [],
+      parentElement: null,
+      listeners,
+      get textContent(): string {
+        if (n.childrenList.length > 0) {
+          return n.childrenList.map((c) => c.textContent ?? "").join("");
+        }
+        return rawText;
+      },
+      set textContent(v: string) {
+        rawText = v;
+        n.childrenList = [];
+      },
+      get firstChild() {
+        return n.childrenList[0] ?? null;
+      },
+      getAttribute: (k) => (k === "id" ? n.id ?? null : map.get(k) ?? null),
+      setAttribute: (k, v) => {
+        if (k === "id") n.id = v;
+        map.set(k, v);
+      },
+      hasAttribute: (k) => (k === "id" ? Boolean(n.id) : map.has(k)),
+      appendChild: (c) => {
+        const child = c as TestNode;
+        child.parentElement = n;
+        n.childrenList.push(child);
+      },
+      insertBefore: (newNode, refNode) => {
+        const child = newNode as TestNode;
+        child.parentElement = n;
+        const idx = refNode ? n.childrenList.indexOf(refNode as TestNode) : -1;
+        if (idx >= 0) n.childrenList.splice(idx, 0, child);
+        else n.childrenList.push(child);
+      },
+      remove: () => {
+        if (n.parentElement) {
+          const list = (n.parentElement as TestNode).childrenList;
+          const idx = list.indexOf(n);
+          if (idx >= 0) list.splice(idx, 1);
+          n.parentElement = null;
+        }
+      },
+      addEventListener: (type, fn) => {
+        const list = listeners.get(type) ?? [];
+        list.push(fn as (ev: unknown) => void);
+        listeners.set(type, list);
+      },
+      querySelector: <T = MinimalScheduleDomElement>(sel: string): T | null =>
+        (queryTree(n, sel)[0] as unknown as T) ?? null,
+      querySelectorAll: <T = MinimalScheduleDomElement>(sel: string): ArrayLike<T> =>
+        queryTree(n, sel) as unknown as ArrayLike<T>,
+    };
+    return n;
+  };
+
+  const queryTree = (root: TestNode, selector: string): TestNode[] => {
+    const out: TestNode[] = [];
+    const s = selector.trim();
+    const exact = s.match(/^\[data-testid="([^"]+)"\]$/);
+    const prefix = s.match(/^\[data-testid\^="([^"]+)"\]$/);
+    const walk = (cur: TestNode) => {
+      if (exact && cur.getAttribute("data-testid") === exact[1]) out.push(cur);
+      else if (prefix && (cur.getAttribute("data-testid") ?? "").startsWith(prefix[1])) {
+        out.push(cur);
+      }
+      for (const ch of cur.childrenList) walk(ch);
+    };
+    walk(root);
+    return out;
+  };
+
+  const findId = (root: TestNode, id: string): TestNode | null => {
+    if (root.id === id) return root;
+    for (const ch of root.childrenList) {
+      const f = findId(ch, id);
+      if (f) return f;
+    }
+    return null;
+  };
+
+  const rootDocEl = makeTestNode("div");
+
+  // Create two sidebar workspace rows:
+  // 1. Cadence workspace: "wks_cadence_1" with title "Mac Speed Sentinel"
+  const cadRow = makeTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_cadence_1",
+  });
+  const cadTitleWrap = makeTestNode("div");
+  const cadTitleEl = makeTestNode("span", {
+    "data-testid": "sidebar-workspace-title-local:wks_cadence_1",
+  });
+  cadTitleEl.textContent = "Mac Speed Sentinel";
+  cadTitleWrap.appendChild(cadTitleEl);
+  cadRow.appendChild(cadTitleWrap);
+  rootDocEl.appendChild(cadRow);
+
+  // 2. Normal workspace: "wks_normal_2" with title "Daily Notes"
+  const normRow = makeTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_normal_2",
+  });
+  const normTitleWrap = makeTestNode("div");
+  const normTitleEl = makeTestNode("span", {
+    "data-testid": "sidebar-workspace-title-local:wks_normal_2",
+  });
+  normTitleEl.textContent = "Daily Notes";
+  normTitleWrap.appendChild(normTitleEl);
+  normRow.appendChild(normTitleWrap);
+  rootDocEl.appendChild(normRow);
+
+  const doc: MinimalScheduleDomDocument = {
+    createElement: (tag) => makeTestNode(tag),
+    getElementById: (id) => findId(rootDocEl, id),
+    querySelector: (sel) => (queryTree(rootDocEl, sel)[0] as never) ?? null,
+    querySelectorAll: (sel) => queryTree(rootDocEl, sel) as never,
+  };
+
+  let openedDrawerScheduleId: string | null = "unset";
+  let runNowScheduleId: string | null = "unset";
+
+  const schedulesMap = new Map([
+    [
+      "sched_mac_speed",
+      {
+        id: "sched_mac_speed",
+        name: "AG · Mac Speed Sentinel",
+        cronExpression: "*/30 * * * *",
+        timezone: "Asia/Shanghai",
+        status: "active" as const,
+        isStandbyTwin: false,
+        standbySlug: "mac-speed",
+        provider: "antigravity",
+        model: "gemini-3.8-flash",
+        modeId: "full-access",
+        cwd: "/tmp",
+        archiveOnFinish: true,
+        prompt: "Check Mac speed",
+        promptPreview: "Check Mac speed",
+        nextRunAt: new Date(Date.now() + 1800_000).toISOString(),
+        lastRunAt: new Date(Date.now() - 600_000).toISOString(),
+        totalRuns: 42,
+        succeededRuns: 40,
+        failedRuns: 2,
+        runningRuns: 1,
+        lastRunStatus: "running" as const,
+        runs: [
+          {
+            id: "run_1",
+            scheduleId: "sched_mac_speed",
+            scheduleName: "AG · Mac Speed Sentinel",
+            status: "running" as const,
+            scheduledFor: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            durationMs: null,
+            durationFormatted: "-",
+            agentId: "ag_1",
+            workspaceId: "wks_cadence_1",
+            workspaceName: "Mac Speed Sentinel",
+            isArchived: false,
+            output: "diagnosing...",
+            outputPreview: "diagnosing...",
+            error: null,
+          },
+        ],
+      },
+    ],
+  ]);
+
+  setCachedSchedulesForTesting(schedulesMap as never);
+
+  // Pass 1: Decorate DOM
+  const pass1 = decorateSchedulesDomOnDocument(doc, {
+    schedulesById: schedulesMap,
+    totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 42 },
+    isZh: true,
+    nowMs: Date.now(),
+    onOpenDrawer: (sid) => {
+      openedDrawerScheduleId = sid;
+    },
+    onRunNow: (sid) => {
+      runNowScheduleId = sid;
+    },
+  });
+
+  assert.ok(pass1.domWrites > 0, "Pass 1 must perform DOM writes to mount badge");
+
+  // Verify badge exists on cadence workspace row
+  const badge = cadRow.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_cadence_1"]',
+  ) as TestNode | null;
+  assert.ok(badge, "Cadence workspace row must have cadence badge");
+  assert.equal(
+    cadRow.childrenList[0]?.childrenList[0],
+    badge,
+    "Badge must be inserted before title element",
+  );
+  assert.ok(
+    badge.innerHTML?.includes("<svg"),
+    "Badge must contain inline SVG",
+  );
+  assert.ok(
+    !badge.innerHTML?.includes("⏰") && !badge.innerHTML?.includes("⏱"),
+    "Badge must be 100% zero-emoji (anti-AI-slop standard)",
+  );
+  assert.ok(
+    badge.title?.includes("运行中") || badge.title?.includes("定时任务节奏"),
+    "Badge title must describe cadence schedule in clean prose",
+  );
+
+  // Verify non-cadence workspace row did NOT receive a badge
+  const normBadge = normRow.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_normal_2"]',
+  );
+  assert.equal(normBadge, null, "Non-cadence workspace row must not receive badge");
+
+  // Pass 2: Re-run with identical state -> MUST RESULT IN EXACTLY 0 DOM WRITES!
+  const pass2 = decorateSchedulesDomOnDocument(doc, {
+    schedulesById: schedulesMap,
+    totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 42 },
+    isZh: true,
+    nowMs: Date.now(),
+    onOpenDrawer: (sid) => {
+      openedDrawerScheduleId = sid;
+    },
+    onRunNow: (sid) => {
+      runNowScheduleId = sid;
+    },
+  });
+
+  assert.equal(pass2.domWrites, 0, "Pass 2 with identical state must result in exactly 0 DOM writes (idempotency guarantee)");
+
+  // Test event handling and defensive propagation stop
+  let pointerDownStopped = false;
+  let pointerDownPrevented = false;
+  const pointerListeners = badge.listeners.get("pointerdown") ?? [];
+  assert.ok(pointerListeners.length > 0, "Badge must have pointerdown listener");
+  pointerListeners[0]({
+    stopPropagation: () => {
+      pointerDownStopped = true;
+    },
+    preventDefault: () => {
+      pointerDownPrevented = true;
+    },
+  });
+  assert.equal(pointerDownStopped, true, "pointerdown must stopPropagation");
+  assert.equal(pointerDownPrevented, true, "pointerdown must preventDefault");
+
+  // Test regular click: opens drawer
+  let clickStopped = false;
+  let clickPrevented = false;
+  const clickListeners = badge.listeners.get("click") ?? [];
+  assert.ok(clickListeners.length > 0, "Badge must have click listener");
+  clickListeners[0]({
+    stopPropagation: () => {
+      clickStopped = true;
+    },
+    preventDefault: () => {
+      clickPrevented = true;
+    },
+    altKey: false,
+  });
+  assert.equal(clickStopped, true, "click must stopPropagation");
+  assert.equal(clickPrevented, true, "click must preventDefault");
+  assert.equal(openedDrawerScheduleId, "sched_mac_speed", "Click on badge must open schedule drawer");
+
+  // Test Alt+click: triggers run-now
+  clickListeners[0]({
+    stopPropagation: () => {},
+    preventDefault: () => {},
+    altKey: true,
+  });
+  assert.equal(runNowScheduleId, "sched_mac_speed", "Alt+Click on badge must trigger runNow");
+
+  // Test native workspace context menu annotation for cadence workspace
+  const mockMenuParent = makeTestNode("div");
+  const renameItem = makeTestNode("div", {
+    "data-testid": "sidebar-workspace-menu-rename-local:wks_cadence_1",
+  });
+  mockMenuParent.appendChild(renameItem);
+  rootDocEl.appendChild(mockMenuParent);
+
+  const menuAnnotateDoc: MinimalDocument = {
+    createElement: (tag) => makeTestNode(tag),
+    querySelectorAll: (sel) => queryTree(rootDocEl, sel) as never,
+    querySelector: (sel) => (queryTree(rootDocEl, sel)[0] as never) ?? null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const annotated = annotateNativeWorkspaceMenusWithShortcuts(
+    menuAnnotateDoc,
+    {
+      ...readInlineRenamePreferences(null),
+      enableDesktopContextMenuHelper: true,
+      enableQuickRenameAndLabelShortcuts: true,
+      enableSidebarDeleteKeyArchive: true,
+      enableInlineDoubleClickRename: true,
+      inlineRenameCaretPosition: "start",
+      labelShortcutCombo: "both",
+    },
+    { navigator: { language: "zh-CN" } } as never,
+  );
+
+  assert.ok(annotated > 0, "Context menu annotation must annotate items");
+  const cadenceMenuItem = mockMenuParent.querySelector(
+    '[data-testid="sidebar-workspace-menu-run-cadence-local:wks_cadence_1"]',
+  );
+  assert.ok(cadenceMenuItem, "Context menu must include Run Cadence Now item");
+  assert.ok(cadenceMenuItem.textContent?.includes("立即运行节奏"), "Context menu must show Chinese text");
+
+  // Verify icon was not wiped out by textContent assignment and exists in menu item
+  const menuIcon = (cadenceMenuItem as TestNode).childrenList?.find((c) =>
+    c.innerHTML?.includes("<svg"),
+  );
+  assert.ok(menuIcon, "Context menu Run Cadence Now item must preserve SVG timer icon");
+  const menuHint = (cadenceMenuItem as TestNode).querySelector(
+    '[data-testid="sidebar-workspace-menu-run-cadence-shortcut-hint"]',
+  );
+  assert.ok(menuHint, "Context menu Run Cadence Now item must have Alt+Enter shortcut hint");
+
+  // Also verify context menu item is generated for a workspace matched by TITLE (standby twin)
+  const titleWsRow = makeTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_title_only_88",
+  });
+  const titleWsWrap = makeTestNode("div");
+  const titleWsEl = makeTestNode("span", {
+    "data-testid": "sidebar-workspace-title-local:wks_title_only_88",
+  });
+  titleWsEl.textContent = "Mac Speed Sentinel";
+  titleWsWrap.appendChild(titleWsEl);
+  titleWsRow.appendChild(titleWsWrap);
+  rootDocEl.appendChild(titleWsRow);
+
+  const titleMenuParent = makeTestNode("div");
+  const titleRenameItem = makeTestNode("div", {
+    "data-testid": "sidebar-workspace-menu-rename-local:wks_title_only_88",
+  });
+  titleMenuParent.appendChild(titleRenameItem);
+  rootDocEl.appendChild(titleMenuParent);
+
+  annotateNativeWorkspaceMenusWithShortcuts(
+    menuAnnotateDoc,
+    {
+      ...readInlineRenamePreferences(null),
+      enableDesktopContextMenuHelper: true,
+      enableQuickRenameAndLabelShortcuts: true,
+      enableSidebarDeleteKeyArchive: true,
+      enableInlineDoubleClickRename: true,
+      inlineRenameCaretPosition: "start",
+      labelShortcutCombo: "both",
+    },
+    { navigator: { language: "zh-CN" } } as never,
+  );
+  const titleCadenceItem = titleMenuParent.querySelector(
+    '[data-testid="sidebar-workspace-menu-run-cadence-local:wks_title_only_88"]',
+  );
+  assert.ok(
+    titleCadenceItem,
+    "Context menu must annotate cadence item on workspace matched by title",
+  );
+
+  // Verify findCadenceScheduleForWorkspace resolves the cadence schedule
+  const resolvedCadence = findCadenceScheduleForWorkspace("wks_cadence_1");
+  assert.ok(resolvedCadence, "findCadenceScheduleForWorkspace must resolve cadence by workspace ID");
+  assert.equal(resolvedCadence.id, "sched_mac_speed");
+
+  // Verify negative match on common/generic non-cadence words (anti-false-positive invariant)
+  assert.equal(
+    findCadenceScheduleForWorkspace("wks_paseo_project", "Paseo"),
+    null,
+    "Generic workspace 'Paseo' must NOT match 'Paseo cadence doctor'",
+  );
+  assert.equal(
+    findCadenceScheduleForWorkspace("wks_beeper_normal", "Beeper"),
+    null,
+    "Generic workspace 'Beeper' must NOT match 'Beeper Partner Scanner'",
+  );
+  assert.equal(
+    findCadenceScheduleForWorkspace("wks_weather_normal", "Weather"),
+    null,
+    "Generic workspace 'Weather' must NOT match 'Weather check'",
+  );
+
+  // Verify exact slug/title match for standby twin workspace with local ID
+  const resolvedByTitle = findCadenceScheduleForWorkspace(
+    "wks_local_twin_99",
+    "Mac Speed Sentinel",
+  );
+  assert.ok(
+    resolvedByTitle,
+    "Standby twin workspace must resolve by exact title match",
+  );
+  assert.equal(resolvedByTitle.id, "sched_mac_speed");
+
+  // Verify marked-done session title prefix (d / done:) still resolves cadence
+  const resolvedByDoneTitle = findCadenceScheduleForWorkspace(
+    "wks_done_twin_101",
+    "d Mac Speed Sentinel",
+  );
+  assert.ok(
+    resolvedByDoneTitle,
+    "Marked-done session ('d ...') must still resolve cadence",
+  );
+  assert.equal(resolvedByDoneTitle.id, "sched_mac_speed");
+
+  // Verify parenthesized title or ellipsis truncation resolves cadence
+  const resolvedByParen = findCadenceScheduleForWorkspace(
+    "wks_paren_twin_102",
+    "AG · Mac Speed Sentinel (Daily Health Check)",
+  );
+  assert.ok(
+    resolvedByParen,
+    "Title with parenthesized subtitle must resolve cadence",
+  );
+  assert.equal(resolvedByParen.id, "sched_mac_speed");
+
+  const resolvedBySlug = findCadenceScheduleForWorkspace(
+    "wks_local_twin_99",
+    "mac-speed",
+  );
+  assert.ok(
+    resolvedBySlug,
+    "Standby twin workspace must resolve by standbySlug match",
+  );
+  assert.equal(resolvedBySlug.id, "sched_mac_speed");
+
+  // Verify running state has breathing animation
+  assert.equal(
+    badge.getAttribute("data-running"),
+    "true",
+    "Badge on running schedule must have data-running='true'",
+  );
+  assert.ok(
+    badge.style.animation?.includes("paseoCadenceBadgeBreathe"),
+    "Badge on running schedule must have breathing animation",
+  );
+
+  // Verify showDefaultCadenceToast mounts toast in document.body
+  const origDoc = (globalThis as { document?: unknown }).document;
+  try {
+    const mockDoc = {
+      body: makeTestNode("body"),
+      getElementById: (id: string) => findId(mockDoc.body, id),
+      createElement: (tag: string) => makeTestNode(tag),
+    };
+    (globalThis as { document?: unknown }).document = mockDoc;
+    showDefaultCadenceToast("测试节奏提示");
+    const toastNode = mockDoc.body.querySelector('[data-testid="paseo-finder-cadence-toast"]');
+    assert.ok(toastNode, "showDefaultCadenceToast must mount toast node in document.body");
+    assert.equal(toastNode.textContent, "测试节奏提示");
+  } finally {
+    (globalThis as { document?: unknown }).document = origDoc;
+  }
+
+  // Verify cleanSessionDisplayTitle strips "d " / "done: " prefixes for clean Linear/Paseo pills
+  assert.equal(
+    cleanSessionDisplayTitle("d Fix HTTP 400 on /etc endpoint"),
+    "Fix HTTP 400 on /etc endpoint",
+  );
+  assert.equal(
+    cleanSessionDisplayTitle("d when i click on a side session"),
+    "when i click on a side session",
+  );
+  assert.equal(
+    cleanSessionDisplayTitle("done: Install Notpamina on two devices"),
+    "Install Notpamina on two devices",
+  );
+  assert.equal(
+    cleanSessionDisplayTitle("Add chat rewind and fork"),
+    "Add chat rewind and fork",
+  );
+});
+
+test("52. conversation://<cid> Markdown link & inline Role mention clickability, formatSubagentDisplayName role promotion, and useProviderSubagentStore descriptor guard", () => {
+  // 1) formatSubagentDisplayName promotes Role over generic TypeName ("self", "subagent", etc.)
+  assert.equal(
+    formatSubagentDisplayName(
+      {
+        subAgentType: "self",
+        role: "RotorBike GTM & GA4 Feasibility Specialist",
+      },
+      null,
+      36,
+    ),
+    "RotorBike GTM & GA4 Feasibility Spe…",
+  );
+  assert.equal(
+    formatSubagentDisplayName(
+      {
+        subAgentType: "self",
+        role: "Estate GA4 & GTM Path A/B Custody Auditor",
+      },
+      null,
+      60,
+    ),
+    "Estate GA4 & GTM Path A/B Custody Auditor",
+  );
+  // Specific non-generic subAgentType is preserved when role is empty
+  assert.equal(
+    formatSubagentDisplayName(
+      {
+        subAgentType: "deepcoder-architect",
+        role: "",
+      },
+      null,
+      36,
+    ),
+    "deepcoder-architect",
+  );
+
+  // 2) openWorkspaceTargetTabViaStore returns false when subagentId is NOT in useProviderSubagentStore.descriptors
+  // so caller falls back to openDrawer (Right-Docked Subagent Sidebar with full disk transcript)
+  let openedSubagentTabCount = 0;
+  const descriptors = new Map<string, { parentAgentId: string; id: string }>();
+  descriptors.set(
+    "local\0" +
+      "2e170a1d-9054-41ca-860e-6715fb3d2c59\0" +
+      "vec-subagent:58ca3fa2-3e75-4e9f-bbe0-c3f2c3b327b8",
+    {
+      parentAgentId: "2e170a1d-9054-41ca-860e-6715fb3d2c59",
+      id: "vec-subagent:58ca3fa2-3e75-4e9f-bbe0-c3f2c3b327b8",
+    },
+  );
+  const mod3340Exports = {
+    useWorkspaceLayoutStore: {
+      getState: () => ({
+        layoutByWorkspace: {
+          "local:wks_0b5492a3faa540ff": {},
+        },
+        openTab: () => {
+          openedSubagentTabCount += 1;
+        },
+      }),
+    },
+  };
+  const mod3260Exports = {
+    useProviderSubagentStore: {
+      getState: () => ({ descriptors }),
+    },
+  };
+  const fakeWinWithDescriptorGuard = {
+    __c: new Map<number, { isInitialized: boolean; publicModule: { exports: unknown } }>([
+      [3340, { isInitialized: true, publicModule: { exports: mod3340Exports } }],
+      [3260, { isInitialized: true, publicModule: { exports: mod3260Exports } }],
+    ]),
+  } as unknown as Window;
+
+  // Missing descriptor (f6e27d02) -> returns false and does NOT open an empty native tab
+  const missingResult = openWorkspaceTargetTabViaStore(
+    {
+      workspaceId: "wks_0b5492a3faa540ff",
+      parentAgentId: "2e170a1d-9054-41ca-860e-6715fb3d2c59",
+      subagentId: "f6e27d02-46a3-4075-aac1-1737e773cd6d",
+    },
+    fakeWinWithDescriptorGuard,
+  );
+  assert.equal(missingResult, false);
+  assert.equal(openedSubagentTabCount, 0);
+
+  // Present descriptor (58ca3fa2) -> returns true and opens native tab when explicitly requested
+  const presentResult = openWorkspaceTargetTabViaStore(
+    {
+      workspaceId: "wks_0b5492a3faa540ff",
+      parentAgentId: "2e170a1d-9054-41ca-860e-6715fb3d2c59",
+      subagentId: "58ca3fa2-3e75-4e9f-bbe0-c3f2c3b327b8",
+    },
+    fakeWinWithDescriptorGuard,
+  );
+  assert.equal(presentResult, true);
+  assert.equal(openedSubagentTabCount, 1);
+
+  // 3) patchPaseoSubagentTrackModules intercepts conversation://<uuid> inside module 3687 openExternalUrl
+  const interceptedUrls: string[] = [];
+  let httpFallbackCalled = 0;
+  const mod3687Exports: Record<string, unknown> = {
+    openExternalUrl: (u: string) => {
+      if (u.startsWith("http")) httpFallbackCalled += 1;
+    },
+  };
+  const fakeWinFor3687 = {
+    __c: new Map<number, { isInitialized: boolean; publicModule: { exports: unknown } }>([
+      [3687, { isInitialized: true, publicModule: { exports: mod3687Exports } }],
+    ]),
+  } as unknown as Window;
+
+  patchPaseoSubagentTrackModules(fakeWinFor3687, undefined, (cid) => {
+    interceptedUrls.push(cid);
+  });
+  const patchedOpenExternal = mod3687Exports.openExternalUrl as (u: string) => void;
+  patchedOpenExternal("conversation://58ca3fa2-3e75-4e9f-bbe0-c3f2c3b327b8");
+  patchedOpenExternal("https://example.com");
+  assert.deepEqual(interceptedUrls, ["58ca3fa2-3e75-4e9f-bbe0-c3f2c3b327b8"]);
+  assert.equal(httpFallbackCalled, 1);
+});
 
 

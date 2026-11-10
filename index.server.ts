@@ -19,6 +19,7 @@ import {
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
+  managePeerAgentsRpc,
   manageSessionLineageRpc,
   manageSlashSkillsRpc,
   manageSubagentsRpc,
@@ -34,6 +35,7 @@ import {
   handleInspectFile,
   handleListWorkspaceMedia,
   handleManageAgentHistory,
+  handleManagePeerAgents,
   handleManageSessionLineage,
   handleManageSlashSkills,
   handleManageSubagents,
@@ -55,6 +57,15 @@ import {
   handleInspectScheduleRuns,
   handleOpenScheduleRunSession,
 } from "./server/schedule-runs-handlers";
+import {
+  LINK_RETITLE_CONFIG_PATH,
+  LINK_RETITLE_LEDGER_PATH,
+  findBackfillCandidates,
+  loadLinkRetitleConfig,
+  readLinkRetitleLedger,
+  runLinkFirstRetitle,
+  runLinkRetitleBackfill,
+} from "./server/link-first-retitle";
 
 export default function contribute(server: PluginServerContext) {
   const settingsHandle = server.registerSettings(pluginSettings);
@@ -85,6 +96,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(manageSubagentsRpc, handleManageSubagents);
   server.handle(manageWritebackHookRpc, handleManageWritebackHook);
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
+  server.handle(managePeerAgentsRpc, handleManagePeerAgents);
   server.handle(forkSessionRpc, handleForkSession);
 
   const revealTool = defineAgentTool({
@@ -120,7 +132,8 @@ export default function contribute(server: PluginServerContext) {
     name: "manage_thread_metadata",
     title: "Rename Workspace / Thread or Manage Labels",
     description:
-      "Rename the active Paseo workspace/thread title or inspect/assign/toggle/update workspace labels.",
+      "Rename the active Paseo workspace/thread title or inspect/assign/toggle/update workspace labels. " +
+      "If the user's first message was only a link (Slack, Notion, GitHub, a doc), set the title to the real agenda once you have read it, so the sidebar names the task instead of the link.",
     input: z.object({
       title: z
         .string()
@@ -661,6 +674,104 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  // Link-First Retitle (server/link-first-retitle.ts). A link-only first prompt
+  // gets a link-shaped sidebar title from Paseo; once the first turn completes
+  // the agent has read the link, so name the workspace after the real agenda.
+  // `agent.turn.after` does not block the turn (pluginHookRegistry waits: false).
+  const linkRetitleDeps = (paseo: unknown) => ({
+    paseo: paseo as never,
+    rename: (input: { workspaceId?: string; agentId: string; title: string; source: string }) =>
+      handleRenameThread(input as never, { paseo } as never),
+  });
+  server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
+    if (outcome.kind !== "completed") return;
+    void runLinkFirstRetitle(
+      { agentId: agent.id, workspaceId: agent.workspaceId, parentAgentId: agent.parentAgentId, agentTitle: agent.title },
+      linkRetitleDeps(paseo),
+    ).catch(() => {});
+  });
+
+  const linkRetitleTool = defineAgentTool({
+    name: "manage_link_retitle",
+    title: "Link-First Session Retitle",
+    description:
+      "Inspect or run the Link-First Retitle: when a session starts from a bare link, the sidebar title is replaced with the real agenda after the first answer. " +
+      "Actions: status (config + source), ledger (recent renames), dry_run (propose a title for an agent without writing), apply (rename now; force skips guards), " +
+      "backfill_scan (list existing workspaces whose title still names a link), backfill (retitle them in the background; results go to the ledger).",
+    input: z.object({
+      action: z.enum(["status", "ledger", "dry_run", "apply", "backfill_scan", "backfill"]).default("status"),
+      agentId: z.string().optional().describe("Target agent id; defaults to the calling agent"),
+      force: z.boolean().optional().describe("apply only: skip the once-per-agent and title guards"),
+      limit: z.number().int().min(1).max(200).optional(),
+    }),
+    async execute(input, { agent, paseo }) {
+      let result: Record<string, unknown>;
+      if (input.action === "status") {
+        result = { ok: true, config: loadLinkRetitleConfig(), configPath: LINK_RETITLE_CONFIG_PATH, ledgerPath: LINK_RETITLE_LEDGER_PATH };
+      } else if (input.action === "ledger") {
+        result = { ok: true, entries: readLinkRetitleLedger(input.limit ?? 20) };
+      } else if (input.action === "backfill_scan" || input.action === "backfill") {
+        const candidates = (await findBackfillCandidates(paseo as never)).slice(0, input.limit ?? 50);
+        if (input.action === "backfill") {
+          void runLinkRetitleBackfill(candidates, linkRetitleDeps(paseo)).catch(() => {});
+        }
+        result = {
+          ok: true,
+          started: input.action === "backfill",
+          count: candidates.length,
+          candidates,
+          note: input.action === "backfill" ? `Running one at a time; read results with action "ledger" (${LINK_RETITLE_LEDGER_PATH}).` : undefined,
+        };
+      } else {
+        const targetId = input.agentId ?? agent.id;
+        const entry = await runLinkFirstRetitle(
+          {
+            agentId: targetId,
+            workspaceId: targetId === agent.id ? agent.workspaceId : null,
+            dryRun: input.action === "dry_run",
+            force: input.action === "apply" && input.force === true,
+          },
+          linkRetitleDeps(paseo),
+        );
+        result = { ...entry };
+      }
+      return { text: JSON.stringify(result, null, 2), structuredContent: result, isError: result.ok === false && input.action !== "dry_run" };
+    },
+  });
+
+  const peerAgentsTool = defineAgentTool({
+    name: "manage_peer_agents",
+    title: "Inspect, Dry-Run Resolve, or Sync Paseo Peer Agents & Cross-Model Review (v5)",
+    description:
+      "Inspect Paseo peer-awareness v5 block states across harnesses & configured agentProfiles (能读), dry-run resolve shorthand model names like 'gemini4, opus 5.5' into exact Paseo profiles (能试), or sync v5 blocks & heal the peer outbox (能调).",
+    input: z.object({
+      action: z
+        .enum(["status", "test_resolve", "enable_all", "heal_outbox"])
+        .optional()
+        .describe("status (default), test_resolve, enable_all, or heal_outbox"),
+      profileQuery: z
+        .string()
+        .optional()
+        .describe("Shorthand or profile names to dry-run resolve (e.g. 'gemini4, opus 5.5')"),
+    }),
+    async execute(input, { agent, paseo }) {
+      const result = await handleManagePeerAgents(
+        {
+          action: input.action ?? "status",
+          profileQuery: input.profileQuery,
+          cwd: agent.cwd ?? undefined,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return {
+        text: JSON.stringify(result, null, 2),
+        structuredContent: result,
+        isError: !result.ok,
+      };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -684,8 +795,10 @@ export default function contribute(server: PluginServerContext) {
         slashSkillsTool,
         writebackHookTool,
         sessionLineageTool,
+        peerAgentsTool,
         settingsSearchTool,
         forkSessionTool,
+        linkRetitleTool,
       ],
     };
   });

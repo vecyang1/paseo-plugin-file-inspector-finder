@@ -50,6 +50,8 @@ import {
 import {
   installDesktopScheduleRunsEnhancer,
   triggerScheduleRunsDrawer,
+  triggerRunScheduleNow,
+  findCadenceScheduleForWorkspace,
 } from "./client/schedule-runs-web";
 import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
 import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
@@ -64,6 +66,7 @@ import {
   registerMarkdownTableEnhancer,
   syncMarkdownTablePreferences,
 } from "./client/markdown-table-web";
+import { installDesktopSessionTimeEnhancer } from "./client/session-time-web";
 import { installQuoteReply } from "./client/quote-reply-web";
 import {
   extractCurrentRouteAgentId,
@@ -437,6 +440,70 @@ export default function contribute(client: PluginClientContext) {
       setTimeout(() => {
         triggerScheduleRunsDrawer(sid);
       }, 30);
+    },
+  });
+
+  client.addSlashCommand({
+    name: "run-now",
+    description:
+      "Trigger an immediate run for a cadence schedule (or the current workspace cadence)",
+    argumentHint: "[schedule-id]",
+    context: "workspace",
+    async onSubmit({ args }) {
+      const rawSid = args.trim();
+      let targetId = rawSid;
+      if (targetId) {
+        const resolved = findCadenceScheduleForWorkspace(targetId, targetId);
+        if (resolved) {
+          targetId = resolved.id;
+        }
+      } else {
+        const g = globalThis as { window?: { location?: { pathname?: string } } };
+        const pathname = g.window?.location?.pathname ?? "";
+        const m = pathname.match(/\/workspace\/([^/?#]+)/);
+        const wsId = m?.[1] ? decodeURIComponent(m[1]) : null;
+        const sched = findCadenceScheduleForWorkspace(wsId);
+        if (sched) targetId = sched.id;
+      }
+      if (targetId) {
+        await triggerRunScheduleNow(targetId);
+      } else {
+        setTimeout(() => {
+          triggerScheduleRunsDrawer(null);
+        }, 30);
+      }
+    },
+  });
+
+  client.addSlashCommand({
+    name: "cadence-run",
+    description:
+      "Trigger an immediate run for a cadence schedule (or the current workspace cadence)",
+    argumentHint: "[schedule-id]",
+    context: "workspace",
+    async onSubmit({ args }) {
+      const rawSid = args.trim();
+      let targetId = rawSid;
+      if (targetId) {
+        const resolved = findCadenceScheduleForWorkspace(targetId, targetId);
+        if (resolved) {
+          targetId = resolved.id;
+        }
+      } else {
+        const g = globalThis as { window?: { location?: { pathname?: string } } };
+        const pathname = g.window?.location?.pathname ?? "";
+        const m = pathname.match(/\/workspace\/([^/?#]+)/);
+        const wsId = m?.[1] ? decodeURIComponent(m[1]) : null;
+        const sched = findCadenceScheduleForWorkspace(wsId);
+        if (sched) targetId = sched.id;
+      }
+      if (targetId) {
+        await triggerRunScheduleNow(targetId);
+      } else {
+        setTimeout(() => {
+          triggerScheduleRunsDrawer(null);
+        }, 30);
+      }
     },
   });
 
@@ -1580,6 +1647,8 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupMarkdownTableEnhancer = registerMarkdownTableEnhancer();
 
+  const cleanupSessionTimeEnhancer = installDesktopSessionTimeEnhancer();
+
   const cleanupQuoteReply = installQuoteReply({ getLocale: () => client.i18n.locale });
 
   const cleanupSubagentsTreeEnhancer = installDesktopSubagentsTreeEnhancer({
@@ -1607,6 +1676,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSettingsSearch();
     cleanupSmartClipboardCopy();
     cleanupMarkdownTableEnhancer();
+    cleanupSessionTimeEnhancer();
     cleanupQuoteReply();
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();

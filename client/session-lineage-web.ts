@@ -8,6 +8,11 @@ import {
 import { isChineseLocale } from "./i18n";
 import { syncPaseoThemeCssVariables } from "./theme-web";
 import { focusWorkspaceInApp } from "./web";
+import {
+  findCadenceScheduleForWorkspace,
+  triggerRunScheduleNow,
+  CADENCE_TIMER_SVG,
+} from "./schedule-runs-web";
 
 export interface SessionLineageWebClient {
   call<TDef extends typeof manageSessionLineageRpc | typeof openFileTargetRpc>(
@@ -20,6 +25,49 @@ export interface SessionLineageWebClient {
 export interface ActiveWorkspaceAndAgent {
   workspaceId: string | null;
   agentId: string | null;
+  activeSubagentId?: string | null;
+}
+
+export interface ParsedProviderSubagentTabTestId {
+  parentAgentId: string;
+  subagentId: string;
+}
+
+export function parseProviderSubagentTabTestId(
+  rawTestId?: string | null,
+): ParsedProviderSubagentTabTestId | null {
+  const prefix = "workspace-tab-provider_subagent_";
+  const tid = (rawTestId ?? "").trim();
+  if (!tid.startsWith(prefix)) return null;
+  const rest = tid.slice(prefix.length);
+  const firstUnderscore = rest.indexOf("_");
+  if (firstUnderscore <= 0) return null;
+  const parentLen = Number.parseInt(rest.slice(0, firstUnderscore), 10);
+  if (!Number.isFinite(parentLen) || parentLen <= 0) return null;
+  const parentStart = firstUnderscore + 1;
+  const parentEnd = parentStart + parentLen;
+  if (rest.length <= parentEnd || rest[parentEnd] !== "_") return null;
+  const parentAgentId = rest.slice(parentStart, parentEnd).trim();
+  const subRest = rest.slice(parentEnd + 1);
+  const secondUnderscore = subRest.indexOf("_");
+  if (secondUnderscore <= 0) return null;
+  const subLen = Number.parseInt(subRest.slice(0, secondUnderscore), 10);
+  if (!Number.isFinite(subLen) || subLen <= 0) return null;
+  const subStart = secondUnderscore + 1;
+  const subEnd = subStart + subLen;
+  if (subRest.length < subEnd) return null;
+  const subagentId = subRest.slice(subStart, subEnd).trim();
+  if (!parentAgentId || !subagentId) return null;
+  return { parentAgentId, subagentId };
+}
+
+export function buildProviderSubagentTabTestId(
+  parentAgentId: string,
+  subagentId: string,
+): string {
+  const p = parentAgentId.trim();
+  const s = subagentId.trim();
+  return `workspace-tab-provider_subagent_${p.length}_${p}_${s.length}_${s}`;
 }
 
 export function extractCurrentWorkspaceAndAgent(
@@ -29,6 +77,7 @@ export function extractCurrentWorkspaceAndAgent(
   const pathname = (win?.location?.pathname ?? "").trim();
   let workspaceId: string | null = null;
   let agentId: string | null = null;
+  let activeSubagentId: string | null = null;
 
   const wsMatch = pathname.match(/\/workspace\/([^/?#]+)/);
   if (wsMatch?.[1]) {
@@ -53,6 +102,33 @@ export function extractCurrentWorkspaceAndAgent(
       const stripped = rawTestId.replace(/^sidebar-workspace-row-(?:local:)?/, "").trim();
       if (stripped.startsWith("wks_")) {
         workspaceId = stripped;
+      }
+    }
+
+    const subagentTabs = Array.from(
+      doc.querySelectorAll<HTMLElement>('[data-testid^="workspace-tab-provider_subagent_"]'),
+    ).filter((el) => {
+      const tid = el.getAttribute("data-testid") ?? "";
+      return parseProviderSubagentTabTestId(tid) !== null;
+    });
+    const selectedSubagentTab =
+      subagentTabs.find(
+        (el) =>
+          el.getAttribute("aria-selected") === "true" ||
+          el.getAttribute("data-state") === "active",
+      ) ??
+      (subagentTabs.length === 1 && doc.querySelector('[data-testid="provider-subagent-panel"]')
+        ? subagentTabs[0]
+        : null);
+    if (selectedSubagentTab) {
+      const parsedSubTab = parseProviderSubagentTabTestId(
+        selectedSubagentTab.getAttribute("data-testid"),
+      );
+      if (parsedSubTab) {
+        if (!agentId) {
+          agentId = parsedSubTab.parentAgentId;
+        }
+        activeSubagentId = parsedSubTab.subagentId;
       }
     }
 
@@ -84,9 +160,21 @@ export function extractCurrentWorkspaceAndAgent(
         }
       }
     }
+
+    if ((!agentId || !activeSubagentId) && doc.querySelector('[data-testid="provider-subagent-panel"]')) {
+      const focusedTarget = extractFocusedWorkspaceTabTarget(workspaceId, win);
+      if (focusedTarget) {
+        if (!agentId && focusedTarget.agentId) {
+          agentId = focusedTarget.agentId;
+        }
+        if (!activeSubagentId && focusedTarget.subagentId) {
+          activeSubagentId = focusedTarget.subagentId;
+        }
+      }
+    }
   }
 
-  return { workspaceId, agentId };
+  return { workspaceId, agentId, activeSubagentId };
 }
 
 function findReactFiber(el: Element | null): Record<string, any> | null {
@@ -127,11 +215,16 @@ function upsertDirectoryNode(node: SessionLineageNode | null | undefined): void 
         ...existing,
         ...node,
         providerSessionId: node.providerSessionId ?? existing.providerSessionId ?? null,
+        relationKind: node.relationKind ?? existing.relationKind,
+        routedByAgentId: node.routedByAgentId ?? existing.routedByAgentId ?? null,
         briefPath: node.briefPath ?? existing.briefPath ?? null,
         reportPath: node.reportPath ?? existing.reportPath ?? null,
         reportExists: node.reportExists || existing.reportExists,
         notionUrl: node.notionUrl ?? existing.notionUrl ?? null,
-        notionTaskId: node.notionTaskId ?? existing.notionTaskId ?? null,
+        notionTaskId:
+          (existing.notionTaskId?.length ?? 0) > (node.notionTaskId?.length ?? 0)
+            ? existing.notionTaskId
+            : (node.notionTaskId ?? existing.notionTaskId ?? null),
       }
     : {
         ...node,
@@ -155,7 +248,9 @@ export function ingestSessionLineageResponse(data: LineageRpcResponse | null | u
   if (!data) return;
   upsertDirectoryNode(data.current);
   upsertDirectoryNode(data.parent);
+  upsertDirectoryNode(data.routedOrigin);
   for (const ch of data.children ?? []) upsertDirectoryNode(ch);
+  for (const col of data.colleagues ?? []) upsertDirectoryNode(col);
   for (const sb of data.siblings ?? []) upsertDirectoryNode(sb);
   for (const pp of data.projectPeers ?? []) upsertDirectoryNode(pp);
   for (const dn of data.directory ?? []) upsertDirectoryNode(dn);
@@ -212,6 +307,270 @@ export function getMetroModuleList(
   return [];
 }
 
+export interface ActiveTabTargetSnapshot {
+  workspaceKey: string | null;
+  kind: "agent" | "provider_subagent" | string | null;
+  agentId: string | null;
+  parentAgentId: string | null;
+  subagentId: string | null;
+}
+
+function extractFocusedTargetFromLayoutEntry(
+  layoutEntry: Record<string, any> | null | undefined,
+  sheetEntry?: Record<string, any> | null | undefined,
+): {
+  kind: string | null;
+  agentId: string | null;
+  parentAgentId: string | null;
+  subagentId: string | null;
+} | null {
+  const inspectContainer = (container: Record<string, any> | null | undefined) => {
+    if (!container) return null;
+    const focusedPaneId = container.focusedPaneId;
+    const panes = Array.isArray(container.panes) ? container.panes : [];
+    const pane =
+      (focusedPaneId ? panes.find((p: any) => p?.id === focusedPaneId) : null) ?? panes[0];
+    if (!pane) return null;
+    const tabs = Array.isArray(pane.tabs) ? pane.tabs : [];
+    const activeTabId = pane.activeTabId;
+    const tab = (activeTabId ? tabs.find((t: any) => t?.id === activeTabId) : null) ?? tabs[0];
+    const target = tab?.target;
+    if (!target || typeof target !== "object") return null;
+    if (target.kind === "provider_subagent") {
+      return {
+        kind: "provider_subagent",
+        agentId: String(target.parentAgentId ?? "").trim() || null,
+        parentAgentId: String(target.parentAgentId ?? "").trim() || null,
+        subagentId: String(target.subagentId ?? "").trim() || null,
+      };
+    }
+    if (target.kind === "agent") {
+      return {
+        kind: "agent",
+        agentId: String(target.agentId ?? "").trim() || null,
+        parentAgentId: String(target.agentId ?? "").trim() || null,
+        subagentId: null,
+      };
+    }
+    return {
+      kind: String(target.kind ?? "") || null,
+      agentId: null,
+      parentAgentId: null,
+      subagentId: null,
+    };
+  };
+
+  if (sheetEntry?.open) {
+    const fromSheet = inspectContainer(sheetEntry);
+    if (fromSheet) return fromSheet;
+  }
+  return inspectContainer(layoutEntry);
+}
+
+export function extractFocusedWorkspaceTabTarget(
+  workspaceId?: string | null,
+  win?: Window | null,
+): ActiveTabTargetSnapshot | null {
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  const rawWs = (workspaceId ?? "").trim();
+  const cleanWs = rawWs.replace(/^local:/, "").trim();
+  const candidateKeys = cleanWs ? [`local:${cleanWs}`, cleanWs] : [];
+
+  const modules = getMetroModuleList(w);
+  for (const mod of modules) {
+    if (!mod || mod.isInitialized !== true) continue;
+    const exp = mod.publicModule?.exports;
+    if (typeof exp?.useWorkspaceLayoutStore?.getState === "function") {
+      try {
+        const st = exp.useWorkspaceLayoutStore.getState();
+        const layoutByWs: Record<string, any> = st?.layoutByWorkspace ?? {};
+        const sheetsByWs: Record<string, any> = st?.sheetsByWorkspace ?? {};
+        const keysToTry =
+          candidateKeys.length > 0 ? candidateKeys : Object.keys(layoutByWs);
+        for (const k of keysToTry) {
+          const hit = extractFocusedTargetFromLayoutEntry(layoutByWs[k], sheetsByWs[k]);
+          if (hit) {
+            return { workspaceKey: k, ...hit };
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  try {
+    const rawJson = w?.localStorage?.getItem("workspace-layout-state");
+    if (rawJson) {
+      const parsed = JSON.parse(rawJson);
+      const st = parsed?.state ?? parsed;
+      const layoutByWs: Record<string, any> = st?.layoutByWorkspace ?? {};
+      const sheetsByWs: Record<string, any> = st?.sheetsByWorkspace ?? {};
+      const keysToTry =
+        candidateKeys.length > 0 ? candidateKeys : Object.keys(layoutByWs);
+      for (const k of keysToTry) {
+        const hit = extractFocusedTargetFromLayoutEntry(layoutByWs[k], sheetsByWs[k]);
+        if (hit) {
+          return { workspaceKey: k, ...hit };
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+export function resolveActiveServerId(
+  win?: Window | null,
+  hint?: { workspaceId?: string | null; agentId?: string | null },
+): string {
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  const cleanWs = (hint?.workspaceId ?? "").replace(/^[^:]+:/, "").trim();
+  const cleanAg = (hint?.agentId ?? "").trim();
+  const modules = getMetroModuleList(w);
+  let firstServerId = "";
+  for (const mod of modules) {
+    if (!mod || mod.isInitialized !== true) continue;
+    const exp = mod.publicModule?.exports;
+    if (typeof exp?.useSessionStore?.getState === "function") {
+      try {
+        const sessions: Record<string, any> = exp.useSessionStore.getState()?.sessions ?? {};
+        for (const [srvId, sess] of Object.entries(sessions)) {
+          if (!srvId) continue;
+          if (!firstServerId) firstServerId = srvId;
+          if (cleanAg && sess?.agents?.has?.(cleanAg)) return srvId;
+          if (cleanWs && sess?.workspaces?.has?.(cleanWs)) return srvId;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+  if (firstServerId) return firstServerId;
+  const pathMatch = (w?.location?.pathname ?? "").match(/^\/h\/([^/]+)/);
+  if (pathMatch?.[1]) return pathMatch[1];
+  return "local";
+}
+
+export function openWorkspaceTargetTabViaStore(
+  opts: {
+    workspaceId?: string | null;
+    parentAgentId: string;
+    subagentId?: string | null;
+  },
+  win?: Window | null,
+): boolean {
+  const w = win ?? (typeof window !== "undefined" ? window : null);
+  const parentAgentId = opts.parentAgentId.trim();
+  if (!parentAgentId) return false;
+  const subagentId = (opts.subagentId ?? "").trim() || null;
+  const rawWs = (opts.workspaceId ?? "").trim();
+  const cleanWs = rawWs.replace(/^[^:]+:/, "").trim();
+  const serverId = resolveActiveServerId(w, { workspaceId: cleanWs, agentId: parentAgentId });
+
+  const modules = getMetroModuleList(w);
+  let resolvedStoreSubagentId: string | null = subagentId;
+  if (subagentId) {
+    const cleanSubId = subagentId.replace(/^vec-subagent:/i, "").trim();
+    let hasSubagentStoreDescriptors = false;
+    let matchedDescriptorId: string | null = null;
+    for (const mod of modules) {
+      if (!mod || mod.isInitialized !== true) continue;
+      const exp = mod.publicModule?.exports;
+      if (typeof exp?.useProviderSubagentStore?.getState === "function") {
+        try {
+          const subStore = exp.useProviderSubagentStore.getState();
+          const descriptors: Map<string, any> | undefined = subStore?.descriptors;
+          if (descriptors instanceof Map) {
+            hasSubagentStoreDescriptors = true;
+            for (const key of descriptors.keys()) {
+              const parts = String(key).split("\0");
+              const keyParent = parts[1] ?? "";
+              const keySub = parts[2] ?? "";
+              const normKeySub = keySub.replace(/^vec-subagent:/i, "").trim();
+              if (
+                keyParent === parentAgentId &&
+                (normKeySub === cleanSubId || keySub === subagentId)
+              ) {
+                matchedDescriptorId = keySub;
+                break;
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (hasSubagentStoreDescriptors) {
+      if (!matchedDescriptorId) {
+        return false;
+      }
+      resolvedStoreSubagentId = matchedDescriptorId;
+    }
+  }
+
+  for (const mod of modules) {
+    if (!mod || mod.isInitialized !== true) continue;
+    const exp = mod.publicModule?.exports;
+    if (typeof exp?.useWorkspaceLayoutStore?.getState === "function") {
+      try {
+        const st = exp.useWorkspaceLayoutStore.getState();
+        if (typeof st?.openTab === "function") {
+          const layoutByWs: Record<string, any> = st?.layoutByWorkspace ?? {};
+          const suffixMatchKey = cleanWs
+            ? Object.keys(layoutByWs).find((k) => k === `${serverId}:${cleanWs}` || k.endsWith(`:${cleanWs}`))
+            : undefined;
+          const existingKey =
+            suffixMatchKey ??
+            (cleanWs && layoutByWs[`${serverId}:${cleanWs}`] ? `${serverId}:${cleanWs}` : null) ??
+            (cleanWs && layoutByWs[`local:${cleanWs}`] ? `local:${cleanWs}` : null) ??
+            (cleanWs && layoutByWs[cleanWs] ? cleanWs : null) ??
+            (cleanWs ? `${serverId}:${cleanWs}` : null) ??
+            Object.keys(layoutByWs)[0] ??
+            null;
+          if (existingKey) {
+            const target = resolvedStoreSubagentId
+              ? {
+                  kind: "provider_subagent",
+                  parentAgentId,
+                  subagentId: resolvedStoreSubagentId,
+                }
+              : {
+                  kind: "agent",
+                  agentId: parentAgentId,
+                };
+            st.openTab({
+              workspaceKey: existingKey,
+              target,
+            });
+            return true;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (!subagentId && metroNavigateToAgentFn) {
+    try {
+      metroNavigateToAgentFn({
+        serverId,
+        agentId: parentAgentId,
+        workspaceId: cleanWs || undefined,
+      });
+      return true;
+    } catch {
+      // ignore
+    }
+  }
+
+  return false;
+}
+
 export function syncSessionDirectoryFromMetro(win?: Window | null): number {
   const modules = getMetroModuleList(win);
   if (modules.length === 0) return 0;
@@ -238,7 +597,7 @@ export function syncSessionDirectoryFromMetro(win?: Window | null): number {
           if (!agentsMap || typeof agentsMap.values !== "function") continue;
 
           for (const ag of agentsMap.values()) {
-            if (!ag?.id || ag.archivedAt) continue;
+            if (!ag?.id) continue;
             const aid = String(ag.id).trim();
             const wsId = String(ag.workspaceId ?? "").trim();
             const ws = wsId && workspacesMap?.get ? workspacesMap.get(wsId) : null;
@@ -256,10 +615,19 @@ export function syncSessionDirectoryFromMetro(win?: Window | null): number {
             const workspaceTitle =
               String(ws?.title ?? "").trim() ||
               (ws?.name && ws.name !== "main" ? String(ws.name) : agentTitle);
-            const status =
-              ag.turn?.phase === "open" || ag.status === "running"
+            const isArchived = Boolean(ag.archivedAt || (ws?.archivedAt && !ws?.pinnedAt));
+            const rawStatus = String(ag.status ?? "idle").trim().toLowerCase();
+            const status = isArchived
+              ? "archived"
+              : ag.turn?.phase === "open" || rawStatus === "running"
                 ? "running"
-                : String(ag.status ?? "idle");
+                : rawStatus === "failed" || rawStatus === "error"
+                  ? "failed"
+                  : "done";
+
+            const rawBrief = String(ag.labels?.brief ?? "").trim();
+            const briefMatch = rawBrief.match(/^intake-\d+-\d+-([0-9a-f]{8})-/i);
+            const extractedNotionTaskId = briefMatch?.[1] ? briefMatch[1].toLowerCase() : null;
 
             upsertDirectoryNode({
               agentId: aid,
@@ -289,7 +657,7 @@ export function syncSessionDirectoryFromMetro(win?: Window | null): number {
               reportPath: null,
               reportExists: false,
               notionUrl: null,
-              notionTaskId: null,
+              notionTaskId: extractedNotionTaskId,
             });
             syncedCount += 1;
           }
@@ -355,7 +723,43 @@ export function resolveSessionReference(
     }
   }
 
-  // 3. Also check if hex prefix matches a workspaceId suffix (wks_<hex>)
+  // 3. Check if UUID or hex prefix/suffix matches a Notion Task ID (e.g. 413e1b43-2393-815a-ae85-f013049cb5fb or 96e2e779)
+  const lowerPlain = lower.replace(/-/g, "");
+  const notionCandidates: SessionLineageNode[] = [];
+  for (const node of globalSessionDirectoryByAgentId.values()) {
+    if (node.agentId === excludeAgentId) continue;
+    const rawNotion = (node.notionTaskId ?? "").trim().toLowerCase();
+    if (!rawNotion) continue;
+    const notionPlain = rawNotion.replace(/-/g, "");
+    if (
+      rawNotion === lower ||
+      notionPlain === lowerPlain ||
+      (lowerPlain.length >= 7 &&
+        (notionPlain.startsWith(lowerPlain) || notionPlain.endsWith(lowerPlain))) ||
+      (notionPlain.length >= 7 && lowerPlain.endsWith(notionPlain))
+    ) {
+      notionCandidates.push(node);
+    }
+  }
+  if (notionCandidates.length > 0) {
+    notionCandidates.sort((a, b) => {
+      const aHasBrief = a.briefPath ? 0 : 1;
+      const bHasBrief = b.briefPath ? 0 : 1;
+      if (aHasBrief !== bHasBrief) return aHasBrief - bHasBrief;
+      const aFullUuid = (a.notionTaskId?.length ?? 0) >= 32 ? 0 : 1;
+      const bFullUuid = (b.notionTaskId?.length ?? 0) >= 32 ? 0 : 1;
+      if (aFullUuid !== bFullUuid) return aFullUuid - bFullUuid;
+      const aArch = a.status === "archived" ? 1 : 0;
+      const bArch = b.status === "archived" ? 1 : 0;
+      if (aArch !== bArch) return aArch - bArch;
+      return String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+        String(a.updatedAt ?? a.createdAt ?? ""),
+      );
+    });
+    return notionCandidates[0];
+  }
+
+  // 4. Also check if hex prefix matches a workspaceId suffix (wks_<hex>)
   for (const [wsId, list] of globalSessionDirectoryByWorkspaceId.entries()) {
     const strippedWs = wsId.toLowerCase().replace(/^wks_/, "");
     if (strippedWs.length >= 7 && (strippedWs === lower || strippedWs.startsWith(lower))) {
@@ -729,14 +1133,30 @@ export function navigateToLineageNode(
   // Fast path 0: Use Paseo's native Metro navigateToAgent when navigating to a known agentId
   if (node.agentId && metroNavigateToAgentFn) {
     try {
+      const serverId = resolveActiveServerId(w, {
+        workspaceId: node.workspaceId,
+        agentId: node.agentId,
+      });
       metroNavigateToAgentFn({
-        serverId: "local",
+        serverId,
         agentId: node.agentId,
         workspaceId: node.workspaceId || undefined,
       });
     } catch {
       // Fall through to DOM navigation
     }
+  }
+
+  // Fast path 0B: Also open/focus the agent tab in useWorkspaceLayoutStore so multi-agent workspaces immediately switch tabs
+  if (node.agentId) {
+    openWorkspaceTargetTabViaStore(
+      {
+        workspaceId: node.workspaceId,
+        parentAgentId: node.agentId,
+        subagentId: null,
+      },
+      w,
+    );
   }
 
   // Fast path 1: If Paseo's native subagent track pill is mounted for this agentId, click it
@@ -784,6 +1204,12 @@ export function navigateToLineageNode(
   return focused;
 }
 
+export function cleanSessionDisplayTitle(raw: string | null | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return "";
+  return trimmed.replace(/^(?:d\s+|done:\s*)/i, "").trim() || trimmed;
+}
+
 export function enhanceTimelineAgentMentions(
   data: RpcOutput<typeof manageSessionLineageRpc> | null,
   doc?: Document | null,
@@ -810,6 +1236,13 @@ export function enhanceTimelineAgentMentions(
     if (status === "running") return tokens.statusWarning;
     if (status === "failed" || status === "error") return tokens.destructive;
     return tokens.statusSuccess;
+  };
+
+  const statusWordFor = (status: string): string => {
+    if (status === "running") return zh ? "运行中" : "Running";
+    if (status === "archived") return zh ? "已归档" : "Archived";
+    if (status === "failed" || status === "error") return zh ? "失败" : "Failed";
+    return zh ? "已完成" : "Done";
   };
 
   // 0. Wrap bare plain-text session IDs inside timeline message bubbles (e.g. "Paseo agent af81b8f0") into <code> so they become interactive pills
@@ -902,9 +1335,10 @@ export function enhanceTimelineAgentMentions(
     referencedById.set(matched.agentId, matched);
 
     const short7 = matched.agentId.slice(0, 7);
-    const displayTitle = matched.agentTitle || matched.workspaceTitle || short7;
+    const rawDisplayTitle = matched.agentTitle || matched.workspaceTitle || short7;
+    const displayTitle = cleanSessionDisplayTitle(rawDisplayTitle) || short7;
     const shortPreview =
-      displayTitle.length > 24 ? `${displayTitle.slice(0, 24)}\u2026` : displayTitle;
+      displayTitle.length > 22 ? `${displayTitle.slice(0, 22)}\u2026` : displayTitle;
     const pillSig = `${matched.agentId}:${matched.status}:${shortPreview}:${tokens.name}`;
 
     if (codeEl.getAttribute("data-vec-pill-sig") !== pillSig) {
@@ -915,9 +1349,10 @@ export function enhanceTimelineAgentMentions(
       codeEl.setAttribute("role", "button");
       codeEl.tabIndex = 0;
       const projPart = matched.projectName ? ` \u00b7 ${matched.projectName}` : "";
+      const statusLabel = statusWordFor(matched.status);
       codeEl.title = zh
-        ? `\u70b9\u51fb\u8df3\u8f6c\u81f3\u4f1a\u8bdd: ${displayTitle} (#${short7})${projPart} \u00b7 \u72b6\u6001: ${matched.status}`
-        : `Click to jump to session: ${displayTitle} (#${short7})${projPart} \u00b7 Status: ${matched.status}`;
+        ? `\u70b9\u51fb\u8df3\u8f6c\u81f3\u4f1a\u8bdd: ${displayTitle} (#${short7})${projPart} \u00b7 \u72b6\u6001: ${statusLabel}`
+        : `Click to jump to session: ${displayTitle} (#${short7})${projPart} \u00b7 Status: ${statusLabel}`;
 
       Object.assign(codeEl.style, {
         display: "inline-flex",
@@ -926,8 +1361,8 @@ export function enhanceTimelineAgentMentions(
         padding: "1px 7px",
         margin: "0 2px",
         borderRadius: "5px",
-        border: `1px solid ${tokens.borderAccent}`,
-        backgroundColor: tokens.surface2,
+        border: `1px solid ${tokens.border}`,
+        backgroundColor: tokens.surface1,
         color: tokens.foreground,
         cursor: "pointer",
         verticalAlign: "baseline",
@@ -938,8 +1373,8 @@ export function enhanceTimelineAgentMentions(
       codeEl.innerHTML = "";
       const dot = d.createElement("span");
       Object.assign(dot.style, {
-        width: "6px",
-        height: "6px",
+        width: "5px",
+        height: "5px",
         borderRadius: "999px",
         backgroundColor: statusColorFor(matched.status),
         flexShrink: "0",
@@ -949,7 +1384,7 @@ export function enhanceTimelineAgentMentions(
       idSpan.textContent = rawToken;
       Object.assign(idSpan.style, {
         fontWeight: "600",
-        color: tokens.accent,
+        color: tokens.foreground,
       });
 
       const titleSpan = d.createElement("span");
@@ -959,7 +1394,7 @@ export function enhanceTimelineAgentMentions(
         fontFamily:
           'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         fontSize: "0.88em",
-        fontWeight: "500",
+        fontWeight: "400",
         color: tokens.foregroundMuted,
       });
 
@@ -1162,7 +1597,7 @@ export function installDesktopSessionLineageEnhancer(
   >();
 
   let lastRouteKey = "";
-  let childrenPopoverOpen = false;
+  let activePopoverSection: "children" | "colleagues" | "refs" | null = null;
   let rafId: number | null = null;
   let pollId: ReturnType<typeof setInterval> | null = null;
   let initialReconcileDone = false;
@@ -1267,6 +1702,13 @@ export function installDesktopSessionLineageEnhancer(
     return tokens.statusSuccess;
   };
 
+  const formatNodeStatusWord = (status: string, zh: boolean): string => {
+    if (status === "running") return zh ? "运行中" : "Running";
+    if (status === "archived") return zh ? "已归档" : "Archived";
+    if (status === "failed" || status === "error") return zh ? "失败" : "Failed";
+    return zh ? "已完成" : "Done";
+  };
+
   const renderLineageBar = (data: LineageRpcResponse | null) => {
     patchCommandCenterSearch(window);
     ingestSessionLineageResponse(data);
@@ -1277,7 +1719,9 @@ export function installDesktopSessionLineageEnhancer(
       '[data-testid="paseo-finder-session-lineage-bar"]',
     );
     const hasParent = Boolean(data?.parent);
+    const hasRoutedOrigin = Boolean(data?.routedOrigin);
     const children = data?.children ?? [];
+    const rawColleagues = data?.colleagues ?? [];
     const siblings = data?.siblings ?? [];
     const current = data?.current ?? null;
     const { workspaceId: curWksId, agentId: curAgentId } =
@@ -1288,28 +1732,59 @@ export function installDesktopSessionLineageEnhancer(
       window,
     );
 
+    const childAgentIdSet = new Set(children.map((c) => c.agentId));
+    const colleagues = rawColleagues.filter(
+      (col) =>
+        col.agentId !== data?.parent?.agentId &&
+        col.agentId !== data?.routedOrigin?.agentId &&
+        col.agentId !== returnBreadcrumb?.agentId &&
+        !childAgentIdSet.has(col.agentId),
+    );
+    const colleagueAgentIdSet = new Set(colleagues.map((c) => c.agentId));
+    const uniqueReferencedPeers = referencedPeers.filter(
+      (peer) =>
+        peer.agentId !== data?.parent?.agentId &&
+        peer.agentId !== data?.routedOrigin?.agentId &&
+        peer.agentId !== returnBreadcrumb?.agentId &&
+        !childAgentIdSet.has(peer.agentId) &&
+        !colleagueAgentIdSet.has(peer.agentId),
+    );
+
     const hasBriefOrReport = Boolean(
       current?.briefPath || current?.reportPath || current?.notionUrl,
     );
 
     const hasCrossWorkspaceLineage = Boolean(
       (data?.parent && data.parent.workspaceId !== current?.workspaceId) ||
-        children.some((c) => c.workspaceId !== current?.workspaceId),
+        (data?.routedOrigin && data.routedOrigin.workspaceId !== current?.workspaceId) ||
+        children.some((c) => c.workspaceId !== current?.workspaceId) ||
+        colleagues.length > 0,
     );
 
     const hasReturnOrPeerMentions = Boolean(
-      returnBreadcrumb || referencedPeers.length > 0,
+      returnBreadcrumb || uniqueReferencedPeers.length > 0 || colleagues.length > 0,
     );
+
+    const effectiveWsId = current?.workspaceId ?? curWksId;
+    const cadenceSched = findCadenceScheduleForWorkspace(
+      effectiveWsId,
+      current?.workspaceTitle,
+    );
+    const hasCadence = Boolean(cadenceSched);
 
     if (
       !data ||
       (!hasParent &&
+        !hasRoutedOrigin &&
         children.length === 0 &&
+        colleagues.length === 0 &&
         !hasBriefOrReport &&
-        !hasReturnOrPeerMentions) ||
+        !hasReturnOrPeerMentions &&
+        !hasCadence) ||
       (!hasCrossWorkspaceLineage &&
         !hasBriefOrReport &&
-        !hasReturnOrPeerMentions)
+        !hasReturnOrPeerMentions &&
+        !hasCadence)
     ) {
       existing?.remove();
       return;
@@ -1324,10 +1799,15 @@ export function installDesktopSessionLineageEnhancer(
       return;
     }
 
-    const displayLabelFor = (node: SessionLineageNode): string =>
-      node.workspaceId && node.workspaceId === current?.workspaceId
-        ? node.agentTitle || node.workspaceTitle
-        : node.workspaceTitle || node.agentTitle;
+    const displayLabelFor = (node: SessionLineageNode): string => {
+      const raw =
+        (node.workspaceId && node.workspaceId === current?.workspaceId) ||
+        node.relationKind === "intake-routed" ||
+        node.agentTitle.startsWith("Intake ·")
+          ? node.agentTitle || node.workspaceTitle
+          : node.workspaceTitle || node.agentTitle;
+      return cleanSessionDisplayTitle(raw) || node.shortId;
+    };
 
     const zh = isZh();
     const tokens = syncPaseoThemeCssVariables(document as never, window as never);
@@ -1347,15 +1827,21 @@ export function installDesktopSessionLineageEnhancer(
         : null,
       par: data.parent?.agentId,
       parTitle: data.parent ? displayLabelFor(data.parent) : null,
+      orig: data.routedOrigin?.agentId,
+      origTitle: data.routedOrigin ? displayLabelFor(data.routedOrigin) : null,
       chCount: children.length,
       chIds: children.slice(0, 6).map((c) => `${c.shortId}:${c.status}:${displayLabelFor(c)}`),
-      refIds: referencedPeers
-        .slice(0, 4)
+      colCount: colleagues.length,
+      colIds: colleagues.slice(0, 6).map((c) => `${c.shortId}:${c.status}:${displayLabelFor(c)}`),
+      refCount: uniqueReferencedPeers.length,
+      refIds: uniqueReferencedPeers
+        .slice(0, 6)
         .map((p) => `${p.shortId}:${p.status}:${displayLabelFor(p)}`),
       sibCount: siblings.length,
       brief: current?.briefPath,
       report: current?.reportExists,
-      open: childrenPopoverOpen,
+      cad: cadenceSched ? `${cadenceSched.id}:${cadenceSched.lastRunStatus}` : null,
+      open: activePopoverSection,
       zh,
       theme: tokens.name,
     });
@@ -1367,26 +1853,67 @@ export function installDesktopSessionLineageEnhancer(
     bar.innerHTML = "";
 
     Object.assign(bar.style, {
+      position: "relative",
       display: "flex",
       flexDirection: "column",
-      gap: "6px",
-      margin: "0 16px 8px 16px",
-      padding: "6px 10px",
-      borderRadius: "8px",
-      backgroundColor: tokens.surface1,
-      border: `1px solid ${tokens.border}`,
+      gap: "4px",
+      margin: "0 16px 6px 16px",
+      padding: "0",
+      borderRadius: "0",
+      backgroundColor: "transparent",
+      border: "none",
       fontFamily:
         'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       fontSize: "11.5px",
       color: tokens.foreground,
     });
 
+    const styleTrackPill = (
+      btn: HTMLElement,
+      opts?: { active?: boolean; accentBorder?: boolean },
+    ) => {
+      Object.assign(btn.style, {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        height: "24px",
+        padding: "0 9px",
+        borderRadius: "999px",
+        border: `1px solid ${
+          opts?.accentBorder
+            ? tokens.accent
+            : opts?.active
+              ? tokens.borderAccent
+              : tokens.border
+        }`,
+        backgroundColor: opts?.active ? tokens.surface2 : tokens.surface1,
+        color: opts?.active ? tokens.foreground : tokens.foregroundMuted,
+        fontSize: "11.5px",
+        fontWeight: opts?.active || opts?.accentBorder ? "600" : "500",
+        cursor: "pointer",
+        lineHeight: "1",
+        whiteSpace: "nowrap",
+      });
+    };
+
+    const createDot = (status: string): HTMLElement => {
+      const dot = document.createElement("span");
+      Object.assign(dot.style, {
+        width: "6px",
+        height: "6px",
+        borderRadius: "999px",
+        backgroundColor: statusDotColor(status, tokens),
+        flexShrink: "0",
+      });
+      return dot;
+    };
+
     const topRow = document.createElement("div");
     Object.assign(topRow.style, {
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
-      gap: "8px",
+      gap: "6px",
       flexWrap: "wrap",
     });
 
@@ -1399,6 +1926,61 @@ export function installDesktopSessionLineageEnhancer(
       minWidth: "0",
     });
 
+    // 0. Cadence Quick-Run Capsule
+    if (cadenceSched) {
+      const isRunning =
+        Boolean(cadenceSched.runningRuns && cadenceSched.runningRuns > 0) ||
+        cadenceSched.lastRunStatus === "running";
+      const cadenceBtn = document.createElement("button");
+      cadenceBtn.type = "button";
+      cadenceBtn.setAttribute("data-testid", "session-cadence-run-pill");
+      cadenceBtn.title = zh
+        ? `定时任务节奏: ${cadenceSched.name} · 单击立即运行 · ⌘⇧H 查看全部记录`
+        : `Cadence: ${cadenceSched.name} · Click to run now · ⌘⇧H for runs history`;
+
+      const iconWrap = document.createElement("span");
+      iconWrap.innerHTML = CADENCE_TIMER_SVG;
+      Object.assign(iconWrap.style, {
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: isRunning ? tokens.primary : tokens.foregroundMuted,
+        flexShrink: "0",
+        animation: isRunning ? "paseoCadenceBadgeBreathe 2s ease-in-out infinite" : "none",
+        transformOrigin: "center",
+      });
+
+      const textSpan = document.createElement("span");
+      textSpan.textContent = zh
+        ? isRunning
+          ? "节奏运行中"
+          : "立即运行节奏"
+        : isRunning
+          ? "Cadence Running"
+          : "Run Cadence Now";
+
+      cadenceBtn.appendChild(iconWrap);
+      cadenceBtn.appendChild(textSpan);
+      styleTrackPill(cadenceBtn, { active: isRunning });
+
+      cadenceBtn.addEventListener("pointerenter", () => {
+        cadenceBtn.style.backgroundColor = tokens.surface2;
+        cadenceBtn.style.color = tokens.foreground;
+      });
+      cadenceBtn.addEventListener("pointerleave", () => {
+        cadenceBtn.style.backgroundColor = isRunning ? tokens.surface2 : tokens.surface1;
+        cadenceBtn.style.color = isRunning ? tokens.foreground : tokens.foregroundMuted;
+      });
+
+      cadenceBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void triggerRunScheduleNow(cadenceSched.id);
+      });
+
+      leftGroup.appendChild(cadenceBtn);
+    }
+
     // 0. Return Breadcrumb ("Don't Lose Yourself" 1-Click Jump Back)
     if (returnBreadcrumb) {
       const returnDisplay = displayLabelFor(returnBreadcrumb);
@@ -1406,42 +1988,21 @@ export function installDesktopSessionLineageEnhancer(
       returnBtn.type = "button";
       returnBtn.setAttribute("data-testid", "paseo-finder-lineage-return-btn");
       returnBtn.title = zh
-        ? `点击一键返回刚才浏览的会话 (⌘[): ${returnDisplay} (#${returnBreadcrumb.shortId})`
-        : `Click to jump back to previous session (⌘[): ${returnDisplay} (#${returnBreadcrumb.shortId})`;
-
-      const dot = document.createElement("span");
-      Object.assign(dot.style, {
-        width: "6px",
-        height: "6px",
-        borderRadius: "999px",
-        backgroundColor: statusDotColor(returnBreadcrumb.status, tokens),
-        flexShrink: "0",
-      });
+        ? `点击一键返回刚才浏览的会话 · ⌘[ · ${returnDisplay} · #${returnBreadcrumb.shortId}`
+        : `Click to jump back to previous session · ⌘[ · ${returnDisplay} · #${returnBreadcrumb.shortId}`;
 
       const textSpan = document.createElement("span");
       const truncatedReturnTitle =
-        returnDisplay.length > 36
-          ? `${returnDisplay.slice(0, 36)}...`
+        returnDisplay.length > 28
+          ? `${returnDisplay.slice(0, 28)}\u2026`
           : returnDisplay;
       textSpan.textContent = zh
-        ? `↖ 返回刚才会话: ${truncatedReturnTitle} (#${returnBreadcrumb.shortId})`
-        : `↖ Back to: ${truncatedReturnTitle} (#${returnBreadcrumb.shortId})`;
+        ? `↩ 返回 · ${truncatedReturnTitle}`
+        : `↩ Back · ${truncatedReturnTitle}`;
 
-      returnBtn.appendChild(dot);
+      returnBtn.appendChild(createDot(returnBreadcrumb.status));
       returnBtn.appendChild(textSpan);
-      Object.assign(returnBtn.style, {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "6px",
-        padding: "3px 9px",
-        borderRadius: "6px",
-        border: `1px solid ${tokens.accent}`,
-        backgroundColor: tokens.surfaceSidebarSelected,
-        color: tokens.foreground,
-        fontSize: "11.5px",
-        fontWeight: "600",
-        cursor: "pointer",
-      });
+      styleTrackPill(returnBtn, { active: true, accentBorder: true });
 
       returnBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
@@ -1459,7 +2020,7 @@ export function installDesktopSessionLineageEnhancer(
       leftGroup.appendChild(returnBtn);
     }
 
-    // 1. Parent / Initiating Session 1-Click Jump Pill
+    // 1A. True Parent Subagent Owner 1-Click Jump Pill (`↖ 父智能体`)
     if (
       data.parent &&
       data.parent.agentId !== returnBreadcrumb?.agentId
@@ -1470,42 +2031,21 @@ export function installDesktopSessionLineageEnhancer(
       parentBtn.type = "button";
       parentBtn.setAttribute("data-testid", "paseo-finder-lineage-parent-btn");
       parentBtn.title = zh
-        ? `点击一键返回发起会话: ${parentDisplay} (#${parentNode.shortId})`
-        : `Click to jump back to initiating session: ${parentDisplay} (#${parentNode.shortId})`;
-
-      const dot = document.createElement("span");
-      Object.assign(dot.style, {
-        width: "6px",
-        height: "6px",
-        borderRadius: "999px",
-        backgroundColor: statusDotColor(parentNode.status, tokens),
-        flexShrink: "0",
-      });
+        ? `点击一键返回父智能体: ${parentDisplay} · #${parentNode.shortId}`
+        : `Click to jump back to parent agent: ${parentDisplay} · #${parentNode.shortId}`;
 
       const textSpan = document.createElement("span");
       const truncatedParentTitle =
-        parentDisplay.length > 38
-          ? `${parentDisplay.slice(0, 38)}...`
+        parentDisplay.length > 28
+          ? `${parentDisplay.slice(0, 28)}\u2026`
           : parentDisplay;
       textSpan.textContent = zh
-        ? `↖ 发起会话: ${truncatedParentTitle} (#${parentNode.shortId})`
-        : `↖ Initiated by: ${truncatedParentTitle} (#${parentNode.shortId})`;
+        ? `↖ 父会话 · ${truncatedParentTitle}`
+        : `↖ Parent · ${truncatedParentTitle}`;
 
-      parentBtn.appendChild(dot);
+      parentBtn.appendChild(createDot(parentNode.status));
       parentBtn.appendChild(textSpan);
-      Object.assign(parentBtn.style, {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "6px",
-        padding: "3px 9px",
-        borderRadius: "6px",
-        border: `1px solid ${tokens.borderAccent}`,
-        backgroundColor: tokens.surface2,
-        color: tokens.foreground,
-        fontSize: "11.5px",
-        fontWeight: "600",
-        cursor: "pointer",
-      });
+      styleTrackPill(parentBtn, { active: true });
 
       parentBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
@@ -1516,92 +2056,167 @@ export function installDesktopSessionLineageEnhancer(
       leftGroup.appendChild(parentBtn);
     }
 
-    // 2. Spawned Child Sessions Pill + Expandable List
-    if (children.length > 0) {
-      const runningCount = children.filter((c) => c.status === "running").length;
-      const childrenToggleBtn = document.createElement("button");
-      childrenToggleBtn.type = "button";
-      childrenToggleBtn.setAttribute("data-testid", "paseo-finder-lineage-children-toggle");
-      const runningText =
-        runningCount > 0
-          ? zh
-            ? ` · ${runningCount} 运行中`
-            : ` · ${runningCount} running`
-          : "";
-      childrenToggleBtn.textContent = zh
-        ? `↘ 派生会话 (${children.length}${runningText}) ${childrenPopoverOpen ? "▴" : "▾"}`
-        : `↘ Spawned Sessions (${children.length}${runningText}) ${childrenPopoverOpen ? "▴" : "▾"}`;
-      Object.assign(childrenToggleBtn.style, {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "5px",
-        padding: "3px 9px",
-        borderRadius: "6px",
-        border: `1px solid ${tokens.border}`,
-        backgroundColor: childrenPopoverOpen ? tokens.surfaceSidebarSelected : tokens.surface2,
-        color: childrenPopoverOpen ? tokens.accent : tokens.foreground,
-        fontSize: "11.5px",
-        fontWeight: "600",
-        cursor: "pointer",
-      });
-      childrenToggleBtn.addEventListener("click", (ev) => {
+    // 1B. Routed / Colleague Origin Session Pill (`⇄ 派发来源 / 协作发起`)
+    if (
+      !data.parent &&
+      data.routedOrigin &&
+      data.routedOrigin.agentId !== returnBreadcrumb?.agentId
+    ) {
+      const originNode = data.routedOrigin;
+      const originDisplay = displayLabelFor(originNode);
+      const originBtn = document.createElement("button");
+      originBtn.type = "button";
+      originBtn.setAttribute("data-testid", "paseo-finder-lineage-origin-btn");
+      const isIntakeOrigin = current?.relationKind === "intake-routed";
+      originBtn.title = zh
+        ? `点击跳转至${isIntakeOrigin ? "队列触发来源会话" : "协作发起同伴"}: ${originDisplay} · #${originNode.shortId}`
+        : `Click to jump to ${isIntakeOrigin ? "routing trigger session" : "collaborating peer"}: ${originDisplay} · #${originNode.shortId}`;
+
+      const textSpan = document.createElement("span");
+      const truncatedOriginTitle =
+        originDisplay.length > 28
+          ? `${originDisplay.slice(0, 28)}\u2026`
+          : originDisplay;
+      textSpan.textContent = zh
+        ? `${isIntakeOrigin ? "派发自" : "协作"} · ${truncatedOriginTitle} ↗`
+        : `${isIntakeOrigin ? "Routed from" : "Colleague"} · ${truncatedOriginTitle} ↗`;
+
+      originBtn.appendChild(createDot(originNode.status));
+      originBtn.appendChild(textSpan);
+      styleTrackPill(originBtn);
+
+      originBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        childrenPopoverOpen = !childrenPopoverOpen;
-        bar?.removeAttribute("data-render-sig");
-        renderLineageBar(data);
+        navigateToLineageNode(originNode, document, window);
       });
-      leftGroup.appendChild(childrenToggleBtn);
 
-      // Show up to 3 direct quick-jump child chips inline when collapsed
-      if (!childrenPopoverOpen) {
-        for (const child of children.slice(0, 3)) {
-          const childDisplay = displayLabelFor(child);
-          const chip = document.createElement("button");
-          chip.type = "button";
-          chip.setAttribute(
-            "data-testid",
-            `paseo-finder-lineage-child-chip-${child.shortId}`,
-          );
-          const shortTitle =
-            childDisplay.length > 24
-              ? `${childDisplay.slice(0, 24)}...`
-              : childDisplay;
-          chip.textContent = `${shortTitle} (#${child.shortId}) ↗`;
-          chip.title = `${childDisplay} (#${child.shortId})`;
-          Object.assign(chip.style, {
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "4px",
-            padding: "2px 8px",
-            borderRadius: "999px",
-            border: `1px solid ${tokens.border}`,
-            backgroundColor: tokens.surface0,
-            color: tokens.foregroundMuted,
-            fontSize: "11px",
-            fontWeight: "500",
-            cursor: "pointer",
-          });
-          chip.addEventListener("click", (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            navigateToLineageNode(child, document, window);
-          });
-          leftGroup.appendChild(chip);
-        }
+      leftGroup.appendChild(originBtn);
+    }
+
+    // 2. True Spawned Subagent Sessions Pill (`↳ 派生子智能体`)
+    if (children.length > 0) {
+      const runningCount = children.filter((c) => c.status === "running").length;
+      if (children.length === 1) {
+        const child = children[0];
+        const childDisplay = displayLabelFor(child);
+        const childStatusWord = formatNodeStatusWord(child.status, zh);
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.setAttribute(
+          "data-testid",
+          `paseo-finder-lineage-child-chip-${child.shortId}`,
+        );
+        const shortTitle =
+          childDisplay.length > 26
+            ? `${childDisplay.slice(0, 26)}\u2026`
+            : childDisplay;
+        const chipLabel = document.createElement("span");
+        chipLabel.textContent = `${zh ? "子会话" : "Subagent"} · ${shortTitle} · ${childStatusWord} ↗`;
+        chip.appendChild(createDot(child.status));
+        chip.appendChild(chipLabel);
+        chip.title = `${childDisplay} · #${child.shortId} · ${childStatusWord}`;
+        styleTrackPill(chip);
+        chip.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          navigateToLineageNode(child, document, window);
+        });
+        leftGroup.appendChild(chip);
+      } else {
+        const isChildrenOpen = activePopoverSection === "children";
+        const childrenToggleBtn = document.createElement("button");
+        childrenToggleBtn.type = "button";
+        childrenToggleBtn.setAttribute("data-testid", "paseo-finder-lineage-children-toggle");
+        const statusSummaryText =
+          runningCount > 0
+            ? zh
+              ? ` · ${runningCount} 运行中`
+              : ` · ${runningCount} running`
+            : zh
+              ? " · 已完成"
+              : " · Done";
+        const labelSpan = document.createElement("span");
+        labelSpan.textContent = zh
+          ? `${children.length} 个子会话${statusSummaryText} ${isChildrenOpen ? "▴" : "▾"}`
+          : `${children.length} subagents${statusSummaryText} ${isChildrenOpen ? "▴" : "▾"}`;
+        childrenToggleBtn.appendChild(
+          createDot(runningCount > 0 ? "running" : "done"),
+        );
+        childrenToggleBtn.appendChild(labelSpan);
+        styleTrackPill(childrenToggleBtn, { active: isChildrenOpen });
+        childrenToggleBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          activePopoverSection = isChildrenOpen ? null : "children";
+          bar?.removeAttribute("data-render-sig");
+          renderLineageBar(data);
+        });
+        leftGroup.appendChild(childrenToggleBtn);
       }
     }
 
-    // 2.5 Referenced Peer Sessions in Timeline Messages (`⇄ 文中提及同伴`)
-    const childAgentIdSet = new Set(children.map((c) => c.agentId));
-    const uniqueReferencedPeers = referencedPeers.filter(
-      (peer) =>
-        peer.agentId !== data.parent?.agentId &&
-        peer.agentId !== returnBreadcrumb?.agentId &&
-        !childAgentIdSet.has(peer.agentId),
-    );
+    // 2.2 Collaborated / Peer-Exchanged Colleague Sessions (`⇄ 协作同伴`)
+    if (colleagues.length > 0) {
+      if (colleagues.length === 1) {
+        const col = colleagues[0];
+        const colDisplay = displayLabelFor(col);
+        const colChip = document.createElement("button");
+        colChip.type = "button";
+        colChip.setAttribute(
+          "data-testid",
+          `paseo-finder-lineage-colleague-chip-${col.shortId}`,
+        );
+        const shortColTitle =
+          colDisplay.length > 28
+            ? `${colDisplay.slice(0, 28)}\u2026`
+            : colDisplay;
+        colChip.title = zh
+          ? `跨会话协作同伴 · 点击跳转: ${colDisplay} · #${col.shortId}`
+          : `Collaborating peer session · Click to jump: ${colDisplay} · #${col.shortId}`;
+        const textSpan = document.createElement("span");
+        textSpan.textContent = zh
+          ? `协作 · ${shortColTitle} ↗`
+          : `Colleague · ${shortColTitle} ↗`;
+        colChip.appendChild(createDot(col.status));
+        colChip.appendChild(textSpan);
+        styleTrackPill(colChip);
+        colChip.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          navigateToLineageNode(col, document, window);
+        });
+        leftGroup.appendChild(colChip);
+      } else {
+        const isColleaguesOpen = activePopoverSection === "colleagues";
+        const anyColleagueRunning = colleagues.some((c) => c.status === "running");
+        const colleaguesToggleBtn = document.createElement("button");
+        colleaguesToggleBtn.type = "button";
+        colleaguesToggleBtn.setAttribute("data-testid", "paseo-finder-lineage-colleagues-toggle");
+        const labelSpan = document.createElement("span");
+        labelSpan.textContent = zh
+          ? `${colleagues.length} 个协作会话 ${isColleaguesOpen ? "▴" : "▾"}`
+          : `${colleagues.length} Colleagues ${isColleaguesOpen ? "▴" : "▾"}`;
+        colleaguesToggleBtn.appendChild(
+          createDot(anyColleagueRunning ? "running" : "done"),
+        );
+        colleaguesToggleBtn.appendChild(labelSpan);
+        styleTrackPill(colleaguesToggleBtn, { active: isColleaguesOpen });
+        colleaguesToggleBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          activePopoverSection = isColleaguesOpen ? null : "colleagues";
+          bar?.removeAttribute("data-render-sig");
+          renderLineageBar(data);
+        });
+        leftGroup.appendChild(colleaguesToggleBtn);
+      }
+    }
+
+    // 2.5 Referenced Sessions in Timeline Messages (`↗ 文中引用`)
     if (uniqueReferencedPeers.length > 0) {
-      for (const peer of uniqueReferencedPeers.slice(0, 3)) {
+      if (uniqueReferencedPeers.length === 1) {
+        const peer = uniqueReferencedPeers[0];
         const peerDisplay = displayLabelFor(peer);
         const peerChip = document.createElement("button");
         peerChip.type = "button";
@@ -1610,48 +2225,46 @@ export function installDesktopSessionLineageEnhancer(
           `paseo-finder-lineage-ref-peer-${peer.shortId}`,
         );
         const shortPeerTitle =
-          peerDisplay.length > 26
-            ? `${peerDisplay.slice(0, 26)}...`
+          peerDisplay.length > 28
+            ? `${peerDisplay.slice(0, 28)}\u2026`
             : peerDisplay;
         peerChip.title = zh
-          ? `文中提及同伴会话 · 点击一键跳转: ${peerDisplay} (#${peer.shortId})`
-          : `Referenced peer session · Click to jump: ${peerDisplay} (#${peer.shortId})`;
-
-        const dot = document.createElement("span");
-        Object.assign(dot.style, {
-          width: "6px",
-          height: "6px",
-          borderRadius: "999px",
-          backgroundColor: statusDotColor(peer.status, tokens),
-          flexShrink: "0",
-        });
-
+          ? `文中提及关联会话 · 点击一键跳转: ${peerDisplay} · #${peer.shortId}`
+          : `Referenced session · Click to jump: ${peerDisplay} · #${peer.shortId}`;
         const textSpan = document.createElement("span");
         textSpan.textContent = zh
-          ? `⇄ 同伴 #${peer.shortId} · ${shortPeerTitle} ↗`
-          : `⇄ Peer #${peer.shortId} · ${shortPeerTitle} ↗`;
-
-        peerChip.appendChild(dot);
+          ? `引用 · ${shortPeerTitle} ↗`
+          : `Referenced · ${shortPeerTitle} ↗`;
+        peerChip.appendChild(createDot(peer.status));
         peerChip.appendChild(textSpan);
-        Object.assign(peerChip.style, {
-          display: "inline-flex",
-          alignItems: "center",
-          gap: "5px",
-          padding: "2px 8px",
-          borderRadius: "999px",
-          border: `1px solid ${tokens.border}`,
-          backgroundColor: tokens.surface2,
-          color: tokens.foreground,
-          fontSize: "11px",
-          fontWeight: "500",
-          cursor: "pointer",
-        });
+        styleTrackPill(peerChip);
         peerChip.addEventListener("click", (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
           navigateToLineageNode(peer, document, window);
         });
         leftGroup.appendChild(peerChip);
+      } else {
+        const isRefsOpen = activePopoverSection === "refs";
+        const anyRefRunning = uniqueReferencedPeers.some((p) => p.status === "running");
+        const refsToggleBtn = document.createElement("button");
+        refsToggleBtn.type = "button";
+        refsToggleBtn.setAttribute("data-testid", "paseo-finder-lineage-refs-toggle");
+        const labelSpan = document.createElement("span");
+        labelSpan.textContent = zh
+          ? `${uniqueReferencedPeers.length} 个引用会话 ${isRefsOpen ? "▴" : "▾"}`
+          : `${uniqueReferencedPeers.length} Referenced ${isRefsOpen ? "▴" : "▾"}`;
+        refsToggleBtn.appendChild(createDot(anyRefRunning ? "running" : "done"));
+        refsToggleBtn.appendChild(labelSpan);
+        styleTrackPill(refsToggleBtn, { active: isRefsOpen });
+        refsToggleBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          activePopoverSection = isRefsOpen ? null : "refs";
+          bar?.removeAttribute("data-render-sig");
+          renderLineageBar(data);
+        });
+        leftGroup.appendChild(refsToggleBtn);
       }
     }
 
@@ -1667,18 +2280,9 @@ export function installDesktopSessionLineageEnhancer(
     if (current?.briefPath) {
       const briefBtn = document.createElement("button");
       briefBtn.type = "button";
-      briefBtn.textContent = zh ? "任务简报" : "Brief";
+      briefBtn.textContent = zh ? "简报" : "Brief";
       briefBtn.title = current.briefPath;
-      Object.assign(briefBtn.style, {
-        padding: "2px 8px",
-        borderRadius: "5px",
-        border: `1px solid ${tokens.border}`,
-        backgroundColor: tokens.surface2,
-        color: tokens.foregroundMuted,
-        fontSize: "11px",
-        fontWeight: "500",
-        cursor: "pointer",
-      });
+      styleTrackPill(briefBtn);
       briefBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1698,22 +2302,13 @@ export function installDesktopSessionLineageEnhancer(
       reportBtn.type = "button";
       reportBtn.textContent = current.reportExists
         ? zh
-          ? "执行报告 (已生成)"
-          : "Report (Ready)"
+          ? "报告 · 已就绪"
+          : "Report · Ready"
         : zh
-          ? "执行报告 (待写入)"
-          : "Report (Pending)";
+          ? "报告 · 待生成"
+          : "Report";
       reportBtn.title = current.reportPath;
-      Object.assign(reportBtn.style, {
-        padding: "2px 8px",
-        borderRadius: "5px",
-        border: `1px solid ${current.reportExists ? tokens.statusSuccess : tokens.border}`,
-        backgroundColor: current.reportExists ? tokens.statusSuccessTint : tokens.surface2,
-        color: current.reportExists ? tokens.statusSuccess : tokens.foregroundMuted,
-        fontSize: "11px",
-        fontWeight: "500",
-        cursor: "pointer",
-      });
+      styleTrackPill(reportBtn, { active: current.reportExists });
       reportBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1735,17 +2330,9 @@ export function installDesktopSessionLineageEnhancer(
       notionLink.href = current.notionUrl;
       notionLink.target = "_blank";
       notionLink.rel = "noopener noreferrer";
-      notionLink.textContent = zh ? "Notion 任务 ↗" : "Notion Task ↗";
-      Object.assign(notionLink.style, {
-        padding: "2px 8px",
-        borderRadius: "5px",
-        border: `1px solid ${tokens.border}`,
-        backgroundColor: tokens.surface2,
-        color: tokens.foreground,
-        fontSize: "11px",
-        fontWeight: "500",
-        textDecoration: "none",
-      });
+      notionLink.textContent = zh ? "Notion ↗" : "Notion ↗";
+      styleTrackPill(notionLink);
+      notionLink.style.textDecoration = "none";
       rightGroup.appendChild(notionLink);
     }
 
@@ -1755,61 +2342,83 @@ export function installDesktopSessionLineageEnhancer(
     }
     bar.appendChild(topRow);
 
-    // 4. Expanded Children List Drawer inside Bar
-    if (childrenPopoverOpen && children.length > 0) {
+    // 4. Floating Popover Menu above the Track Pill (Subagents / Colleagues / Referenced)
+    const drawerItems =
+      activePopoverSection === "children"
+        ? children
+        : activePopoverSection === "colleagues"
+          ? colleagues
+          : activePopoverSection === "refs"
+            ? uniqueReferencedPeers
+            : [];
+    const drawerRowPrefix =
+      activePopoverSection === "children"
+        ? "paseo-finder-lineage-child-row"
+        : activePopoverSection === "colleagues"
+          ? "paseo-finder-lineage-colleague-row"
+          : "paseo-finder-lineage-ref-row";
+
+    if (activePopoverSection && drawerItems.length > 0) {
       const listGrid = document.createElement("div");
+      listGrid.setAttribute("data-testid", "paseo-finder-lineage-popover");
       Object.assign(listGrid.style, {
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-        gap: "6px",
-        paddingTop: "6px",
-        borderTop: `1px solid ${tokens.border}`,
-        maxHeight: "210px",
+        position: "absolute",
+        bottom: "calc(100% + 6px)",
+        left: "0",
+        zIndex: "60",
+        minWidth: "280px",
+        maxWidth: "min(440px, 90vw)",
+        maxHeight: "220px",
         overflowY: "auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: "2px",
+        padding: "4px",
+        borderRadius: "10px",
+        backgroundColor: tokens.surface0,
+        border: `1px solid ${tokens.border}`,
+        boxShadow: tokens.shadowLg,
       });
 
-      for (const child of children) {
+      for (const itemNode of drawerItems) {
         const itemBtn = document.createElement("button");
         itemBtn.type = "button";
         itemBtn.setAttribute(
           "data-testid",
-          `paseo-finder-lineage-child-row-${child.shortId}`,
+          `${drawerRowPrefix}-${itemNode.shortId}`,
         );
         Object.assign(itemBtn.style, {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: "8px",
-          padding: "5px 8px",
+          gap: "10px",
+          padding: "6px 8px",
           borderRadius: "6px",
-          border: `1px solid ${tokens.border}`,
-          backgroundColor: tokens.surface0,
+          border: "none",
+          backgroundColor: "transparent",
           color: tokens.foreground,
-          fontSize: "11px",
+          fontSize: "12px",
           textAlign: "left",
           cursor: "pointer",
+        });
+        itemBtn.addEventListener("pointerenter", () => {
+          itemBtn.style.backgroundColor = tokens.surface2;
+        });
+        itemBtn.addEventListener("pointerleave", () => {
+          itemBtn.style.backgroundColor = "transparent";
         });
 
         const itemLeft = document.createElement("div");
         Object.assign(itemLeft.style, {
           display: "flex",
           alignItems: "center",
-          gap: "6px",
+          gap: "7px",
           minWidth: "0",
           flex: "1",
         });
 
-        const dot = document.createElement("span");
-        Object.assign(dot.style, {
-          width: "6px",
-          height: "6px",
-          borderRadius: "999px",
-          backgroundColor: statusDotColor(child.status, tokens),
-          flexShrink: "0",
-        });
-
         const titleSpan = document.createElement("span");
-        titleSpan.textContent = displayLabelFor(child);
+        titleSpan.textContent = displayLabelFor(itemNode);
         Object.assign(titleSpan.style, {
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -1817,14 +2426,14 @@ export function installDesktopSessionLineageEnhancer(
           fontWeight: "500",
         });
 
-        itemLeft.appendChild(dot);
+        itemLeft.appendChild(createDot(itemNode.status));
         itemLeft.appendChild(titleSpan);
 
         const metaSpan = document.createElement("span");
-        metaSpan.textContent = `#${child.shortId} ↗`;
+        metaSpan.textContent = `#${itemNode.shortId} · ${formatNodeStatusWord(itemNode.status, zh)} ↗`;
         Object.assign(metaSpan.style, {
           color: tokens.foregroundMuted,
-          fontSize: "10.5px",
+          fontSize: "11px",
           flexShrink: "0",
         });
 
@@ -1833,7 +2442,8 @@ export function installDesktopSessionLineageEnhancer(
         itemBtn.addEventListener("click", (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
-          navigateToLineageNode(child, document, window);
+          activePopoverSection = null;
+          navigateToLineageNode(itemNode, document, window);
         });
 
         listGrid.appendChild(itemBtn);
@@ -1855,7 +2465,7 @@ export function installDesktopSessionLineageEnhancer(
     const routeChanged = routeKey !== lastRouteKey;
     if (routeChanged) {
       lastRouteKey = routeKey;
-      childrenPopoverOpen = false;
+      activePopoverSection = null;
     }
 
     const cached = cacheByKey.get(routeKey)?.data ?? null;
