@@ -19,9 +19,11 @@
  * - When a list's children change, the `order` rules name stale slots, so the observer re-renders
  *   synchronously (before paint) instead of waiting for the throttle.
  * - Rows are dnd-kit sortables, which compute the drop index from the items array, not from
- *   where CSS drew them. A press that moves 2 px in a list (dnd-kit starts at 6 px; touch: after
- *   120 ms, it starts at 180 ms) suspends that list's rules until the pointer is released, so a
- *   drag always runs on Paseo's own order.
+ *   where CSS drew them. dnd-kit starts a mouse drag once the press has moved more than
+ *   DRAG_START_PX (Paseo 0.15.3 `getDragActivationConstraints`; touch: a 180 ms hold). At that
+ *   distance (touch: after 120 ms) this list's rules are suspended until release. The
+ *   capture-phase `pointermove` runs before dnd-kit's `mousemove` for the same input, so dnd-kit
+ *   measures Paseo's own order. A click with a few px of trackpad jitter stays nested.
  *
  * Upstream test ids used (`components/sidebar-workspace-list.tsx`, Paseo 0.15.3):
  *   row        `sidebar-workspace-row-<serverId>:<workspaceId>`
@@ -98,6 +100,8 @@ const LIST_SELECTOR =
 const TAB_ROWS_VISIBLE = 5;
 /** Store updates stream several times a second while agents work; render at most this often. */
 const RENDER_THROTTLE_MS = 300;
+/** dnd-kit's mouse activation distance in Paseo's sidebar (`movementDistance: 6`, strict `>`). */
+const DRAG_START_PX = 6;
 /** Horizontal step per nesting level, and the connector's x inside a list item. */
 const INDENT_PX = 22;
 const CONNECTOR_X_PX = 16;
@@ -731,7 +735,7 @@ export function installSidebarChildSessions(docOverride?: Document | null): Hand
   };
   const onPointerMove = (ev: PointerEvent) => {
     if (!press || suspendedList) return;
-    if (Math.abs(ev.clientX - press.x) + Math.abs(ev.clientY - press.y) >= 2) suspend(press.listId);
+    if (Math.hypot(ev.clientX - press.x, ev.clientY - press.y) >= DRAG_START_PX) suspend(press.listId);
   };
   const onPointerEnd = () => {
     if (press?.touchTimer) win.clearTimeout(press.touchTimer);

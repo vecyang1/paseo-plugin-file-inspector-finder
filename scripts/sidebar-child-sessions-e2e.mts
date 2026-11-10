@@ -142,8 +142,9 @@ async function run(page: Page, shots: string[]): Promise<void> {
     check("turned back on: nested again", on.indent > 0 && on.gap >= 0 && on.gap <= 4, JSON.stringify(on));
   }
 
-  // Drag safety: a press that moves 3 px (dnd-kit starts a drag at 6 px) suspends this list's
-  // order rules; release restores them. Read Paseo's own row order before and after: unchanged.
+  // Drag safety. dnd-kit starts a mouse drag past 6 px. A click with 3 px of jitter must stay
+  // nested; at exactly 6 px (not yet a drag) this list's order rules must be off. Release restores
+  // them, and Paseo's own row order must read back unchanged.
   const pressTarget = status.nested.find((n: any) => n.onScreen);
   if (pressTarget) {
     const rowSel = `[data-testid^="sidebar-workspace-row-"][data-testid$=":${pressTarget.parentWorkspaceId}"]`;
@@ -161,12 +162,18 @@ async function run(page: Page, shots: string[]): Promise<void> {
     await sleep(300);
     const before = await readList();
     const box = await (await page.$(rowSel)).boundingBox();
-    await page.mouse.move(box.x + 60, box.y + box.height / 2);
+    const x = box.x + 60;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
     await page.mouse.down();
-    await page.mouse.move(box.x + 60, box.y + box.height / 2 + 3, { steps: 3 });
+    await page.mouse.move(x, y + 3, { steps: 3 });
     await sleep(120);
-    const during = await readList();
-    check("press + 3 px in the list suspends its order rules (before dnd-kit's 6 px)", Boolean(during.suspended) && during.indent === 0, JSON.stringify({ suspended: during.suspended?.slice(0, 40), indent: during.indent }));
+    const jitter = await readList();
+    check("press + 3 px (click jitter) keeps the list nested", !jitter.suspended && jitter.indent > 0, JSON.stringify({ suspended: Boolean(jitter.suspended), indent: jitter.indent }));
+    await page.mouse.move(x, y + 6, { steps: 3 });
+    await sleep(120);
+    const atStart = await readList();
+    check("press + 6 px (dnd-kit's threshold, not yet a drag) suspends the list's order rules", Boolean(atStart.suspended) && atStart.indent === 0, JSON.stringify({ suspended: Boolean(atStart.suspended), indent: atStart.indent }));
     await page.mouse.up();
     await sleep(500);
     const after = await readList();
