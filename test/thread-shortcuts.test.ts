@@ -1348,6 +1348,8 @@ test("Thread Shortcuts 15: toggleActiveWorkspacePin handles hoveredRowEl direct 
     document: fakeDoc,
     innerWidth: 1440,
     innerHeight: 900,
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => true,
     __paseoHostRuntimeStore: {
       controllers: new Map([

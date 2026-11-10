@@ -167,6 +167,7 @@ export interface MinimalWindow {
       getPathForFile?(file: unknown): string;
     };
   };
+  __paseoHostRuntimeStore?: unknown;
   innerWidth?: number;
   innerHeight?: number;
   getComputedStyle?(el: MinimalElement): {
