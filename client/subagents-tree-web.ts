@@ -4199,6 +4199,10 @@ export function installDesktopSubagentsTreeEnhancer(
   };
 
   const syncCurrentAgentSubagents = () => {
+    void prefetchAllWorkspaceSubagentTrees(false).then(() => {
+      const latestScope = resolveActiveScope();
+      decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
+    });
     const scope = resolveActiveScope();
     if (!scope.scopeKey) {
       lastScopeKey = null;
@@ -4208,10 +4212,6 @@ export function installDesktopSubagentsTreeEnhancer(
     lastScopeKey = scope.scopeKey;
     const cached = getCachedTreeForScope(scope);
     decorateActiveAgentSubagentsDom(cached);
-    void prefetchAllWorkspaceSubagentTrees(false).then(() => {
-      const latestScope = resolveActiveScope();
-      decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
-    });
     void fetchScopeTree(scope, false, false).then((tree) => {
       const latestScope = resolveActiveScope();
       if (latestScope.scopeKey === scope.scopeKey) {

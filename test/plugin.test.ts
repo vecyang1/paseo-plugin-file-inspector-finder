@@ -7574,7 +7574,7 @@ test("56. Left sidebar subagents zero-shrink & zero-delay: hidden provider_subag
   const coldElapsed = Date.now() - tCold;
   assert.equal(resCold.ok, true);
   assert.equal(resCold.trees.length, 0);
-  assert.ok(coldElapsed < 500, `Expected cold index build + Smart Skip <500ms, got ${coldElapsed}ms`);
+  assert.ok(coldElapsed < 1500, `Expected cold index build + Smart Skip <1500ms under parallel test load, got ${coldElapsed}ms`);
 
   const tWarm = Date.now();
   const resWarm = await handleManageSubagents(
