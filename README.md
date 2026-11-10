@@ -6,7 +6,7 @@ An official-SDK [Paseo](https://github.com/getpaseo/paseo) plugin (`@getpaseo/pl
 - **Native Single-Language i18n (`defineTranslations` / `useTranslation`)**: Automatically follows Paseo's active UI language (`en` or `zh` / `zh-CN`) in a single clean language without mixed bilingual labels or emoji clutter.
 - **Update-Safe**: Runs in `~/.paseo/plugins/` and survives every `Paseo.app` upgrade.
 
-Addresses community requests in [Discussion #4636](https://github.com/getpaseo/paseo/discussions/4636), [getpaseo/paseo#6482](https://github.com/getpaseo/paseo/issues/6482), [getpaseo/paseo#6691](https://github.com/getpaseo/paseo/issues/6691), and [Discussion #6123](https://github.com/getpaseo/paseo/discussions/6123).
+Addresses community requests in [Discussion #4636](https://github.com/getpaseo/paseo/discussions/4636), [getpaseo/paseo#6482](https://github.com/getpaseo/paseo/issues/6482), [getpaseo/paseo#6691](https://github.com/getpaseo/paseo/issues/6691), and [Discussion #6123](https://github.com/getpaseo/paseo/discussions/6123). See [UPSTREAM.md](UPSTREAM.md) for the full live ledger of contributions and PRs sent to upstream `getpaseo/paseo`.
 
 ---
 
