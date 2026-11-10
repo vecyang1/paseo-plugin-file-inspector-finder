@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import {
   cleanPromptTextPure,
@@ -56,13 +59,34 @@ test("System Prompt 3: cleanPromptTextPure handles slash directive hoisting and 
 });
 
 test("System Prompt 4: handleInspectSystemPrompt loads config.json and calculates metadata", async () => {
-  const res = await handleInspectSystemPrompt({ action: "inspect" });
-  assert.equal(res.ok, true);
-  assert.ok(typeof res.configPath === "string");
-  assert.ok(res.charCount > 0);
-  assert.ok(res.estimatedTokens > 0);
-  assert.ok(Array.isArray(res.sections));
-  assert.ok(res.sections.length > 0);
+  const configPath = path.join(os.homedir(), ".paseo", "config.json");
+  const hadConfig = fs.existsSync(configPath);
+  if (!hadConfig) {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        daemon: {
+          appendSystemPrompt: "## Instructions\nRole instructions for testing.",
+        },
+      }),
+    );
+  }
+  try {
+    const res = await handleInspectSystemPrompt({ action: "inspect" });
+    assert.equal(res.ok, true);
+    assert.ok(typeof res.configPath === "string");
+    assert.ok(res.charCount > 0);
+    assert.ok(res.estimatedTokens > 0);
+    assert.ok(Array.isArray(res.sections));
+    assert.ok(res.sections.length > 0);
+  } finally {
+    if (!hadConfig) {
+      try {
+        fs.unlinkSync(configPath);
+      } catch {}
+    }
+  }
 });
 
 test("System Prompt 5: handleInspectSystemPrompt action=test_clean runs sanitization dry-run", async () => {
