@@ -1340,4 +1340,59 @@ test("Thread Shortcuts 15: toggleActiveWorkspacePin handles hoveredRowEl direct 
   assert.equal(rowResult.ok, true);
   assert.equal(rowResult.source, "hovered-row");
   assert.equal(clickedRowPin, true);
+
+  // Test Paseo runtime client delegation
+  let clientPinnedArg: boolean | null = null;
+  let clientTargetId: string | null = null;
+  const mockWin: MinimalWindow = {
+    document: fakeDoc,
+    innerWidth: 1440,
+    innerHeight: 900,
+    dispatchEvent: () => true,
+    __paseoHostRuntimeStore: {
+      controllers: new Map([
+        [
+          "srv_primary",
+          {
+            activeClient: {
+              setWorkspacePinned: async (id: string, pinned: boolean) => {
+                clientTargetId = id;
+                clientPinnedArg = pinned;
+                return { pinnedAt: pinned ? Date.now() : null };
+              },
+            },
+          },
+        ],
+      ]),
+    },
+  };
+
+  const runtimeResult = toggleActiveWorkspacePin({
+    doc: fakeDoc,
+    win: mockWin,
+    targetWorkspaceId: "wks_beta",
+  });
+  assert.equal(runtimeResult.ok, true);
+  assert.equal(runtimeResult.source, "runtime-client");
+  assert.equal(clientTargetId, "wks_beta");
+  assert.equal(clientPinnedArg, true);
+
+  // Test callback / RPC delegation
+  let callbackTargetId: string | null = null;
+  let callbackPinnedArg: boolean | null = null;
+  const rpcResult = toggleActiveWorkspacePin({
+    doc: fakeDoc,
+    targetWorkspaceId: "wks_gamma",
+    callbacks: {
+      onToggleWorkspacePin: async (wsId?: string, pinned?: boolean) => {
+        callbackTargetId = wsId ?? null;
+        callbackPinnedArg = pinned ?? null;
+        return { ok: true, workspaceId: wsId, pinned, message: "pinned" };
+      },
+    },
+  });
+  assert.equal(rpcResult.ok, true);
+  assert.equal(rpcResult.source, "rpc");
+  assert.equal(callbackTargetId, "wks_gamma");
+  assert.equal(callbackPinnedArg, true);
 });
