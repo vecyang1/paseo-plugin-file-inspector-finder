@@ -116,6 +116,7 @@ import {
   mountInlineTitleInput,
   openQuickWorkspaceSwitcherModal,
   resolveCurrentActiveWorkspaceId,
+  resolveSidebarArchiveTarget,
   revealWorkspaceInSidebar,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
@@ -152,6 +153,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [folderTestInput, setFolderTestInput] = useState(".");
   const [renameDiagInput, setRenameDiagInput] = useState("");
   const [markDoneTestResult, setMarkDoneTestResult] = useState<string | null>(null);
+  const [deleteArchiveTestResult, setDeleteArchiveTestResult] = useState<string | null>(null);
   const [labelsBarTestResult, setLabelsBarTestResult] = useState<string | null>(null);
   const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
   const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
@@ -274,6 +276,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         enableCmdClickOpenSystemDefault: settings.values.enableCmdClickOpenSystemDefault,
         cmdClickDefaultTarget: settings.values.cmdClickDefaultTarget,
         enableSidebarCmdClickFinder: settings.values.enableSidebarCmdClickFinder,
+        enableSidebarDeleteKeyArchive: settings.values.enableSidebarDeleteKeyArchive,
       });
       syncQuickJumpPreferences({
         enableWorkspaceQuickJump: settings.values.enableWorkspaceQuickJump,
@@ -929,6 +932,55 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                     ? "未能找到当前活跃会话（请先在左侧选择或打开一个工作区）"
                     : "No active workspace located (select or open a workspace first)",
                 );
+              }
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.sidebarDeleteKeyArchiveLabel")}
+            hint={t("settings.sidebarDeleteKeyArchiveHint")}
+            value={values.enableSidebarDeleteKeyArchive ?? true}
+            onValueChange={(next) => {
+              syncInlineRenamePreferences({
+                enableInlineDoubleClickRename: values.enableInlineDoubleClickRename,
+                autoJumpToFirstPlaceInput: values.autoJumpToFirstPlaceInput,
+                inlineRenameCaretPosition: values.inlineRenameCaretPosition,
+                enableQuickRenameAndLabelShortcuts:
+                  values.enableQuickRenameAndLabelShortcuts,
+                enableMarkDoneShortcut: values.enableMarkDoneShortcut,
+                markDonePrefix: values.markDonePrefix ?? "d ",
+                enableDesktopContextMenuHelper: values.enableDesktopContextMenuHelper,
+                enableCmdClickOpenSystemDefault: values.enableCmdClickOpenSystemDefault,
+                cmdClickDefaultTarget: values.cmdClickDefaultTarget,
+                enableSidebarCmdClickFinder: values.enableSidebarCmdClickFinder,
+                enableSidebarDeleteKeyArchive: next,
+              });
+              void save({ ...values, enableSidebarDeleteKeyArchive: next }, revision);
+            }}
+          />
+
+          <SettingsAction
+            label={t("settings.testSidebarDeleteKeyArchiveLabel")}
+            hint={
+              deleteArchiveTestResult
+                ? deleteArchiveTestResult
+                : isZh
+                  ? "点击测试侧边栏 Delete 归档目标解析（优先定位右键上下文菜单项、选中会话行或当前会话，并验证输入框避让）"
+                  : "Click to test sidebar Delete key archive target resolution (checks open context menus, selected session row, or active workspace with input protection)"
+            }
+            actionLabel={isZh ? "测试目标" : "Test Target"}
+            onPress={() => {
+              const target = resolveSidebarArchiveTarget();
+              if (target) {
+                const desc = `Target: [${target.source}] wsId=${target.workspaceId ?? "none"} (menu=${Boolean(target.menuItem)})`;
+                setDeleteArchiveTestResult(desc);
+                toast.show(desc);
+              } else {
+                const desc = isZh
+                  ? "未检测到可归档的侧边栏会话或菜单（请先在左侧边栏点击会话或展开右键菜单）"
+                  : "No archive target located (click a sidebar session or open its menu first)";
+                setDeleteArchiveTestResult(desc);
+                toast.show(desc);
               }
             }}
           />
@@ -3275,6 +3327,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           <SettingsRow
             label={t("settings.contractCommandsLabel")}
             hint={t("settings.contractCommandsHint")}
+          />
+          <SettingsRow
+            label={t("settings.contractSidebarDeleteArchiveLabel")}
+            hint={t("settings.contractSidebarDeleteArchiveHint")}
           />
         </SettingsCard>
       </SettingsSection>

@@ -93,6 +93,7 @@ export const enMessages = {
     quickJumpBtnThread: "Thread",
     sessionMarkedDone: "Marked session as done",
     sessionUnmarkedDone: "Unmarked session completed status",
+    sessionArchivedToast: "Session archived",
   },
   imagePanel: {
     revealMissingDir: "Reveal parent folder in Finder",
@@ -208,6 +209,10 @@ export const enMessages = {
     markDoneShortcutHint:
       "Press Option+D or Option+Shift+D to automatically toggle the 'd ' prefix on the current session and scroll the left sidebar to its row",
     testMarkDoneLabel: "Test toggle 'd ' prefix on current session",
+    sidebarDeleteKeyArchiveLabel: "Delete key archives clicked sidebar session",
+    sidebarDeleteKeyArchiveHint:
+      "Press Delete or Backspace once when clicking a sidebar session or opening its menu to archive it",
+    testSidebarDeleteKeyArchiveLabel: "Test sidebar Delete key archive target resolution",
     sidebarDropLabel: "Drag & drop folder onto sidebar as workspace",
     sidebarDropHint:
       "Drop any folder from Finder onto the left Workspaces sidebar to switch if existing or create if new (Option+Drop forces new)",
@@ -352,6 +357,10 @@ export const enMessages = {
     contractCommandsLabel: "Header Popover, Command Center (Cmd+K) & /reveal /rename /label",
     contractCommandsHint:
       "Click the top-right folder icon, search in Cmd+K, or run /reveal, /rename <title>, or /label <name> [color] in chat",
+    contractSidebarDeleteArchiveLabel:
+      "Sidebar Delete Key Archive (Click Side Session -> Delete to Archive)",
+    contractSidebarDeleteArchiveHint:
+      "Click any sidebar session or open its menu and press Delete once to archive it immediately (same as Shift+Cmd+Backspace), with full input safety",
   },
 } as const;
 
@@ -449,6 +458,7 @@ export const zhMessages: PluginMessageCatalog = {
     quickJumpBtnThread: "最近会话",
     sessionMarkedDone: "已标记会话为完成",
     sessionUnmarkedDone: "已取消会话完成标记",
+    sessionArchivedToast: "会话已归档",
   },
   imagePanel: {
     revealMissingDir: "在 Finder 中打开上级文件夹",
@@ -561,6 +571,10 @@ export const zhMessages: PluginMessageCatalog = {
     markDoneShortcutHint:
       "按 Option+D 或 Option+Shift+D 自动为当前会话名称切换「d 」前缀，并在左侧边栏高亮闪烁定位该会话",
     testMarkDoneLabel: "测试当前会话切换「d 」标记",
+    sidebarDeleteKeyArchiveLabel: "侧边栏会话按 Delete 键归档",
+    sidebarDeleteKeyArchiveHint:
+      "在左侧边栏点击会话或打开其上下文菜单时，按一次 Delete 键直接归档会话（效果同 Shift+Cmd+Backspace）",
+    testSidebarDeleteKeyArchiveLabel: "测试侧边栏 Delete 键归档目标解析",
     sidebarDropLabel: "支持拖拽文件夹到左侧边栏创建或切换工作区",
     sidebarDropHint:
       "从 Finder 拖拽文件夹到左侧工作区栏：已存在则直接切换，不存在则自动新建（按住 Option 强制新建）",
@@ -700,6 +714,9 @@ export const zhMessages: PluginMessageCatalog = {
     contractCommandsLabel: "右上角面板、命令中心 (Cmd+K) 与 /reveal /rename /label",
     contractCommandsHint:
       "点击工作区右上角文件夹图标、在 Cmd+K 中搜索，或在聊天框输入 /reveal、/rename <新名称> 或 /label <标签> [颜色]",
+    contractSidebarDeleteArchiveLabel: "侧边栏 Delete 键极速归档（点击侧边会话按一次 Delete 归档）",
+    contractSidebarDeleteArchiveHint:
+      "在左侧边栏点击任意会话或展开菜单后按一次 Delete 键直接归档（同 Shift+Cmd+Backspace），输入框自动避让防误触",
   },
 };
 

@@ -137,6 +137,7 @@ export const pluginSettings = defineSettings({
     labelShortcutCombo: LabelShortcutComboSchema.default("both"),
     enableMarkDoneShortcut: z.boolean().default(true),
     markDonePrefix: z.string().default("d "),
+    enableSidebarDeleteKeyArchive: z.boolean().default(true),
     enableSmartClipboardCopy: z.boolean().default(true),
     defaultClipboardCopyMode: SmartCopyModeSchema.default("smart"),
     smartCopyBulletMarker: SmartCopyBulletMarkerSchema.default("bullet"),
@@ -282,6 +283,21 @@ export const renameWorkspaceOrAgentRpc = defineRpc({
   }),
 });
 
+export const archiveWorkspaceRpc = defineRpc({
+  name: "finder.archive_workspace",
+  input: z.object({
+    workspaceId: z.string(),
+    dryRun: z.boolean().optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    workspaceId: z.string(),
+    archivedAt: z.string().nullable().optional(),
+    message: z.string().optional(),
+    error: z.string().optional(),
+  }),
+});
+
 export const manageWorkspaceLabelsRpc = defineRpc({
   name: "finder.manage_labels",
   input: z.object({
@@ -357,6 +373,11 @@ export const ProjectJumpCandidateSchema = z.object({
   primaryWorkspaceId: z.string().nullable(),
   primaryWorkspaceTitle: z.string().nullable(),
   workspaceIds: z.array(z.string()).optional(),
+  searchTokens: z.array(z.string()).optional(),
+  matchedWorkspaceId: z.string().nullable().optional(),
+  matchedAgentId: z.string().nullable().optional(),
+  matchedAgentShortId: z.string().nullable().optional(),
+  matchedAgentTitle: z.string().nullable().optional(),
   hasRunningAgent: z.boolean(),
   lastActivityIso: z.string().nullable(),
   lastActivityRelative: z.string(),
@@ -390,6 +411,7 @@ export const quickJumpWorkspaceRpc = defineRpc({
     candidates: z.array(ProjectJumpCandidateSchema),
     selectedCandidate: ProjectJumpCandidateSchema.nullable(),
     targetWorkspaceId: z.string().nullable(),
+    targetAgentId: z.string().nullable().optional(),
     targetProjectId: z.string().nullable(),
     targetProjectKey: z.string().nullable(),
     targetProjectName: z.string().nullable(),
@@ -1058,7 +1080,10 @@ export function scoreProjectJumpQuery(
   candidate: Pick<
     ProjectJumpCandidate,
     "projectName" | "projectRootPath" | "shortPath" | "primaryWorkspaceTitle"
-  >,
+  > & {
+    workspaceIds?: string[];
+    searchTokens?: string[];
+  },
   rawQuery?: string | null,
 ): number {
   const trimmed = (rawQuery ?? "").trim().toLowerCase();
@@ -1073,6 +1098,12 @@ export function scoreProjectJumpQuery(
   const baseLower = (pathParts[pathParts.length - 1] ?? "").toLowerCase();
   const shortLower = candidate.shortPath.toLowerCase();
   const titleLower = (candidate.primaryWorkspaceTitle ?? "").toLowerCase();
+  const extraTokens = [
+    ...(candidate.workspaceIds ?? []),
+    ...(candidate.searchTokens ?? []),
+  ]
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 
   const words = `${nameLower} ${baseLower}`.split(/[\s._/-]+/).filter(Boolean);
   const alphaWords = strippedLower
@@ -1081,10 +1112,23 @@ export function scoreProjectJumpQuery(
   const acronym = alphaWords.map((w) => w[0]).join("");
 
   let totalScore = 0;
-  for (const token of tokens) {
+  for (const rawToken of tokens) {
+    const token = rawToken.replace(/^#/, "");
+    if (!token) continue;
     let tokenScore = 0;
     if (nameLower === token || strippedLower === token || baseLower === token) {
       tokenScore = 1000;
+    } else if (
+      token.length >= 4 &&
+      extraTokens.some(
+        (ext) =>
+          ext === token ||
+          ext.replace(/^wks_/, "") === token ||
+          ext.startsWith(token) ||
+          ext.replace(/^wks_/, "").startsWith(token),
+      )
+    ) {
+      tokenScore = 950;
     } else if (strippedLower.startsWith(token) || nameLower.startsWith(token)) {
       tokenScore = 880;
     } else if (words.some((w) => w === token)) {
@@ -1099,6 +1143,8 @@ export function scoreProjectJumpQuery(
       tokenScore = 560;
     } else if (shortLower.includes(token)) {
       tokenScore = 420;
+    } else if (extraTokens.some((ext) => ext.includes(token))) {
+      tokenScore = 360;
     } else if (token.length >= 2 && isSubsequenceMatch(token, strippedLower.replace(/\s+/g, ""))) {
       tokenScore = 300;
     } else if (titleLower.includes(token)) {
@@ -1125,6 +1171,7 @@ export const SessionLineageNodeSchema = z.object({
   status: z.string(),
   provider: z.string(),
   model: z.string(),
+  providerSessionId: z.string().nullable().optional(),
   createdAt: z.string().nullable(),
   updatedAt: z.string().nullable(),
   briefPath: z.string().nullable(),
@@ -1154,6 +1201,8 @@ export const manageSessionLineageRpc = defineRpc({
     parent: SessionLineageNodeSchema.nullable(),
     siblings: z.array(SessionLineageNodeSchema),
     children: z.array(SessionLineageNodeSchema),
+    projectPeers: z.array(SessionLineageNodeSchema).optional(),
+    directory: z.array(SessionLineageNodeSchema).optional(),
     reconcileSummary: z.object({
       untitledFound: z.number(),
       renamedCount: z.number(),

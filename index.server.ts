@@ -14,6 +14,7 @@ import {
   pluginSettings,
   quickJumpWorkspaceRpc,
   renameWorkspaceOrAgentRpc,
+  archiveWorkspaceRpc,
   inspectScheduleRunsRpc,
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
@@ -27,6 +28,7 @@ import {
 } from "./shared/contracts";
 import { handleForkSession } from "./server/fork-session-handlers";
 import {
+  handleArchiveWorkspace,
   handleDiagnosePath,
   handleImportFolderWorkspace,
   handleInspectFile,
@@ -62,6 +64,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(listWorkspaceMediaRpc, handleListWorkspaceMedia);
   server.handle(diagnosePathRpc, handleDiagnosePath);
   server.handle(renameWorkspaceOrAgentRpc, handleRenameThread);
+  server.handle(archiveWorkspaceRpc, handleArchiveWorkspace);
   server.handle(manageWorkspaceLabelsRpc, handleManageWorkspaceLabels);
   server.handle(importFolderWorkspaceRpc, (input, context) =>
     handleImportFolderWorkspace(input, context, {
@@ -658,6 +661,13 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
+  // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
+  // plugin tool reuses a built-in name, which fails every agent create and
+  // resume (2026-11-10). Agents archive through the built-in; the client
+  // Delete key keeps the `finder.archive_workspace` RPC.
+  // test/agent-tool-names.test.ts checks every name below against the
+  // installed Paseo's built-in tool names.
   server.before("agent.session_open", ({ request }) => {
     return {
       ...request,

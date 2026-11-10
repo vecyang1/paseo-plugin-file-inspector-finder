@@ -8,6 +8,7 @@ import {
   type OpenerTarget,
   SUPPORTED_IMAGE_EXTENSIONS,
   type WorkspaceLabelColor,
+  archiveWorkspaceRpc,
   diagnosePathRpc,
   importFolderWorkspaceRpc,
   inspectFileRpc,
@@ -45,6 +46,7 @@ import {
 import {
   type DaemonLabelBridge,
   buildCandidatePaths,
+  handleArchiveWorkspace,
   handleDiagnosePath,
   handleImportFolderWorkspace,
   handleInspectFile,
@@ -107,6 +109,10 @@ import {
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
   annotateNativeWorkspaceMenusWithShortcuts,
+  archiveCurrentSidebarSession,
+  isSidebarDeleteKeyboardEvent,
+  resolveSidebarArchiveTarget,
+  shouldTriggerSidebarDeleteArchive,
   triggerQuickThreadMetadataBar,
 } from "../client/web";
 import {
@@ -1003,6 +1009,8 @@ function createInteractiveDomNode(
   const listeners = new Map<string, Array<(ev: unknown) => void>>();
   const children: MinimalElement[] = [];
 
+  let explicitText = initialText;
+
   const node: MinimalElement & {
     attrs: Map<string, string>;
     listeners: Map<string, Array<(ev: unknown) => void>>;
@@ -1015,7 +1023,16 @@ function createInteractiveDomNode(
     dispatch: (type: string, ev?: Record<string, unknown>) => void;
   } = {
     tagName: tagName.toUpperCase(),
-    textContent: initialText,
+    get textContent() {
+      if (explicitText) return explicitText;
+      if (children.length > 0) {
+        return children.map((c) => c.textContent ?? "").join(" ").trim();
+      }
+      return "";
+    },
+    set textContent(val: string | null | undefined) {
+      explicitText = val ?? "";
+    },
     value: "",
     style: {},
     children,
@@ -1133,15 +1150,29 @@ function createInteractiveDomNode(
       node.dispatch("blur", { target: node });
     },
     dispatch: (type, extra = {}) => {
+      let stopped = false;
       const ev = {
         type,
         target: node,
         preventDefault: () => {},
-        stopPropagation: () => {},
+        stopPropagation: () => {
+          stopped = true;
+        },
         ...extra,
       };
       for (const fn of listeners.get(type) ?? []) {
         fn(ev);
+      }
+      if (!stopped) {
+        let parent = node.parentElement;
+        while (parent && !stopped) {
+          const parentAny = parent as unknown as { listeners?: Map<string, Array<(e: unknown) => void>> };
+          for (const fn of parentAny.listeners?.get(type) ?? []) {
+            fn(ev);
+            if (stopped) break;
+          }
+          parent = parent.parentElement;
+        }
       }
     },
   };
@@ -4163,7 +4194,7 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
     removeEventListener: () => {},
     createElement: (tag: string) => createInteractiveDomNode(tag),
     querySelector: (sel: string) => (querySelectorHook ? querySelectorHook(sel) : null),
-    querySelectorAll: () => [],
+    querySelectorAll: (sel: string) => (body.querySelectorAll ? body.querySelectorAll(sel) : []),
   } as unknown as Parameters<typeof installDesktopRevealHelpers>[1];
 
   const testWin = {
@@ -4174,7 +4205,13 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
       if (!winListeners.has(t)) winListeners.set(t, []);
       winListeners.get(t)!.push(fn);
     },
-    removeEventListener: () => {},
+    removeEventListener: (t: string, fn: (ev: unknown) => void) => {
+      const arr = winListeners.get(t);
+      if (arr) {
+        const idx = arr.indexOf(fn);
+        if (idx !== -1) arr.splice(idx, 1);
+      }
+    },
     requestAnimationFrame: (cb: () => void) => {
       cb();
       return 1;
@@ -4184,7 +4221,14 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
 
   let fetchMetadataCalled = false;
   let deletedLabelName: string | null = null;
+  let deleteCallCount = 0;
   let toggleLabelCalled = false;
+  let catalogState: Array<{ name: string; color: WorkspaceLabelColor }> = [
+    { name: "feat", color: "pink" },
+    { name: "bug", color: "red" },
+  ];
+  let assignedState = ["feat"];
+
   const cleanup = installDesktopRevealHelpers(
     {
       isEnabled: () => true,
@@ -4195,8 +4239,8 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
         return {
           workspaceId: "wks_meta",
           workspaceTitle: "Meta Workspace",
-          assignedLabels: ["feat"],
-          catalog: [{ name: "feat", color: "pink" }],
+          assignedLabels: [...assignedState],
+          catalog: [...catalogState],
         };
       },
       onToggleLabel: async () => {
@@ -4204,12 +4248,17 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
         return null;
       },
       onDeleteLabel: async (labelName) => {
+        deleteCallCount += 1;
         deletedLabelName = labelName;
+        // Simulate small delay to test in-flight suppression
+        await new Promise((r) => setTimeout(r, 10));
+        catalogState = catalogState.filter((c) => c.name !== labelName);
+        assignedState = assignedState.filter((l) => l !== labelName);
         return {
           workspaceId: "wks_meta",
           workspaceTitle: "Meta Workspace",
-          assignedLabels: [],
-          catalog: [],
+          assignedLabels: [...assignedState],
+          catalog: [...catalogState],
         };
       },
     },
@@ -4219,24 +4268,8 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
 
   const keyListeners = winListeners.get("keydown") ?? [];
 
-  // A) Cmd+L on editable input is NOT hijacked (typing in composer/textboxes preserved)
+  // A) Cmd+L in general chat view or on body with combo === "both" triggers labels bar universally!
   let prevented = false;
-  keyListeners[0]?.({
-    key: "l",
-    metaKey: true,
-    ctrlKey: false,
-    shiftKey: false,
-    altKey: false,
-    target: textInput,
-    preventDefault: () => {
-      prevented = true;
-    },
-    stopPropagation: () => {},
-  });
-  assert.equal(prevented, false, "Cmd+L on text input should NOT preventDefault");
-  assert.equal(fetchMetadataCalled, false, "Should NOT trigger metadata bar while typing");
-
-  // B) Cmd+L in general chat view with combo === "both": passes through to Paseo native composer focus!
   fetchMetadataCalled = false;
   prevented = false;
   keyListeners[0]?.({
@@ -4251,8 +4284,35 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
     },
     stopPropagation: () => {},
   });
-  assert.equal(prevented, false, "Cmd+L on body in chat view should pass through to native composer focus");
-  assert.equal(fetchMetadataCalled, false, "Should NOT hijack Cmd+L outside workspace context");
+  assert.equal(prevented, true, "Cmd+L on body opens labels bar universally");
+  assert.equal(fetchMetadataCalled, true, "Metadata fetched to mount labels bar");
+
+  // B) Cmd+L on editable input blurs input and triggers labels bar
+  fetchMetadataCalled = false;
+  prevented = false;
+  let inputBlurred = false;
+  const mockTextInput = {
+    ...textInput,
+    tagName: "TEXTAREA",
+    blur: () => {
+      inputBlurred = true;
+    },
+  };
+  keyListeners[0]?.({
+    key: "l",
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: mockTextInput,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, true, "Cmd+L inside input blurs and opens labels bar");
+  assert.equal(inputBlurred, true, "Input is blurred");
+  assert.equal(fetchMetadataCalled, true, "Labels bar opened");
 
   // C) Cmd+L when targeting sidebar workspace row opens labels bar
   fetchMetadataCalled = false;
@@ -4353,17 +4413,558 @@ test("45. Workspace Labels shortcut (Cmd+L / Cmd+Shift+L) & native menu shortcut
   assert.ok(delBtn, "Small delete button 'x' should be rendered on tag chip");
   assert.equal(delBtn.textContent, "×");
 
+  // Rapid double-click while in-flight
   delBtn.dispatch("click");
-  await new Promise((r) => setTimeout(r, 20));
+  delBtn.dispatch("click");
+  await new Promise((r) => setTimeout(r, 40));
 
   assert.equal(deletedLabelName, "feat", "onDeleteLabel should be called with tag name");
+  assert.equal(deleteCallCount, 1, "In-flight suppression prevents double-deletion call");
   assert.equal(toggleLabelCalled, false, "Clicking delete button should stop propagation and NOT toggle tag");
 
-  const delBtnAfter = quickBar.querySelector?.('[data-testid="delete-tag-feat"]');
-  assert.equal(delBtnAfter, null, "Deleted tag should be removed from chips row");
+  const delBtnFeatAfter = quickBar.querySelector?.('[data-testid="delete-tag-feat"]');
+  assert.equal(delBtnFeatAfter, null, "Deleted tag 'feat' should be removed from chips row");
+
+  // 'bug' tag is still present
+  const delBtnBug = quickBar.querySelector?.(
+    '[data-testid="delete-tag-bug"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(delBtnBug, "'bug' tag should remain in chips row");
+
+  // Delete 'bug' via keyboard Enter
+  delBtnBug.dispatch("keydown", { key: "Enter" });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(deletedLabelName, "bug");
+  assert.equal(deleteCallCount, 2);
+
+  // Now all tags are deleted, empty catalog hint is rendered
+  const noLabelsHint = quickBar.querySelector?.('[data-testid="no-labels-hint"]');
+  assert.ok(noLabelsHint, "Empty catalog hint element should be present");
+  assert.ok(
+    (quickBar.textContent ?? "").includes("No labels in catalog yet"),
+    "Empty catalog hint text should be rendered when all labels are deleted",
+  );
+
+  // Close button 'x' and backdrop exist
+  const closeBtn = quickBar.querySelector?.(
+    '[data-testid="paseo-finder-quick-thread-bar-close"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(closeBtn, "Close button 'x' should exist in quick bar header");
+  assert.equal(closeBtn.textContent, "×");
+
+  let backdrop = body.querySelector?.(
+    '[data-testid="paseo-finder-quick-thread-bar-backdrop"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(backdrop, "Backdrop element should exist to intercept outside clicks");
+
+  // Clicking close button dismisses quick bar and backdrop
+  closeBtn.dispatch("click");
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'),
+    null,
+    "Quick bar should be dismissed after clicking close button",
+  );
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar-backdrop"]'),
+    null,
+    "Backdrop should be dismissed after clicking close button",
+  );
+
+  // Re-open and test clicking backdrop dismisses quick bar
+  await triggerQuickThreadMetadataBar("labels");
+  assert.ok(body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'));
+  backdrop = body.querySelector?.(
+    '[data-testid="paseo-finder-quick-thread-bar-backdrop"]',
+  ) as ReturnType<typeof createInteractiveDomNode> | null;
+  assert.ok(backdrop, "Backdrop re-created on bar re-open");
+  backdrop.dispatch("pointerdown");
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'),
+    null,
+    "Quick bar should be dismissed after clicking outside backdrop",
+  );
+
+  // Re-open and test Escape key dismisses quick bar
+  await triggerQuickThreadMetadataBar("labels");
+  assert.ok(body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'));
+  winListeners.get("keydown")?.forEach((fn) => {
+    fn({
+      key: "Escape",
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+  });
+  assert.equal(
+    body.querySelector?.('[data-testid="paseo-finder-quick-thread-bar"]'),
+    null,
+    "Quick bar should be dismissed on Escape key",
+  );
 
   cleanup();
 });
+
+test("46. Session Search & Inline Mention Redirectability (⌘K shortId search, inline <code>fa22464</code> pill, Return Breadcrumb, and scoreProjectJumpQuery searchTokens)", async () => {
+  const {
+    ingestSessionLineageResponse,
+    resolveSessionReference,
+    recordSessionJump,
+    getReturnBreadcrumbForSession,
+    clearReturnBreadcrumbForSession,
+    patchCommandCenterSearch,
+    enhanceTimelineAgentMentions,
+  } = await import("../client/session-lineage-web");
+
+  // 1) Ingest directory with peer session fa224642-a55e-48ae-aece-c02e27cf916e
+  const peerNode = {
+    agentId: "fa224642-a55e-48ae-aece-c02e27cf916e",
+    shortId: "fa22464",
+    agentTitle: "how about let comand + l as label shortcut?",
+    workspaceId: "wks_2g4z",
+    workspaceTitle: "how about let comand + l as label shortcut?",
+    projectId: "proj_meta",
+    projectName: "2026-11-08 Meta harness",
+    status: "idle",
+    provider: "antigravity",
+    model: "gemini-3.1-pro-high",
+    providerSessionId: "16e692cc-2146-4335-bd89-98044e6e8641",
+    createdAt: "2026-11-09T16:00:00Z",
+    updatedAt: "2026-11-09T16:40:00Z",
+    briefPath: null,
+    reportPath: null,
+    reportExists: false,
+    notionUrl: null,
+    notionTaskId: null,
+  };
+
+  const currentNode = {
+    ...peerNode,
+    agentId: "73fc0986-38cf-4265-a23d-111122223333",
+    shortId: "73fc098",
+    agentTitle: "d Add search for settings in Paseo",
+    workspaceId: "wks_p098",
+    workspaceTitle: "d Add search for settings in Paseo",
+    providerSessionId: "457507d8-394c-4ffe-938d-107732660f53",
+  };
+
+  const mockLineageRes = {
+    ok: true,
+    action: "inspect" as const,
+    workspaceId: "wks_p098",
+    workspaceTitle: "d Add search for settings in Paseo",
+    current: currentNode,
+    parent: null,
+    siblings: [],
+    children: [],
+    projectPeers: [peerNode],
+    directory: [currentNode, peerNode],
+    reconcileSummary: {
+      untitledFound: 0,
+      renamedCount: 0,
+      unlinkedFound: 0,
+      linkedCount: 0,
+      renamedWorkspaces: [],
+    },
+    message: "ok",
+    durationMs: 2,
+  };
+
+  ingestSessionLineageResponse(mockLineageRes);
+
+  // 2) resolveSessionReference resolves 7-char shortId, #shortId, full UUID, workspaceId, conversation://, and rejects git commit SHAs
+  assert.equal(resolveSessionReference("fa22464")?.agentId, peerNode.agentId);
+  assert.equal(resolveSessionReference("#fa22464")?.agentId, peerNode.agentId);
+  assert.equal(resolveSessionReference(peerNode.agentId)?.shortId, "fa22464");
+  assert.equal(resolveSessionReference("wks_2g4z")?.agentId, peerNode.agentId);
+  assert.equal(
+    resolveSessionReference("conversation://16e692cc-2146-4335-bd89-98044e6e8641")?.agentId,
+    peerNode.agentId,
+  );
+  assert.equal(
+    resolveSessionReference("c27b203"),
+    null,
+    "Unrelated git commit SHA c27b203 must NOT match any session",
+  );
+
+  // 3) Return Breadcrumb stack records & clears session jumps
+  const mockWin = { sessionStorage: new Map<string, string>() } as unknown as Window;
+  recordSessionJump(currentNode, { agentId: peerNode.agentId, workspaceId: peerNode.workspaceId }, mockWin);
+  const crumb = getReturnBreadcrumbForSession(peerNode.workspaceId, peerNode.agentId, mockWin);
+  assert.ok(crumb, "Return breadcrumb should be found for target session");
+  assert.equal(crumb?.agentId, currentNode.agentId);
+  clearReturnBreadcrumbForSession(peerNode.workspaceId, peerNode.agentId, mockWin);
+  assert.equal(
+    getReturnBreadcrumbForSession(peerNode.workspaceId, peerNode.agentId, mockWin),
+    null,
+  );
+
+  // 4) patchCommandCenterSearch patches filterAndRankBuiltInResults & filterAndRankWorkspaces so searching 'fa22464' matches
+  const mockMetroExports = {
+    filterAndRankBuiltInResults(
+      items: any[],
+      query: string,
+      getFields: (item: any) => { visible: string[]; hidden?: string[] },
+    ) {
+      const q = query.trim().toLowerCase();
+      return items.filter((it) => {
+        const f = getFields(it);
+        const hay = [...(f.visible ?? []), ...(f.hidden ?? [])].join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+    },
+    filterAndRankWorkspaces(workspaces: any[], query: string) {
+      const q = query.trim().toLowerCase();
+      return workspaces.filter((ws) =>
+        `${ws.title ?? ""} ${ws.subtitle ?? ""}`.toLowerCase().includes(q),
+      );
+    },
+  };
+  const winWithMetro = {
+    __c: new Map([[4355, { isInitialized: true, publicModule: { exports: mockMetroExports } }]]),
+  } as unknown as Window;
+
+  const patched = patchCommandCenterSearch(winWithMetro);
+  assert.equal(patched, true);
+
+  const agentRows = [
+    {
+      id: `agent:local:${peerNode.agentId}`,
+      kind: "agent",
+      title: peerNode.agentTitle,
+      subtitle: "Antigravity \u00b7 Meta harness",
+      agent: {
+        id: peerNode.agentId,
+        workspaceId: peerNode.workspaceId,
+        cwd: "/workspace/meta-harness",
+      },
+    },
+  ];
+  const matchedAgents = mockMetroExports.filterAndRankBuiltInResults(
+    agentRows,
+    "fa22464",
+    (e) => ({ visible: [e.title, e.subtitle], hidden: [e.agent.cwd] }),
+  );
+  assert.equal(matchedAgents.length, 1, "Searching fa22464 in ⌘K must match the peer agent");
+  assert.ok(
+    matchedAgents[0].subtitle.includes("#fa22464"),
+    "Matched agent subtitle in ⌘K should include #fa22464 for HighlightedText",
+  );
+
+  const workspaceRows = [
+    {
+      id: "workspace:local:wks_2g4z",
+      kind: "workspace",
+      workspaceId: "wks_2g4z",
+      serverId: "local",
+      title: peerNode.workspaceTitle,
+      subtitle: "Meta harness",
+      run: () => {},
+    },
+  ];
+  const matchedWorkspaces = mockMetroExports.filterAndRankWorkspaces(workspaceRows, "fa22464");
+  assert.equal(matchedWorkspaces.length, 1, "Searching fa22464 in ⌘K must also match its workspace");
+  assert.ok(matchedWorkspaces[0].subtitle.includes("#fa22464"));
+
+  // 5) scoreProjectJumpQuery matches workspaceIds and searchTokens
+  const jumpScore = scoreProjectJumpQuery(
+    {
+      projectName: "Meta harness",
+      projectRootPath: "/workspace/meta-harness",
+      shortPath: "~/projects/meta-harness",
+      primaryWorkspaceTitle: "how about let comand + l as label shortcut?",
+      workspaceIds: ["wks_2g4z"],
+      searchTokens: ["fa224642-a55e-48ae-aece-c02e27cf916e", "fa22464"],
+    },
+    "fa22464",
+  );
+  assert.ok(jumpScore >= 900, `Expected score >= 900 for shortId match, got ${jumpScore}`);
+});
+
+test("sidebar Delete key archives clicked session and annotates context menu with ⌫", async () => {
+  // 1. isSidebarDeleteKeyboardEvent unit tests
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Backspace" } as KeyboardEvent), true);
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Delete" } as KeyboardEvent), true);
+  assert.equal(isSidebarDeleteKeyboardEvent({ code: "Backspace" } as KeyboardEvent), true);
+  assert.equal(isSidebarDeleteKeyboardEvent({ code: "Delete" } as KeyboardEvent), true);
+  // Rejects modifiers
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Backspace", metaKey: true } as KeyboardEvent), false);
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Backspace", ctrlKey: true } as KeyboardEvent), false);
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Backspace", altKey: true } as KeyboardEvent), false);
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Backspace", shiftKey: true } as KeyboardEvent), false);
+  // Rejects IME composing
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Backspace", isComposing: true } as KeyboardEvent), false);
+  // Rejects regular keys
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "Enter" } as KeyboardEvent), false);
+  assert.equal(isSidebarDeleteKeyboardEvent({ key: "a" } as KeyboardEvent), false);
+
+  // 2. shouldTriggerSidebarDeleteArchive safety guards
+  const inputEl = createInteractiveDomNode("input");
+  const textareaEl = createInteractiveDomNode("textarea");
+  const editableEl = createInteractiveDomNode("div", { contenteditable: "true" });
+  const inlineInputEl = createInteractiveDomNode("input", { "data-testid": "inline-title-input" });
+  const commandCenterEl = createInteractiveDomNode("div", { "data-testid": "command-center" });
+  const dialogEl = createInteractiveDomNode("div", { role: "dialog" });
+  const sidebarRowEl = createInteractiveDomNode("div", { "data-testid": "sidebar-workspace-row-wks_meta" });
+
+  const dummyDoc = {
+    querySelector: () => null,
+    activeElement: null,
+  } as unknown as MinimalDocument;
+
+  // Blocked in text inputs / composers / dialogs
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: inputEl as unknown as EventTarget, doc: dummyDoc }), false);
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: textareaEl as unknown as EventTarget, doc: dummyDoc }), false);
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: editableEl as unknown as EventTarget, doc: dummyDoc }), false);
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: inlineInputEl as unknown as EventTarget, doc: dummyDoc }), false);
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: sidebarRowEl as unknown as EventTarget, doc: { ...dummyDoc, querySelector: (sel: string) => sel.includes("command-center") ? commandCenterEl : null } as unknown as MinimalDocument }), false);
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: sidebarRowEl as unknown as EventTarget, doc: { ...dummyDoc, querySelector: (sel: string) => sel.includes("dialog") ? dialogEl : null } as unknown as MinimalDocument }), false);
+
+  // Allowed when targeting sidebar row
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: sidebarRowEl as unknown as EventTarget, doc: dummyDoc }), true);
+
+  // Blocked when disabled via preference
+  assert.equal(shouldTriggerSidebarDeleteArchive({ eventTarget: sidebarRowEl as unknown as EventTarget, doc: dummyDoc, prefs: { enableSidebarDeleteKeyArchive: false } as unknown as any }), false);
+
+  // Safe from accidental archive when clicking in chat area / main window
+  const chatBodyDoc = {
+    querySelector: (sel: string) => {
+      if (sel.includes('aria-selected="true"')) {
+        return createInteractiveDomNode("div", { "data-testid": "sidebar-workspace-row-wks_active", "aria-selected": "true" });
+      }
+      return null;
+    },
+    activeElement: createInteractiveDomNode("body"),
+  } as unknown as MinimalDocument;
+  const chatTargetEl = createInteractiveDomNode("div", { "data-testid": "chat-message-bubble" });
+  assert.equal(
+    shouldTriggerSidebarDeleteArchive({ eventTarget: chatTargetEl as unknown as EventTarget, doc: chatBodyDoc }),
+    false,
+    "Pressing Delete in chat area when sidebar session is selected must NOT trigger archive",
+  );
+
+  // Direct click expires after 30 seconds
+  assert.equal(
+    shouldTriggerSidebarDeleteArchive({
+      eventTarget: chatTargetEl as unknown as EventTarget,
+      doc: dummyDoc,
+      lastSidebarDirectClickWsId: "wks_old",
+      lastSidebarDirectClickAtMs: Date.now() - 35000,
+    }),
+    false,
+    "Expired click (> 30s) must not trigger archive",
+  );
+
+  // 3. resolveSidebarArchiveTarget prioritization
+  const archiveMenuItem = createInteractiveDomNode("button", {
+    "data-testid": "sidebar-workspace-menu-archive-wks_from_menu",
+  });
+  const docWithMenu = {
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-menu-archive-")) return archiveMenuItem;
+      return null;
+    },
+    querySelectorAll: () => [],
+    activeElement: null,
+  } as unknown as MinimalDocument;
+
+  const targetFromMenu = resolveSidebarArchiveTarget(docWithMenu);
+  assert.ok(targetFromMenu);
+  assert.equal(targetFromMenu.workspaceId, "wks_from_menu");
+  assert.equal(targetFromMenu.source, "context-menu");
+  assert.equal(targetFromMenu.menuItem, archiveMenuItem);
+
+  // When no menu open, targets clicked sidebar workspace
+  const docNoMenu = {
+    querySelector: (sel: string) => {
+      if (sel.includes('data-selected="true"')) {
+        return createInteractiveDomNode("div", { "data-testid": "sidebar-workspace-row-wks_selected" });
+      }
+      return null;
+    },
+    querySelectorAll: () => [],
+    activeElement: null,
+  } as unknown as MinimalDocument;
+
+  const targetFromClick = resolveSidebarArchiveTarget(docNoMenu, { clickedWorkspaceId: "wks_clicked" });
+  assert.ok(targetFromClick);
+  assert.equal(targetFromClick.workspaceId, "wks_clicked");
+  assert.equal(targetFromClick.source, "clicked-workspace");
+
+  // When no click tracked, falls back to selected sidebar row
+  const targetFromSelected = resolveSidebarArchiveTarget(docNoMenu);
+  assert.ok(targetFromSelected);
+  assert.equal(targetFromSelected.workspaceId, "wks_selected");
+  assert.equal(targetFromSelected.source, "selected-row");
+
+  // 4. archiveCurrentSidebarSession action execution
+  let clickedMenu = false;
+  archiveMenuItem.click = () => { clickedMenu = true; };
+
+  let callbackWsId: string | undefined;
+  const onArchiveCallback = async (wsId?: string) => {
+    callbackWsId = wsId;
+    return { ok: true, workspaceId: wsId };
+  };
+
+  const archiveResult = await archiveCurrentSidebarSession({
+    doc: docWithMenu,
+    onArchiveWorkspace: onArchiveCallback,
+  });
+  assert.equal(archiveResult.ok, true);
+  assert.equal(archiveResult.workspaceId, "wks_from_menu");
+  assert.equal(clickedMenu, true, "Must invoke native archive context menu item when open");
+
+  // When no menu is open, calls callback directly
+  let dispatchedEvent: unknown = null;
+  const docForDispatch = {
+    ...docNoMenu,
+    dispatchEvent: (ev: unknown) => { dispatchedEvent = ev; return true; },
+  } as unknown as MinimalDocument;
+
+  const archiveResultNoMenu = await archiveCurrentSidebarSession({
+    doc: docForDispatch,
+    clickedWorkspaceId: "wks_clicked",
+    onArchiveWorkspace: onArchiveCallback,
+  });
+  assert.equal(archiveResultNoMenu.ok, true);
+  assert.equal(archiveResultNoMenu.workspaceId, "wks_clicked");
+  assert.equal(callbackWsId, "wks_clicked");
+
+  // 5. annotateNativeWorkspaceMenusWithShortcuts adds ⌫ badge to archive item
+  const menuArchiveCreatedElements: Array<ReturnType<typeof createInteractiveDomNode>> = [];
+  const persistentArchiveItem = createInteractiveDomNode("div");
+  persistentArchiveItem.setAttribute?.("data-testid", "sidebar-workspace-menu-archive-wks_meta");
+  persistentArchiveItem.appendChild?.(createInteractiveDomNode("svg"));
+  persistentArchiveItem.appendChild?.(createInteractiveDomNode("span"));
+
+  const mockDocForArchiveMenu = {
+    createElement: (tag: string) => {
+      const el = createInteractiveDomNode(tag);
+      menuArchiveCreatedElements.push(el);
+      return el;
+    },
+    querySelectorAll: (selector: string) => {
+      if (selector === '[data-testid^="sidebar-workspace-menu-archive-"]') {
+        return [persistentArchiveItem];
+      }
+      return [];
+    },
+  } as unknown as Parameters<typeof annotateNativeWorkspaceMenusWithShortcuts>[0];
+
+  const countAnnotated = annotateNativeWorkspaceMenusWithShortcuts(
+    mockDocForArchiveMenu,
+    { enableSidebarDeleteKeyArchive: true } as unknown as any,
+  );
+  assert.ok(countAnnotated >= 1, "Must annotate archive menu item");
+
+  const archiveBadge = menuArchiveCreatedElements.find(
+    (e) => e.getAttribute?.("data-testid") === "sidebar-workspace-menu-archive-shortcut-hint",
+  );
+  assert.ok(archiveBadge, "Archive shortcut badge must be created");
+  assert.equal(archiveBadge.textContent, "⌫", "On Mac, archive badge shows ⌫");
+  assert.equal(archiveBadge.style?.borderRadius, "4px");
+
+  // On non-Mac platforms, badge shows Del
+  const winMockDel = {
+    navigator: { platform: "Win32", userAgent: "Windows NT 10.0" },
+  } as unknown as Parameters<typeof annotateNativeWorkspaceMenusWithShortcuts>[2];
+  annotateNativeWorkspaceMenusWithShortcuts(
+    mockDocForArchiveMenu,
+    { enableSidebarDeleteKeyArchive: true } as unknown as any,
+    winMockDel,
+  );
+  assert.equal(archiveBadge.textContent, "Del", "On Windows/Linux, archive badge shows Del");
+
+  // 6. Test nested element deduplication prevents duplicate badges (no F2 F2 or double ⌫)
+  const outerRename = createInteractiveDomNode("div");
+  outerRename.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-wks_meta");
+  const innerRename = createInteractiveDomNode("div");
+  innerRename.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-wks_meta");
+  outerRename.appendChild?.(innerRename);
+  const mockDocNested = {
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-workspace-menu-rename-")) return [outerRename, innerRename];
+      return [];
+    },
+  } as unknown as Parameters<typeof annotateNativeWorkspaceMenusWithShortcuts>[0];
+  annotateNativeWorkspaceMenusWithShortcuts(
+    mockDocNested,
+    { enableQuickRenameAndLabelShortcuts: true, enableDesktopContextMenuHelper: true } as any,
+  );
+  const renameBadges = outerRename.querySelectorAll?.('[data-testid="sidebar-workspace-menu-rename-shortcut-hint"]');
+  assert.equal(renameBadges?.length ?? 1, 1, "Must never produce duplicate badges (no F2 F2)");
+
+  // 7. archiveCurrentSidebarSession shows notice toast
+  const mockBodyForToast = createInteractiveDomNode("body");
+  const mockDocWithToast = {
+    ...docNoMenu,
+    body: mockBodyForToast,
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+  } as unknown as MinimalDocument;
+  const archiveToastRes = await archiveCurrentSidebarSession({
+    doc: mockDocWithToast,
+    clickedWorkspaceId: "wks_clicked_toast",
+    onArchiveWorkspace: onArchiveCallback,
+  });
+  assert.equal(archiveToastRes.ok, true);
+  const toastEl = (mockBodyForToast.children as MinimalElement[] | undefined)?.find(
+    (c) => c.getAttribute?.("data-testid") === "paseo-finder-notice-toast",
+  );
+  assert.ok(toastEl, "Archive action must mount notice toast");
+  assert.ok(
+    toastEl.textContent?.includes("archived") || toastEl.textContent?.includes("归档"),
+    "Notice toast must show session archived text",
+  );
+
+  // 8. handleArchiveWorkspace RPC handler
+  const mockArchiveCtx = createMockContext(["/tmp/ws_test_archive"]);
+  (mockArchiveCtx as any).paseo.workspaces.list = async () => ({
+    entries: [{ id: "wks_test_archive", workspaceDirectory: "/tmp/ws_test_archive" }],
+  });
+  const dryRunRes = await handleArchiveWorkspace(
+    {
+      workspaceId: "wks_test_archive",
+      dryRun: true,
+    },
+    mockArchiveCtx,
+  );
+  assert.equal(dryRunRes.ok, true);
+  assert.equal(dryRunRes.workspaceId, "wks_test_archive");
+  assert.equal(dryRunRes.archivedAt, null, "dryRun must return archivedAt null");
+  assert.ok((dryRunRes.message ?? "").includes("Simulated archive"));
+
+  const notFoundRes = await handleArchiveWorkspace(
+    {
+      workspaceId: "wks_not_found",
+      dryRun: true,
+    },
+    mockArchiveCtx,
+  );
+  assert.equal(notFoundRes.ok, false);
+  assert.equal(notFoundRes.archivedAt, null);
+  assert.ok((notFoundRes.error ?? "").includes("not found"));
+});
+
+test("47. Tag delete option via small 'x' (defensive event propagation, keyboard navigation, in-flight guard, and UI observability)", async () => {
+  const { getRecentActionLogs } = await import("../server/handlers");
+  const { getCatalogForLocale } = await import("../client/i18n");
+
+  // A) Single-language i18n assertions
+  const enCat = getCatalogForLocale("en");
+  const zhCat = getCatalogForLocale("zh");
+  assert.equal(enCat.actions.deleteLabel, "Delete label");
+  assert.equal(zhCat.actions.deleteLabel, "删除标签");
+  assert.equal(/[\u4e00-\u9fa5]/.test(enCat.actions.deleteLabel), false, "English catalog must contain 0 Chinese");
+  assert.equal(/[a-zA-Z]/.test(zhCat.actions.deleteLabel), false, "Chinese catalog must contain 0 English");
+
+  // B) Recent action logs verify audit receipt on action: "delete"
+  const logs = getRecentActionLogs();
+  assert.ok(
+    logs.some((l) => l.target === "workspace-meta" && l.message.includes("Deleted label")),
+    "handleManageWorkspaceLabels with delete action must record UI Observability audit log",
+  );
+});
+
 
 
 

@@ -1,4 +1,4 @@
-import type { RpcInput } from "@getpaseo/plugin";
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { execCommand, type PluginHandlerContext } from "@getpaseo/plugin/server";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -16,6 +16,7 @@ import {
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
   type WorkspaceLabelEntry,
+  type archiveWorkspaceRpc,
   type diagnosePathRpc,
   type importFolderWorkspaceRpc,
   type inspectFileRpc,
@@ -916,6 +917,112 @@ export async function handleRenameThread(
   }
 }
 
+export async function handleArchiveWorkspace(
+  input: RpcInput<typeof archiveWorkspaceRpc>,
+  context: PluginHandlerContext,
+  options?: { bridge?: DaemonLabelBridge },
+): Promise<RpcOutput<typeof archiveWorkspaceRpc>> {
+  const workspaceId = await resolveActiveWorkspaceId(context, input.workspaceId);
+  if (!workspaceId) {
+    return {
+      ok: false,
+      workspaceId: "",
+      archivedAt: null,
+      error: "No active workspaceId found to archive",
+    };
+  }
+
+  // Validate that the workspace exists before simulating or performing the archive
+  let workspaceExists = false;
+  try {
+    const list = await context.paseo.workspaces?.list?.();
+    if (list?.entries && Array.isArray(list.entries)) {
+      workspaceExists = list.entries.some((entry: { id?: string }) => entry.id === workspaceId);
+    } else {
+      const ref = context.paseo.workspaces?.ref?.(workspaceId);
+      const desc = ref?.current?.();
+      workspaceExists = Boolean(desc?.id);
+    }
+  } catch {
+    workspaceExists = true;
+  }
+
+  if (input.dryRun) {
+    if (!workspaceExists) {
+      return {
+        ok: false,
+        workspaceId,
+        archivedAt: null,
+        error: `Workspace ${workspaceId} not found`,
+      };
+    }
+    return {
+      ok: true,
+      workspaceId,
+      archivedAt: null,
+      message: `Simulated archive for workspace ${workspaceId}`,
+    };
+  }
+
+  try {
+    const paseo = context.paseo as {
+      daemonClient?: {
+        archiveWorkspace?: (id: string) => Promise<{ archivedAt?: string }>;
+      };
+      workspaces?: {
+        ref?: (id: string) => {
+          archive?: () => Promise<{ archivingAt?: string; archivedAt?: string }>;
+        };
+        archive?: (id: string) => Promise<{ archivedAt?: string }>;
+      };
+    };
+
+    let archivedAt: string | null = null;
+    if (paseo.daemonClient?.archiveWorkspace) {
+      const res = await paseo.daemonClient.archiveWorkspace(workspaceId);
+      archivedAt = res?.archivedAt ?? null;
+    } else if (paseo.workspaces?.ref) {
+      const handle = paseo.workspaces.ref(workspaceId);
+      if (handle?.archive) {
+        const res = await handle.archive();
+        archivedAt = res?.archivingAt ?? res?.archivedAt ?? null;
+      }
+    } else if (paseo.workspaces?.archive) {
+      const res = await paseo.workspaces.archive(workspaceId);
+      archivedAt = res?.archivedAt ?? null;
+    }
+
+    recordActionLog({
+      target: "workspace-meta",
+      resolvedPath: workspaceId,
+      ok: true,
+      durationMs: 0,
+      message: `Archived workspace ${workspaceId}`,
+    });
+
+    return {
+      ok: true,
+      workspaceId,
+      archivedAt,
+      message: `Archived workspace ${workspaceId}`,
+    };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    recordActionLog({
+      target: "workspace-meta",
+      resolvedPath: workspaceId,
+      ok: false,
+      durationMs: 0,
+      message: `Failed to archive workspace ${workspaceId}: ${errorMsg}`,
+    });
+    return {
+      ok: false,
+      workspaceId,
+      error: errorMsg,
+    };
+  }
+}
+
 export async function handleManageWorkspaceLabels(
   input: RpcInput<typeof manageWorkspaceLabelsRpc>,
   context: PluginHandlerContext,
@@ -1032,6 +1139,13 @@ export async function handleManageWorkspaceLabels(
         const updated = await readState();
         const durationMs = Date.now() - startMs;
         const msg = `Deleted label "${labelName}" from catalog`;
+        recordActionLog({
+          target: "workspace-meta",
+          resolvedPath: `${targetWsId}#label:${labelName}:deleted`,
+          ok: true,
+          durationMs,
+          message: msg,
+        });
         return {
           ok: true,
           workspaceId: targetWsId,
@@ -1414,6 +1528,77 @@ export interface QuickJumpWorkspaceOptions {
   >;
 }
 
+interface QuickJumpAgentSummary {
+  agentId: string;
+  shortId: string;
+  workspaceId: string;
+  title: string;
+  providerSessionId: string | null;
+}
+
+let cachedQuickJumpAgentsByWorkspace: {
+  atMs: number;
+  byWorkspaceId: Map<string, QuickJumpAgentSummary[]>;
+} | null = null;
+
+async function loadQuickJumpAgentsByWorkspace(): Promise<Map<string, QuickJumpAgentSummary[]>> {
+  const now = Date.now();
+  if (cachedQuickJumpAgentsByWorkspace && now - cachedQuickJumpAgentsByWorkspace.atMs < 5_000) {
+    return cachedQuickJumpAgentsByWorkspace.byWorkspaceId;
+  }
+  const byWorkspaceId = new Map<string, QuickJumpAgentSummary[]>();
+  try {
+    const agentsRoot = path.join(os.homedir(), ".paseo", "agents");
+    const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
+    for (const bucket of buckets) {
+      if (!bucket.isDirectory()) continue;
+      const bPath = path.join(agentsRoot, bucket.name);
+      const files = await fs.readdir(bPath);
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        try {
+          const rec = JSON.parse(await fs.readFile(path.join(bPath, f), "utf8")) as {
+            id?: string;
+            workspaceId?: string;
+            title?: string | null;
+            archivedAt?: string | null;
+            labels?: Record<string, string>;
+            persistence?: {
+              sessionId?: string | null;
+              metadata?: {
+                pluginProviderPersistence?: {
+                  data?: { conversationId?: string | null };
+                };
+              };
+            };
+          };
+          if (!rec.id || !rec.workspaceId || rec.archivedAt) continue;
+          if (rec.labels?.["paseo.internal"] === "true") continue;
+          const aid = rec.id.trim();
+          const wsId = rec.workspaceId.trim();
+          const convId =
+            rec.persistence?.metadata?.pluginProviderPersistence?.data?.conversationId ?? null;
+          const list = byWorkspaceId.get(wsId) ?? [];
+          list.push({
+            agentId: aid,
+            shortId: aid.slice(0, 8),
+            workspaceId: wsId,
+            title: String(rec.title ?? "").trim() || aid.slice(0, 8),
+            providerSessionId: typeof convId === "string" && convId.trim() ? convId.trim() : null,
+          });
+          byWorkspaceId.set(wsId, list);
+        } catch {
+          // Ignore malformed agent file
+        }
+      }
+    }
+  } catch {
+    // Ignore if ~/.paseo/agents does not exist
+  }
+  cachedQuickJumpAgentsByWorkspace = { atMs: now, byWorkspaceId };
+  return byWorkspaceId;
+}
+
 export async function handleQuickJumpWorkspace(
   input: RpcInput<typeof quickJumpWorkspaceRpc>,
   context: PluginHandlerContext,
@@ -1561,8 +1746,10 @@ export async function handleQuickJumpWorkspace(
     group.workspaces.push(ws);
   }
 
+  const agentsByWorkspaceId = await loadQuickJumpAgentsByWorkspace();
   const allCandidates: ProjectJumpCandidate[] = [];
   let emptyProjects = 0;
+  const cleanQueryNeedle = query.trim().replace(/^#/, "").toLowerCase();
 
   for (const group of projectMap.values()) {
     const sortedWs = [...group.workspaces].sort((a, b) => {
@@ -1603,12 +1790,55 @@ export async function handleQuickJumpWorkspace(
     const primaryTitle =
       (primaryWs?.title ?? "").trim() || (primaryWs?.name ?? "").trim() || null;
 
+    const searchTokens: string[] = [];
+    let matchedWorkspaceId: string | null = null;
+    let matchedAgentId: string | null = null;
+    let matchedAgentShortId: string | null = null;
+    let matchedAgentTitle: string | null = null;
+
+    for (const w of sortedWs) {
+      if (w.id) {
+        searchTokens.push(w.id);
+        const wTitle = (w.title ?? w.name ?? "").trim();
+        if (wTitle) searchTokens.push(wTitle);
+        if (
+          cleanQueryNeedle.length >= 4 &&
+          !matchedWorkspaceId &&
+          (w.id.toLowerCase() === cleanQueryNeedle ||
+            w.id.toLowerCase().replace(/^wks_/, "").startsWith(cleanQueryNeedle))
+        ) {
+          matchedWorkspaceId = w.id;
+        }
+        const wsAgents = agentsByWorkspaceId.get(w.id) ?? [];
+        for (const ag of wsAgents) {
+          searchTokens.push(ag.agentId, ag.shortId, ag.agentId.slice(0, 7), ag.title);
+          if (ag.providerSessionId) {
+            searchTokens.push(ag.providerSessionId);
+          }
+          if (
+            cleanQueryNeedle.length >= 4 &&
+            !matchedAgentId &&
+            (ag.agentId.toLowerCase().startsWith(cleanQueryNeedle) ||
+              (ag.providerSessionId &&
+                ag.providerSessionId.toLowerCase().startsWith(cleanQueryNeedle)))
+          ) {
+            matchedWorkspaceId = w.id;
+            matchedAgentId = ag.agentId;
+            matchedAgentShortId = ag.agentId.slice(0, 7);
+            matchedAgentTitle = ag.title;
+          }
+        }
+      }
+    }
+
     const baseScore = scoreProjectJumpQuery(
       {
         projectName: group.projectName,
         projectRootPath: group.projectRootPath,
         shortPath,
         primaryWorkspaceTitle: primaryTitle,
+        workspaceIds: sortedWs.map((w) => w.id),
+        searchTokens,
       },
       query,
     );
@@ -1624,6 +1854,11 @@ export async function handleQuickJumpWorkspace(
       primaryWorkspaceId: primaryWs?.id ?? null,
       primaryWorkspaceTitle: primaryTitle,
       workspaceIds: sortedWs.map((w) => w.id),
+      searchTokens,
+      matchedWorkspaceId,
+      matchedAgentId,
+      matchedAgentShortId,
+      matchedAgentTitle,
       hasRunningAgent,
       lastActivityIso,
       lastActivityRelative,
@@ -1657,7 +1892,11 @@ export async function handleQuickJumpWorkspace(
       emptyProjects,
       candidates: matchedCandidates,
       selectedCandidate: matchedCandidates[0] ?? null,
-      targetWorkspaceId: matchedCandidates[0]?.primaryWorkspaceId ?? null,
+      targetWorkspaceId:
+        matchedCandidates[0]?.matchedWorkspaceId ??
+        matchedCandidates[0]?.primaryWorkspaceId ??
+        null,
+      targetAgentId: matchedCandidates[0]?.matchedAgentId ?? null,
       targetProjectId: matchedCandidates[0]?.projectId ?? null,
       targetProjectKey: matchedCandidates[0]?.projectKey ?? null,
       targetProjectName: matchedCandidates[0]?.projectName ?? null,
@@ -1678,6 +1917,7 @@ export async function handleQuickJumpWorkspace(
           c.projectKey === explicitProjectId ||
           c.primaryWorkspaceId === explicitProjectId ||
           Boolean(c.workspaceIds?.includes(explicitProjectId)) ||
+          Boolean(c.searchTokens?.some((t) => t.toLowerCase() === explicitProjectId.toLowerCase())) ||
           c.projectName.toLowerCase() === explicitProjectId.toLowerCase(),
       ) ?? matchedCandidates[0] ?? null
     : matchedCandidates[0] ?? null;
@@ -1699,6 +1939,7 @@ export async function handleQuickJumpWorkspace(
       candidates: matchedCandidates,
       selectedCandidate: null,
       targetWorkspaceId: null,
+      targetAgentId: null,
       targetProjectId: null,
       targetProjectKey: null,
       targetProjectName: null,
@@ -1710,22 +1951,32 @@ export async function handleQuickJumpWorkspace(
     };
   }
 
-  let targetWorkspaceId: string | null = targetCandidate.primaryWorkspaceId;
+  const hasSpecificSessionMatch = Boolean(
+    targetCandidate.matchedWorkspaceId || targetCandidate.matchedAgentId,
+  );
+  const effectiveJumpMode: QuickJumpAction =
+    hasSpecificSessionMatch && !input.jumpMode && jumpMode === "new-workspace"
+      ? "open-latest"
+      : jumpMode;
+
+  let targetWorkspaceId: string | null =
+    targetCandidate.matchedWorkspaceId ?? targetCandidate.primaryWorkspaceId;
+  const targetAgentId: string | null = targetCandidate.matchedAgentId ?? null;
   let createdWorkspace = false;
   let message = "";
 
   try {
-    if (jumpMode === "locate-sidebar") {
+    if (effectiveJumpMode === "locate-sidebar") {
       targetWorkspaceId = null;
       message = dryRun
         ? `Dry-run: will expand and scroll sidebar to "${targetCandidate.projectName}" (${targetCandidate.activeWorkspaceCount} threads)`
         : `Located "${targetCandidate.projectName}" in sidebar (${targetCandidate.activeWorkspaceCount} threads)`;
-    } else if (jumpMode === "new-workspace") {
+    } else if (effectiveJumpMode === "new-workspace") {
       targetWorkspaceId = null;
       message = dryRun
         ? `Dry-run: will open New Workspace composer for "${targetCandidate.projectName}" (${targetCandidate.shortPath})`
         : `Opened New Workspace in "${targetCandidate.projectName}"`;
-    } else if (jumpMode === "create-new") {
+    } else if (effectiveJumpMode === "create-new") {
       if (dryRun) {
         message = `Dry-run: will create a fresh workspace inside "${targetCandidate.projectName}" (${targetCandidate.shortPath})`;
       } else {
@@ -1746,11 +1997,14 @@ export async function handleQuickJumpWorkspace(
         }
       }
     } else {
-      // jumpMode === "open-latest"
+      // effectiveJumpMode === "open-latest"
       if (targetWorkspaceId) {
+        const agentSuffix = targetCandidate.matchedAgentShortId
+          ? ` · agent #${targetCandidate.matchedAgentShortId}`
+          : "";
         message = dryRun
-          ? `Dry-run: will jump to "${targetCandidate.projectName}" (${targetWorkspaceId}, ${targetCandidate.activeWorkspaceCount} threads)`
-          : `Jumped to "${targetCandidate.projectName}" (${targetWorkspaceId})`;
+          ? `Dry-run: will jump to "${targetCandidate.projectName}" (${targetWorkspaceId}${agentSuffix}, ${targetCandidate.activeWorkspaceCount} threads)`
+          : `Jumped to "${targetCandidate.projectName}" (${targetWorkspaceId}${agentSuffix})`;
       } else if (dryRun) {
         message = `Dry-run: "${targetCandidate.projectName}" has 0 active threads — will open clean workspace in ${targetCandidate.shortPath}`;
       } else {
@@ -1777,7 +2031,7 @@ export async function handleQuickJumpWorkspace(
 
   const durationMs = Date.now() - startMs;
   const ok =
-    jumpMode === "locate-sidebar" || jumpMode === "new-workspace"
+    effectiveJumpMode === "locate-sidebar" || effectiveJumpMode === "new-workspace"
       ? true
       : Boolean(targetWorkspaceId) || dryRun;
 
@@ -1792,7 +2046,7 @@ export async function handleQuickJumpWorkspace(
   return {
     ok,
     action: "jump" as const,
-    jumpMode,
+    jumpMode: effectiveJumpMode,
     dryRun,
     query,
     totalProjects: allCandidates.length,
@@ -1801,6 +2055,7 @@ export async function handleQuickJumpWorkspace(
     candidates: matchedCandidates,
     selectedCandidate: targetCandidate,
     targetWorkspaceId,
+    targetAgentId,
     targetProjectId: targetCandidate.projectId,
     targetProjectKey: targetCandidate.projectKey,
     targetProjectName: targetCandidate.projectName,

@@ -9,6 +9,7 @@ import {
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
+  archiveWorkspaceRpc,
   extractProjectSearchKeywords,
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
@@ -1536,6 +1537,23 @@ export default function contribute(client: PluginClientContext) {
         ok: res.ok,
         message: res.message,
       };
+    },
+    onArchiveWorkspace: async (workspaceId?: string) => {
+      const targetWsId = workspaceId ?? lastKnownWorkspaceId;
+      if (targetWsId) {
+        try {
+          await client.paseo.workspaces.ref(targetWsId).archive();
+          return { ok: true, workspaceId: targetWsId };
+        } catch {
+          try {
+            const res = await client.rpc(archiveWorkspaceRpc, { workspaceId: targetWsId });
+            return { ok: res.ok, workspaceId: targetWsId };
+          } catch {
+            return { ok: false, workspaceId: targetWsId };
+          }
+        }
+      }
+      return { ok: false };
     },
   });
 

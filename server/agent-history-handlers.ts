@@ -1233,6 +1233,41 @@ interface FullRawAgentRecord {
     model?: string;
     systemPrompt?: string;
   };
+  persistence?: {
+    sessionId?: string | null;
+    metadata?: {
+      pluginProviderPersistence?: {
+        data?: {
+          conversationId?: string | null;
+        };
+      };
+    };
+  };
+}
+
+function extractProviderSessionId(rec: FullRawAgentRecord): string | null {
+  const convId = rec.persistence?.metadata?.pluginProviderPersistence?.data?.conversationId;
+  if (typeof convId === "string" && convId.trim()) {
+    return convId.trim();
+  }
+  const rawSid = rec.persistence?.sessionId;
+  if (typeof rawSid === "string" && rawSid.trim()) {
+    const trimmed = rawSid.trim();
+    if (trimmed.startsWith("plugin:")) {
+      try {
+        const parsed = JSON.parse(trimmed.slice("plugin:".length)) as {
+          data?: { conversationId?: string };
+        };
+        if (parsed?.data?.conversationId) {
+          return String(parsed.data.conversationId).trim();
+        }
+      } catch {
+        // Ignore
+      }
+    }
+    return trimmed;
+  }
+  return null;
 }
 
 interface IntakeTaskStateEntry {
@@ -1414,7 +1449,7 @@ export async function handleManageSessionLineage(
     }
 
     const resolveAgentByIdOrPrefix = (idOrPrefix?: string | null): FullRawAgentRecord | null => {
-      const needle = (idOrPrefix ?? "").trim();
+      const needle = (idOrPrefix ?? "").trim().replace(/^#/, "");
       if (!needle) return null;
       const exact = agentsById.get(needle);
       if (exact) return exact;
@@ -1422,6 +1457,8 @@ export async function handleManageSessionLineage(
       if (byShort && byShort.length === 1) return byShort[0];
       for (const [id, rec] of agentsById.entries()) {
         if (id.startsWith(needle)) return rec;
+        const pSid = extractProviderSessionId(rec);
+        if (pSid && (pSid === needle || pSid.startsWith(needle))) return rec;
       }
       return null;
     };
@@ -1529,6 +1566,7 @@ export async function handleManageSessionLineage(
         status: String(rec.lastStatus ?? "idle"),
         provider: String(rec.provider ?? "antigravity"),
         model: String(rec.config?.model ?? "default"),
+        providerSessionId: extractProviderSessionId(rec),
         createdAt: rec.createdAt ?? null,
         updatedAt: rec.updatedAt ?? null,
         briefPath,
@@ -1536,6 +1574,40 @@ export async function handleManageSessionLineage(
         reportExists,
         notionUrl,
         notionTaskId,
+      };
+    };
+
+    const toLightDirectoryNode = (rec: FullRawAgentRecord): SessionLineageNode => {
+      const aid = String(rec.id ?? "");
+      const wsId = String(rec.workspaceId ?? "");
+      const ws = workspacesById.get(wsId);
+      const proj = ws?.projectId ? projectsById.get(ws.projectId) : undefined;
+      const agentTitle = String(rec.title ?? "").trim() || aid.slice(0, 8);
+      const workspaceTitle =
+        String(ws?.title ?? "").trim() ||
+        (ws?.displayName && ws.displayName !== "main" ? String(ws.displayName) : agentTitle);
+      const projectName = proj
+        ? String(proj.customName ?? proj.displayName ?? "").trim() || null
+        : null;
+      return {
+        agentId: aid,
+        shortId: aid.slice(0, 8),
+        agentTitle,
+        workspaceId: wsId,
+        workspaceTitle,
+        projectId: ws?.projectId ?? null,
+        projectName,
+        status: String(rec.lastStatus ?? "idle"),
+        provider: String(rec.provider ?? "antigravity"),
+        model: String(rec.config?.model ?? "default"),
+        providerSessionId: extractProviderSessionId(rec),
+        createdAt: rec.createdAt ?? null,
+        updatedAt: rec.updatedAt ?? null,
+        briefPath: null,
+        reportPath: null,
+        reportExists: false,
+        notionUrl: null,
+        notionTaskId: null,
       };
     };
 
@@ -1562,6 +1634,7 @@ export async function handleManageSessionLineage(
     let parentNode: SessionLineageNode | null = null;
     const childNodes: SessionLineageNode[] = [];
     const siblingNodes: SessionLineageNode[] = [];
+    const projectPeerNodes: SessionLineageNode[] = [];
 
     if (currentAgent && currentAgent.id) {
       currentNode = await toLineageNode(currentAgent);
@@ -1572,8 +1645,12 @@ export async function handleManageSessionLineage(
 
       const curId = currentAgent.id;
       const curWsId = currentAgent.workspaceId ?? "";
+      const curWs = curWsId ? workspacesById.get(curWsId) : undefined;
+      const curProjectId = curWs?.projectId ?? null;
+      const curCwd = (currentAgent.cwd ?? "").trim();
       const rawChildren: FullRawAgentRecord[] = [];
       const rawSiblings: FullRawAgentRecord[] = [];
+      const rawProjectPeers: FullRawAgentRecord[] = [];
 
       for (const candidate of agentsById.values()) {
         if (!candidate.id || candidate.archivedAt) continue;
@@ -1597,6 +1674,13 @@ export async function handleManageSessionLineage(
           candidate.id !== curId
         ) {
           rawSiblings.push(candidate);
+        } else if (candidate.id !== curId) {
+          const sameProject =
+            (curProjectId && candWs?.projectId === curProjectId) ||
+            (curCwd && (candidate.cwd ?? "").trim() === curCwd);
+          if (sameProject) {
+            rawProjectPeers.push(candidate);
+          }
         }
       }
 
@@ -1610,6 +1694,14 @@ export async function handleManageSessionLineage(
           String(a.updatedAt ?? a.createdAt ?? ""),
         ),
       );
+      rawProjectPeers.sort((a, b) => {
+        const aRun = a.lastStatus === "running" ? 1 : 0;
+        const bRun = b.lastStatus === "running" ? 1 : 0;
+        if (aRun !== bRun) return bRun - aRun;
+        return String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+          String(a.updatedAt ?? a.createdAt ?? ""),
+        );
+      });
 
       for (const ch of rawChildren.slice(0, 24)) {
         childNodes.push(await toLineageNode(ch));
@@ -1617,7 +1709,26 @@ export async function handleManageSessionLineage(
       for (const sb of rawSiblings.slice(0, 12)) {
         siblingNodes.push(await toLineageNode(sb));
       }
+      for (const pp of rawProjectPeers.slice(0, 16)) {
+        projectPeerNodes.push(toLightDirectoryNode(pp));
+      }
     }
+
+    const activeDirectoryRecords = Array.from(agentsById.values()).filter((a) => {
+      if (!a.id || a.archivedAt) return false;
+      const ws = a.workspaceId ? workspacesById.get(a.workspaceId) : undefined;
+      if (ws?.archivedAt) return false;
+      return true;
+    });
+    activeDirectoryRecords.sort((a, b) => {
+      const aRun = a.lastStatus === "running" ? 1 : 0;
+      const bRun = b.lastStatus === "running" ? 1 : 0;
+      if (aRun !== bRun) return bRun - aRun;
+      return String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+        String(a.updatedAt ?? a.createdAt ?? ""),
+      );
+    });
+    const directoryNodes = activeDirectoryRecords.slice(0, 240).map(toLightDirectoryNode);
 
     const durationMs = Date.now() - startMs;
     const unlinkedFound = Number(cliReconcileRaw?.unlinked_found ?? 0);
@@ -1630,6 +1741,8 @@ export async function handleManageSessionLineage(
       parent: parentNode,
       siblings: siblingNodes,
       children: childNodes,
+      projectPeers: projectPeerNodes,
+      directory: directoryNodes,
       reconcileSummary: {
         untitledFound: Math.max(untitledFound, renamedWorkspaces.length),
         renamedCount: renamedWorkspaces.length,
@@ -1641,7 +1754,7 @@ export async function handleManageSessionLineage(
         renamedWorkspaces.length > 0 || linkedCount > 0
           ? `已同步 ${renamedWorkspaces.length} 个侧边栏工作区标题，关联 ${linkedCount} 个派生会话链路`
           : currentNode
-            ? `会话血缘: 父会话=${parentNode ? parentNode.workspaceTitle : "无"} · 派生子会话=${childNodes.length}`
+            ? `会话血缘: 父会话=${parentNode ? parentNode.workspaceTitle : "无"} · 派生子会话=${childNodes.length} · 同项目同伴=${projectPeerNodes.length}`
             : "会话血缘检查完成",
       durationMs,
     };

@@ -69,6 +69,8 @@ function FinderBrowserView({
           settingsState.values.enableQuickRenameAndLabelShortcuts,
         enableDesktopContextMenuHelper:
           settingsState.values.enableDesktopContextMenuHelper,
+        enableSidebarDeleteKeyArchive:
+          settingsState.values.enableSidebarDeleteKeyArchive,
       });
       syncQuickJumpPreferences({
         enableWorkspaceQuickJump: settingsState.values.enableWorkspaceQuickJump,
@@ -497,46 +499,57 @@ function FinderBrowserView({
               const isAssigned = (labelsQuery.data?.assignedLabels ?? []).includes(entry.name);
               const dotHex = LABEL_COLOR_HEX[entry.color] ?? LABEL_COLOR_HEX.violet;
               return (
-                <Pressable
+                <View
                   key={entry.name}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${entry.name}`}
-                  onPress={() =>
-                    labelMutation.mutate({
-                      action: "toggle",
-                      labelName: entry.name,
-                      color: entry.color,
-                    })
-                  }
                   style={isAssigned ? styles.activeChip : styles.inactiveChip}
                 >
-                  <View
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={entry.name}
+                    onPress={() =>
+                      labelMutation.mutate({
+                        action: "toggle",
+                        labelName: entry.name,
+                        color: entry.color,
+                      })
+                    }
                     style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: 99,
-                      backgroundColor: dotHex,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 5,
                     }}
-                  />
-                  <Text style={styles.btnText}>
-                    {isAssigned ? `${entry.name} ✓` : entry.name}
-                  </Text>
+                  >
+                    <View
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 99,
+                        backgroundColor: dotHex,
+                      }}
+                    />
+                    <Text style={styles.btnText}>
+                      {isAssigned ? `${entry.name} ✓` : entry.name}
+                    </Text>
+                  </Pressable>
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`${t("actions.deleteLabel")}: ${entry.name}`}
                     hitSlop={6}
-                    onPress={(ev) => {
-                      ev?.stopPropagation?.();
+                    onPress={() => {
                       labelMutation.mutate({
                         action: "delete",
                         labelName: entry.name,
                       });
                     }}
-                    style={{
+                    style={(state: any) => ({
                       marginLeft: 3,
                       paddingHorizontal: 2,
-                      opacity: 0.7,
-                    }}
+                      paddingVertical: 1,
+                      borderRadius: 3,
+                      backgroundColor:
+                        state?.hovered || state?.pressed ? `${theme.colors.foreground}1f` : "transparent",
+                      opacity: state?.hovered || state?.pressed ? 1 : 0.7,
+                    })}
                   >
                     <Text
                       style={{
@@ -548,7 +561,7 @@ function FinderBrowserView({
                       ×
                     </Text>
                   </Pressable>
-                </Pressable>
+                </View>
               );
             })
           )}

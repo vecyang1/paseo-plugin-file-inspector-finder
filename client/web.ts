@@ -286,6 +286,7 @@ export interface InlineRenamePreferences {
   enableCmdClickOpenSystemDefault: boolean;
   cmdClickDefaultTarget: OpenerTarget;
   enableSidebarCmdClickFinder: boolean;
+  enableSidebarDeleteKeyArchive: boolean;
 }
 
 export function syncInlineRenamePreferences(
@@ -336,6 +337,8 @@ export function syncInlineRenamePreferences(
         prefs.cmdClickDefaultTarget ?? existing.cmdClickDefaultTarget ?? "system-default",
       enableSidebarCmdClickFinder:
         prefs.enableSidebarCmdClickFinder ?? existing.enableSidebarCmdClickFinder,
+      enableSidebarDeleteKeyArchive:
+        prefs.enableSidebarDeleteKeyArchive ?? existing.enableSidebarDeleteKeyArchive ?? true,
     };
     storage.setItem(INLINE_RENAME_STORAGE_KEY, JSON.stringify(merged));
   } catch {
@@ -358,6 +361,7 @@ export function readInlineRenamePreferences(
     enableCmdClickOpenSystemDefault: true,
     cmdClickDefaultTarget: "system-default",
     enableSidebarCmdClickFinder: true,
+    enableSidebarDeleteKeyArchive: true,
   };
   if (!storage) return defaults;
   try {
@@ -416,6 +420,7 @@ export function readInlineRenamePreferences(
       enableCmdClickOpenSystemDefault: parsed.enableCmdClickOpenSystemDefault !== false,
       cmdClickDefaultTarget: validTarget,
       enableSidebarCmdClickFinder: parsed.enableSidebarCmdClickFinder !== false,
+      enableSidebarDeleteKeyArchive: parsed.enableSidebarDeleteKeyArchive !== false,
     };
   } catch {
     return defaults;
@@ -1430,6 +1435,9 @@ export interface DesktopRevealHelperCallbacks {
     source?: "quick-switcher";
   }): Promise<QuickJumpExecutionSummary | null>;
   onHealAgentHistory?(workspaceId?: string): Promise<{ ok: boolean; message: string } | null>;
+  onArchiveWorkspace?(
+    workspaceId?: string,
+  ): Promise<{ ok: boolean; archivedAt?: string | null } | void>;
 }
 
 const PASEO_INTERNAL_FILE_DRAG_MIME = "application/x-paseo-workspace-file";
@@ -2134,6 +2142,305 @@ export function isMarkDoneKeyboardEvent(ke: MinimalKeyboardEvent): boolean {
   return code === "KeyD" || key === "d" || ke.key === "∂" || ke.key === "Î";
 }
 
+export function isSidebarDeleteKeyboardEvent(ke?: MinimalKeyboardEvent | null): boolean {
+  if (!ke) return false;
+  if (ke.metaKey || ke.ctrlKey || ke.altKey || ke.shiftKey) return false;
+  if (ke.isComposing || ke.keyCode === 229) return false;
+  const key = ke.key;
+  const code = ke.code;
+  const keyCode = ke.keyCode;
+  return (
+    key === "Backspace" ||
+    key === "Delete" ||
+    code === "Backspace" ||
+    code === "Delete" ||
+    keyCode === 8 ||
+    keyCode === 46
+  );
+}
+
+export function shouldTriggerSidebarDeleteArchive(options: {
+  event?: MinimalKeyboardEvent | null;
+  eventTarget?: unknown;
+  doc: MinimalDocument;
+  win?: MinimalWindow | null;
+  activeInlineSession?: unknown | null;
+  activeQuickJumpModalEl?: unknown | null;
+  lastSidebarDirectClickWsId?: string | null;
+  lastSidebarDirectClickAtMs?: number;
+  fallbackWorkspaceId?: string;
+  enableSidebarDeleteKeyArchive?: boolean;
+  prefs?: { enableSidebarDeleteKeyArchive?: boolean };
+}): boolean {
+  const enabled =
+    options.prefs?.enableSidebarDeleteKeyArchive ??
+    options.enableSidebarDeleteKeyArchive;
+  if (enabled === false) return false;
+  if (options.event && !isSidebarDeleteKeyboardEvent(options.event)) return false;
+
+  const target = (options.event?.target ?? options.eventTarget ?? options.doc.activeElement ?? null) as MinimalElement | null;
+  if (isEditableInput(target)) return false;
+  if (isInsideFileExplorer(target)) return false;
+
+  if (options.activeInlineSession) return false;
+  if (options.activeQuickJumpModalEl) return false;
+  if (options.doc.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]')) return false;
+  if (options.doc.querySelector?.('[data-testid*="command-center"]')) return false;
+  if (options.doc.querySelector?.('[role="dialog"]')) return false;
+
+  // 1. Context menu open for a sidebar workspace (as shown in user screenshot)
+  if (hasOpenWorkspaceContextMenu(options.doc)) return true;
+
+  // 2. Focused on or inside sidebar / workspace row
+  if (isInsideSidebarOrWorkspaceRow(target)) return true;
+  if (isInsideSidebarOrWorkspaceRow(options.doc.activeElement ?? null)) return true;
+
+  // 3. User recently directly clicked a sidebar workspace row (within 30 seconds)
+  // and has not clicked or focused into the chat or message area outside the sidebar
+  if (options.lastSidebarDirectClickWsId) {
+    const elapsed = Date.now() - (options.lastSidebarDirectClickAtMs ?? 0);
+    if (elapsed < 30000) {
+      const activeEl = options.doc.activeElement;
+      if (!activeEl || activeEl === options.doc.body || isInsideSidebarOrWorkspaceRow(activeEl)) {
+        return true;
+      }
+    }
+  }
+
+  // 4. Selected sidebar row ONLY when activeElement is explicitly inside the sidebar
+  const selectedRow = options.doc.querySelector?.(
+    '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
+  );
+  if (selectedRow) {
+    const activeEl = options.doc.activeElement;
+    if (activeEl && isInsideSidebarOrWorkspaceRow(activeEl)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export interface SidebarArchiveTarget {
+  workspaceId: string;
+  source?: "context-menu" | "clicked-workspace" | "selected-row" | "active-route";
+  menuArchiveBtn?: MinimalElement | null;
+  menuItem?: MinimalElement | null;
+}
+
+export function resolveSidebarArchiveTarget(
+  doc?: MinimalDocument | null,
+  winOrOptions?:
+    | MinimalWindow
+    | null
+    | { clickedWorkspaceId?: string; fallbackWorkspaceId?: string; win?: MinimalWindow | null },
+  fallbackWorkspaceId?: string,
+  lastClickedWsId?: string | null,
+): SidebarArchiveTarget | null {
+  const effectiveDoc =
+    doc ??
+    (globalThis as unknown as { document?: MinimalDocument }).document ??
+    null;
+  if (!effectiveDoc) return null;
+
+  const isOptions =
+    winOrOptions &&
+    typeof winOrOptions === "object" &&
+    ("clickedWorkspaceId" in winOrOptions || "fallbackWorkspaceId" in winOrOptions);
+  const win = isOptions
+    ? (winOrOptions as { win?: MinimalWindow | null }).win ?? null
+    : (winOrOptions as MinimalWindow | null);
+  const effectiveFallbackWsId = isOptions
+    ? (winOrOptions as { fallbackWorkspaceId?: string }).fallbackWorkspaceId ?? fallbackWorkspaceId
+    : fallbackWorkspaceId;
+  const effectiveClickedWsId = isOptions
+    ? (winOrOptions as { clickedWorkspaceId?: string }).clickedWorkspaceId ?? lastClickedWsId
+    : lastClickedWsId;
+
+  // 1. Prioritize open context menu workspace (e.g. right-clicked item in sidebar)
+  const menuArchiveEl = effectiveDoc.querySelector?.(
+    '[data-testid^="sidebar-workspace-menu-archive-"]',
+  );
+  if (menuArchiveEl) {
+    const tid = menuArchiveEl.getAttribute?.("data-testid") ?? "";
+    const m = tid.match(/^sidebar-workspace-menu-archive-(.+)$/);
+    if (m?.[1]) {
+      const parsed = parseSidebarWorkspaceRowTestId(`sidebar-workspace-row-${m[1]}`);
+      const wsId = parsed?.workspaceId ?? m[1];
+      return {
+        workspaceId: wsId,
+        source: "context-menu",
+        menuArchiveBtn: menuArchiveEl,
+        menuItem: menuArchiveEl,
+      };
+    }
+  }
+
+  const anyMenuEl = effectiveDoc.querySelector?.(
+    '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"], [data-testid^="sidebar-workspace-context-menu-"]',
+  );
+  if (anyMenuEl) {
+    const tid = anyMenuEl.getAttribute?.("data-testid") ?? "";
+    const m = tid.match(/^sidebar-workspace-(?:menu-(?:labels|rename)|context-menu)-(.+)$/);
+    if (m?.[1]) {
+      const parsed = parseSidebarWorkspaceRowTestId(`sidebar-workspace-row-${m[1]}`);
+      const wsId = parsed?.workspaceId ?? m[1];
+      return { workspaceId: wsId, source: "context-menu", menuItem: anyMenuEl };
+    }
+  }
+
+  // 2. Focused row or active element
+  const activeEl = effectiveDoc.activeElement;
+  if (activeEl) {
+    let curr: MinimalElement | null = activeEl;
+    for (let depth = 0; curr && depth < 8; depth += 1) {
+      const tid = curr.getAttribute?.("data-testid") ?? "";
+      if (tid.startsWith("sidebar-workspace-row-")) {
+        const parsed = parseSidebarWorkspaceRowTestId(tid);
+        if (parsed?.workspaceId) {
+          return { workspaceId: parsed.workspaceId, source: "selected-row" };
+        }
+      }
+      curr = curr.parentElement ?? null;
+    }
+  }
+
+  // 3. Last directly clicked sidebar workspace ID
+  if (effectiveClickedWsId) {
+    return { workspaceId: effectiveClickedWsId, source: "clicked-workspace" };
+  }
+
+  // 4. Selected sidebar row: [data-testid^="sidebar-workspace-row-"][aria-selected="true"]
+  const selectedRow = effectiveDoc.querySelector?.(
+    '[data-testid^="sidebar-workspace-row-"][aria-selected="true"], [data-testid^="sidebar-workspace-row-"][data-selected="true"]',
+  );
+  if (selectedRow) {
+    const tid = selectedRow.getAttribute?.("data-testid") ?? "";
+    const parsed = parseSidebarWorkspaceRowTestId(tid);
+    if (parsed?.workspaceId) {
+      return { workspaceId: parsed.workspaceId, source: "selected-row" };
+    }
+  }
+
+  // 5. Active route workspace ID
+  const activeWsId = resolveCurrentActiveWorkspaceId(effectiveDoc, win, effectiveFallbackWsId);
+  if (activeWsId) {
+    return { workspaceId: activeWsId, source: "active-route" };
+  }
+
+  return null;
+}
+
+export function resolveLocale(win?: MinimalWindow | null, fallback = "en"): string {
+  if (win?.navigator?.language) return win.navigator.language;
+  const g = globalThis as unknown as { navigator?: { language?: string } };
+  return g.navigator?.language ?? fallback;
+}
+
+export interface ArchiveCurrentSidebarSessionResult {
+  ok: boolean;
+  workspaceId?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function archiveCurrentSidebarSession(options: {
+  doc: MinimalDocument;
+  win?: MinimalWindow | null;
+  callbacks?: Partial<DesktopRevealHelperCallbacks> | null;
+  target?: SidebarArchiveTarget | null;
+  lastClickedWsId?: string | null;
+  clickedWorkspaceId?: string | null;
+  onArchiveWorkspace?: (workspaceId?: string) => Promise<unknown>;
+  onArchiveComplete?: (workspaceId: string) => void;
+}): Promise<ArchiveCurrentSidebarSessionResult> {
+  const { doc, win, callbacks } = options;
+  const effectiveLastClicked = options.clickedWorkspaceId ?? options.lastClickedWsId;
+  const target =
+    options.target ??
+    resolveSidebarArchiveTarget(
+      doc,
+      win,
+      callbacks?.getFallbackWorkspaceId?.(),
+      effectiveLastClicked,
+    );
+
+  if (!target?.workspaceId) {
+    return { ok: false, error: "No active or targeted workspace found to archive" };
+  }
+
+  const mac = isMacPlatform(win);
+  const targetWsId = target.workspaceId;
+
+  const notifyArchiveSuccess = (msg: string): ArchiveCurrentSidebarSessionResult => {
+    try {
+      const locale = resolveLocale(win);
+      const catalog = getCatalogForLocale(locale);
+      const toastText =
+        catalog.actions.sessionArchivedToast ||
+        (locale.startsWith("zh") ? "会话已归档" : "Session archived");
+      showFinderNoticeToast(doc, win ?? null, toastText, false);
+    } catch {
+      // Ignore toast notification errors
+    }
+    try {
+      options.onArchiveComplete?.(targetWsId);
+    } catch {
+      // Ignore completion callback errors
+    }
+    return { ok: true, workspaceId: targetWsId, message: msg };
+  };
+
+  // 1. If context menu's native Archive button is mounted, click it directly
+  if (target.menuArchiveBtn && typeof target.menuArchiveBtn.click === "function") {
+    try {
+      target.menuArchiveBtn.click();
+      dismissNativeMenu(win ?? null, doc);
+      return notifyArchiveSuccess("Archived via native menu action");
+    } catch {
+      // Fall through to callback and synthetic shortcut
+    }
+  }
+
+  // 2. Invoke onArchiveWorkspace callback
+  const archiveCallback = options.onArchiveWorkspace ?? callbacks?.onArchiveWorkspace;
+  if (archiveCallback) {
+    try {
+      await archiveCallback(targetWsId);
+      dismissNativeMenu(win ?? null, doc);
+      return notifyArchiveSuccess(`Archived session ${targetWsId}`);
+    } catch {
+      // Fall through to synthetic shortcut
+    }
+  }
+
+  // 3. Dispatch Paseo native shortcut: Cmd+Shift+Backspace (Mac) or Ctrl+Shift+Backspace (Non-Mac)
+  if (win && typeof win.KeyboardEvent === "function") {
+    try {
+      const syntheticEvt = new win.KeyboardEvent("keydown", {
+        key: "Backspace",
+        code: "Backspace",
+        keyCode: 8,
+        which: 8,
+        metaKey: mac,
+        ctrlKey: !mac,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      const dispatchTarget = doc.activeElement ?? doc.body ?? win;
+      (dispatchTarget as unknown as { dispatchEvent?: (e: unknown) => boolean }).dispatchEvent?.(
+        syntheticEvt,
+      );
+    } catch {
+      // Ignore synthetic dispatch errors
+    }
+  }
+
+  dismissNativeMenu(win ?? null, doc);
+  return notifyArchiveSuccess(`Archived session ${targetWsId}`);
+}
+
 let activeNoticeToastTimer: ReturnType<typeof setTimeout> | null = null;
 let activeNoticeToastEl: MinimalElement | null = null;
 
@@ -2738,15 +3045,32 @@ export function isMacPlatform(win?: MinimalWindow | null): boolean {
 }
 
 export function isInsideSidebarOrWorkspaceRow(el: MinimalElement | null): boolean {
+  if (!el) return false;
+  if (typeof el.closest === "function") {
+    try {
+      if (
+        el.closest(
+          '[data-testid^="sidebar-workspace-"], [data-testid^="sidebar-project-"], [data-testid^="sidebar-"], [data-testid="sidebar"], [data-testid="sidebar-content"], [data-testid="sidebar-scroll-body"], [data-testid="sidebar-status-list-scroll"]',
+        )
+      ) {
+        return true;
+      }
+    } catch {
+      // Ignore selector errors
+    }
+  }
   let curr: MinimalElement | null = el;
-  for (let depth = 0; curr && depth < 10; depth += 1) {
+  for (let depth = 0; curr && depth < 20; depth += 1) {
     const tid = (curr.getAttribute?.("data-testid") ?? "").toLowerCase();
     if (
       tid.startsWith("sidebar-workspace-") ||
       tid.startsWith("sidebar-project-") ||
       tid.startsWith("sidebar-workspace-row-") ||
+      tid.startsWith("sidebar-") ||
       tid === "sidebar" ||
-      tid === "sidebar-content"
+      tid === "sidebar-content" ||
+      tid === "sidebar-scroll-body" ||
+      tid === "sidebar-status-list-scroll"
     ) {
       return true;
     }
@@ -2774,9 +3098,26 @@ export function isInsideWorkspaceHeaderOrTab(el: MinimalElement | null): boolean
 export function hasOpenWorkspaceContextMenu(doc: MinimalDocument): boolean {
   return Boolean(
     doc.querySelector?.(
-      '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"], [data-testid^="sidebar-workspace-context-menu-"]',
+      '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"], [data-testid^="sidebar-workspace-menu-archive-"], [data-testid^="sidebar-workspace-context-menu-"]',
     ),
   );
+}
+
+function dedupeMenuContainers(items: MinimalElement[]): MinimalElement[] {
+  const result: MinimalElement[] = [];
+  for (const item of items) {
+    if (!item) continue;
+    const isContained = items.some(
+      (other) =>
+        other !== item &&
+        typeof other.contains === "function" &&
+        other.contains(item),
+    );
+    if (!isContained && !result.includes(item)) {
+      result.push(item);
+    }
+  }
+  return result;
 }
 
 export function annotateNativeWorkspaceMenusWithShortcuts(
@@ -2784,7 +3125,11 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
   prefs: InlineRenamePreferences,
   win: MinimalWindow | null = null,
 ): number {
-  if (!prefs.enableDesktopContextMenuHelper && !prefs.enableQuickRenameAndLabelShortcuts) {
+  if (
+    !prefs.enableDesktopContextMenuHelper &&
+    !prefs.enableQuickRenameAndLabelShortcuts &&
+    !prefs.enableSidebarDeleteKeyArchive
+  ) {
     return 0;
   }
   let annotatedCount = 0;
@@ -2795,20 +3140,163 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
       ? (mac ? "⇧⌘L" : "Ctrl+Shift+L")
       : (mac ? "⌘L" : "Ctrl+L");
   const renameShortcutText = "F2";
+  const archiveShortcutText = mac ? "⌫" : "Del";
 
   // 1. Labels trigger: [data-testid^="sidebar-workspace-menu-labels-"]
-  const labelItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-labels-"]');
-  if (labelItems) {
-    for (let i = 0; i < labelItems.length; i += 1) {
-      const item = labelItems[i];
+  const rawLabelItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-labels-"]');
+  const labelItems = dedupeMenuContainers(rawLabelItems ? Array.from(rawLabelItems) : []);
+  for (const item of labelItems) {
+    if (!item) continue;
+
+    const existingBadges = item.querySelectorAll?.(
+      '[data-testid="sidebar-workspace-menu-label-shortcut-hint"]',
+    );
+    if (existingBadges && existingBadges.length > 0) {
+      for (let b = 1; b < existingBadges.length; b += 1) {
+        existingBadges[b]?.remove?.();
+      }
+      const first = existingBadges[0];
+      if (first && first.textContent !== labelShortcutText) {
+        first.textContent = labelShortcutText;
+        annotatedCount += 1;
+      }
+      continue;
+    }
+
+    const parentBadge = item.parentElement?.querySelector?.(
+      '[data-testid="sidebar-workspace-menu-label-shortcut-hint"]',
+    );
+    if (parentBadge) {
+      if (parentBadge.textContent !== labelShortcutText) {
+        parentBadge.textContent = labelShortcutText;
+        annotatedCount += 1;
+      }
+      continue;
+    }
+
+    item.setAttribute?.("data-paseo-shortcut-annotated", "true");
+
+    const badge = doc.createElement("span");
+    badge.textContent = labelShortcutText;
+    badge.setAttribute?.("data-testid", "sidebar-workspace-menu-label-shortcut-hint");
+    if (badge.style) {
+      badge.style.marginLeft = "auto";
+      badge.style.marginRight = "6px";
+      badge.style.fontSize = "11px";
+      badge.style.lineHeight = "14px";
+      badge.style.padding = "1px 5px";
+      badge.style.borderRadius = "4px";
+      badge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
+      badge.style.color = "currentColor";
+      badge.style.opacity = "0.65";
+      badge.style.pointerEvents = "none";
+      badge.style.userSelect = "none";
+      badge.style.fontWeight = "400";
+      badge.style.letterSpacing = "0.02em";
+      badge.style.display = "inline-flex";
+      badge.style.alignItems = "center";
+    }
+
+    const children = item.children;
+    if (children && children.length > 1) {
+      const lastChild = children[children.length - 1];
+      if (item.insertBefore && lastChild) {
+        item.insertBefore(badge, lastChild);
+      } else {
+        item.appendChild?.(badge);
+      }
+    } else {
+      item.appendChild?.(badge);
+    }
+    annotatedCount += 1;
+  }
+
+  // 2. Rename item: [data-testid^="sidebar-workspace-menu-rename-"]
+  const rawRenameItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-rename-"]');
+  const renameItems = dedupeMenuContainers(rawRenameItems ? Array.from(rawRenameItems) : []);
+  for (const item of renameItems) {
+    if (!item) continue;
+
+    const existingBadges = item.querySelectorAll?.(
+      '[data-testid="sidebar-workspace-menu-rename-shortcut-hint"]',
+    );
+    if (existingBadges && existingBadges.length > 0) {
+      for (let b = 1; b < existingBadges.length; b += 1) {
+        existingBadges[b]?.remove?.();
+      }
+      const first = existingBadges[0];
+      if (first && first.textContent !== renameShortcutText) {
+        first.textContent = renameShortcutText;
+        annotatedCount += 1;
+      }
+      continue;
+    }
+
+    const parentBadge = item.parentElement?.querySelector?.(
+      '[data-testid="sidebar-workspace-menu-rename-shortcut-hint"]',
+    );
+    if (parentBadge) {
+      if (parentBadge.textContent !== renameShortcutText) {
+        parentBadge.textContent = renameShortcutText;
+        annotatedCount += 1;
+      }
+      continue;
+    }
+
+    item.setAttribute?.("data-paseo-shortcut-annotated", "true");
+
+    const badge = doc.createElement("span");
+    badge.textContent = renameShortcutText;
+    badge.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-shortcut-hint");
+    if (badge.style) {
+      badge.style.marginLeft = "auto";
+      badge.style.marginRight = "4px";
+      badge.style.fontSize = "11px";
+      badge.style.lineHeight = "14px";
+      badge.style.padding = "1px 5px";
+      badge.style.borderRadius = "4px";
+      badge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
+      badge.style.color = "currentColor";
+      badge.style.opacity = "0.65";
+      badge.style.pointerEvents = "none";
+      badge.style.userSelect = "none";
+      badge.style.fontWeight = "400";
+      badge.style.letterSpacing = "0.02em";
+      badge.style.display = "inline-flex";
+      badge.style.alignItems = "center";
+    }
+    item.appendChild?.(badge);
+    annotatedCount += 1;
+  }
+
+  // 3. Archive item: [data-testid^="sidebar-workspace-menu-archive-"]
+  if (prefs.enableSidebarDeleteKeyArchive !== false) {
+    const rawArchiveItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-archive-"]');
+    const archiveItems = dedupeMenuContainers(rawArchiveItems ? Array.from(rawArchiveItems) : []);
+    for (const item of archiveItems) {
       if (!item) continue;
 
-      const existingBadge = item.querySelector?.(
-        '[data-testid="sidebar-workspace-menu-label-shortcut-hint"]',
+      const existingBadges = item.querySelectorAll?.(
+        '[data-testid="sidebar-workspace-menu-archive-shortcut-hint"]',
       );
-      if (existingBadge) {
-        if (existingBadge.textContent !== labelShortcutText) {
-          existingBadge.textContent = labelShortcutText;
+      if (existingBadges && existingBadges.length > 0) {
+        for (let b = 1; b < existingBadges.length; b += 1) {
+          existingBadges[b]?.remove?.();
+        }
+        const first = existingBadges[0];
+        if (first && first.textContent !== archiveShortcutText) {
+          first.textContent = archiveShortcutText;
+          annotatedCount += 1;
+        }
+        continue;
+      }
+
+      const parentBadge = item.parentElement?.querySelector?.(
+        '[data-testid="sidebar-workspace-menu-archive-shortcut-hint"]',
+      );
+      if (parentBadge) {
+        if (parentBadge.textContent !== archiveShortcutText) {
+          parentBadge.textContent = archiveShortcutText;
           annotatedCount += 1;
         }
         continue;
@@ -2817,11 +3305,11 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
       item.setAttribute?.("data-paseo-shortcut-annotated", "true");
 
       const badge = doc.createElement("span");
-      badge.textContent = labelShortcutText;
-      badge.setAttribute?.("data-testid", "sidebar-workspace-menu-label-shortcut-hint");
+      badge.textContent = archiveShortcutText;
+      badge.setAttribute?.("data-testid", "sidebar-workspace-menu-archive-shortcut-hint");
       if (badge.style) {
         badge.style.marginLeft = "auto";
-        badge.style.marginRight = "6px";
+        badge.style.marginRight = "4px";
         badge.style.fontSize = "11px";
         badge.style.lineHeight = "14px";
         badge.style.padding = "1px 5px";
@@ -2848,51 +3336,6 @@ export function annotateNativeWorkspaceMenusWithShortcuts(
       } else {
         item.appendChild?.(badge);
       }
-      annotatedCount += 1;
-    }
-  }
-
-  // 2. Rename item: [data-testid^="sidebar-workspace-menu-rename-"]
-  const renameItems = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-menu-rename-"]');
-  if (renameItems) {
-    for (let i = 0; i < renameItems.length; i += 1) {
-      const item = renameItems[i];
-      if (!item) continue;
-
-      const existingBadge = item.querySelector?.(
-        '[data-testid="sidebar-workspace-menu-rename-shortcut-hint"]',
-      );
-      if (existingBadge) {
-        if (existingBadge.textContent !== renameShortcutText) {
-          existingBadge.textContent = renameShortcutText;
-          annotatedCount += 1;
-        }
-        continue;
-      }
-
-      item.setAttribute?.("data-paseo-shortcut-annotated", "true");
-
-      const badge = doc.createElement("span");
-      badge.textContent = renameShortcutText;
-      badge.setAttribute?.("data-testid", "sidebar-workspace-menu-rename-shortcut-hint");
-      if (badge.style) {
-        badge.style.marginLeft = "auto";
-        badge.style.marginRight = "4px";
-        badge.style.fontSize = "11px";
-        badge.style.lineHeight = "14px";
-        badge.style.padding = "1px 5px";
-        badge.style.borderRadius = "4px";
-        badge.style.backgroundColor = "rgba(128, 128, 128, 0.16)";
-        badge.style.color = "currentColor";
-        badge.style.opacity = "0.65";
-        badge.style.pointerEvents = "none";
-        badge.style.userSelect = "none";
-        badge.style.fontWeight = "400";
-        badge.style.letterSpacing = "0.02em";
-        badge.style.display = "inline-flex";
-        badge.style.alignItems = "center";
-      }
-      item.appendChild?.(badge);
       annotatedCount += 1;
     }
   }
@@ -3094,6 +3537,8 @@ export async function openQuickWorkspaceSwitcherModal(
           projectRootPath: item.projectRootPath,
           shortPath: item.shortPath,
           primaryWorkspaceTitle: item.primaryWorkspaceTitle,
+          workspaceIds: item.workspaceIds,
+          searchTokens: item.searchTokens,
         },
         q,
       );
@@ -3117,6 +3562,18 @@ export async function openQuickWorkspaceSwitcherModal(
   ) => {
     if (!candidate) return;
     closeModal();
+    const rawQ = (searchInput.value ?? "").trim().replace(/^#/, "").toLowerCase();
+    const isSessionSpecificQuery =
+      rawQ.length >= 4 &&
+      Boolean(
+        candidate.matchedWorkspaceId ||
+          candidate.matchedAgentId ||
+          candidate.searchTokens?.some(
+            (t) =>
+              t.toLowerCase() === rawQ ||
+              t.toLowerCase().replace(/^wks_/, "").startsWith(rawQ),
+          ),
+      );
     if (jumpMode === "locate-sidebar") {
       locateProjectInSidebar(
         {
@@ -3129,7 +3586,7 @@ export async function openQuickWorkspaceSwitcherModal(
         doc,
         win,
       );
-    } else if (jumpMode === "new-workspace") {
+    } else if (jumpMode === "new-workspace" && !isSessionSpecificQuery) {
       openNewWorkspaceInApp(
         {
           projectId: candidate.projectId,
@@ -3846,7 +4303,19 @@ export function installDesktopRevealHelpers(
     return win.navigator?.language ?? "en";
   };
 
+  let activeMenuCleanup: (() => void) | null = null;
+  let quickMetadataBarSeq = 0;
+  let isFetchingThreadMetadata = false;
+
   const removeMenu = () => {
+    quickMetadataBarSeq += 1;
+    isFetchingThreadMetadata = false;
+    if (activeMenuCleanup) {
+      try {
+        activeMenuCleanup();
+      } catch {}
+      activeMenuCleanup = null;
+    }
     if (activeMenuEl) {
       activeMenuEl.remove?.();
       activeMenuEl = null;
@@ -3854,6 +4323,20 @@ export function installDesktopRevealHelpers(
     if (activeQuickJumpModalEl) {
       activeQuickJumpModalEl.remove?.();
       activeQuickJumpModalEl = null;
+    }
+    if (doc?.body) {
+      const ghostBars = doc.body.querySelectorAll?.(
+        '[data-testid="paseo-finder-quick-thread-bar"]',
+      );
+      if (ghostBars) {
+        for (const b of Array.from(ghostBars)) b?.remove?.();
+      }
+      const ghostBackdrops = doc.body.querySelectorAll?.(
+        '[data-testid="paseo-finder-quick-thread-bar-backdrop"]',
+      );
+      if (ghostBackdrops) {
+        for (const bd of Array.from(ghostBackdrops)) bd?.remove?.();
+      }
     }
   };
 
@@ -4002,6 +4485,9 @@ export function installDesktopRevealHelpers(
     dismissNativeMenu(win, doc);
     if (!doc.body || !callbacks.onFetchThreadMetadata) return false;
 
+    const seq = quickMetadataBarSeq;
+    isFetchingThreadMetadata = true;
+
     const tokens = syncPaseoThemeCssVariables(doc, win);
     const catalog = getCatalogForLocale(resolveLocale());
     const activeWsId = resolveCurrentActiveWorkspaceId(
@@ -4009,8 +4495,80 @@ export function installDesktopRevealHelpers(
       win,
       callbacks.getFallbackWorkspaceId?.(),
     );
-    const snap = await callbacks.onFetchThreadMetadata(activeWsId).catch(() => null);
-    if (!snap || !doc.body) return false;
+    let snap: Awaited<ReturnType<NonNullable<typeof callbacks.onFetchThreadMetadata>>> = null;
+    try {
+      snap = await callbacks.onFetchThreadMetadata(activeWsId);
+    } catch {
+      snap = null;
+    } finally {
+      if (seq === quickMetadataBarSeq) {
+        isFetchingThreadMetadata = false;
+      }
+    }
+
+    if (seq !== quickMetadataBarSeq || !snap || !doc.body) return false;
+
+    // Clean up any stale cleanup callbacks or ghost elements before mounting
+    if (activeMenuCleanup) {
+      try {
+        activeMenuCleanup();
+      } catch {}
+      activeMenuCleanup = null;
+    }
+    if (activeMenuEl) {
+      activeMenuEl.remove?.();
+      activeMenuEl = null;
+    }
+    const staleBars = doc.body.querySelectorAll?.(
+      '[data-testid="paseo-finder-quick-thread-bar"]',
+    );
+    if (staleBars) {
+      for (const b of Array.from(staleBars)) b?.remove?.();
+    }
+    const staleBackdrops = doc.body.querySelectorAll?.(
+      '[data-testid="paseo-finder-quick-thread-bar-backdrop"]',
+    );
+    if (staleBackdrops) {
+      for (const bd of Array.from(staleBackdrops)) bd?.remove?.();
+    }
+
+    // 0. Transparent backdrop intercepting any outside clicks across the entire viewport
+    const backdrop = doc.createElement("div");
+    backdrop.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar-backdrop");
+    backdrop.setAttribute?.("role", "presentation");
+    if (backdrop.style) {
+      backdrop.style.position = "fixed";
+      backdrop.style.inset = "0";
+      backdrop.style.top = "0";
+      backdrop.style.left = "0";
+      backdrop.style.width = "100vw";
+      backdrop.style.height = "100vh";
+      backdrop.style.zIndex = "2147483646";
+      backdrop.style.backgroundColor = "transparent";
+      backdrop.style.cursor = "default";
+    }
+
+    const onBackdropDismiss = (ev: unknown) => {
+      removeMenu();
+    };
+    backdrop.addEventListener?.("pointerdown", onBackdropDismiss);
+    backdrop.addEventListener?.("mousedown", onBackdropDismiss);
+    backdrop.addEventListener?.("click", onBackdropDismiss);
+
+    const onGlobalEscape = (ev: unknown) => {
+      const ke = ev as MinimalKeyboardEvent;
+      if (ke.key === "Escape") {
+        ke.preventDefault?.();
+        ke.stopPropagation?.();
+        removeMenu();
+      }
+    };
+    win.addEventListener?.("keydown", onGlobalEscape, true);
+
+    activeMenuCleanup = () => {
+      backdrop.remove?.();
+      win.removeEventListener?.("keydown", onGlobalEscape, true);
+    };
 
     const container = doc.createElement("div");
     container.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar");
@@ -4036,6 +4594,16 @@ export function installDesktopRevealHelpers(
         'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
     }
 
+    // Header Row with Title and Close Button '×'
+    const headerRow = doc.createElement("div");
+    if (headerRow.style) {
+      headerRow.style.display = "flex";
+      headerRow.style.flexDirection = "row";
+      headerRow.style.alignItems = "center";
+      headerRow.style.justifyContent = "space-between";
+      headerRow.style.gap = "8px";
+    }
+
     const headerTitle = doc.createElement("div");
     headerTitle.textContent = catalog.browser.threadMetaTitle;
     if (headerTitle.style) {
@@ -4043,7 +4611,56 @@ export function installDesktopRevealHelpers(
       headerTitle.style.fontWeight = "600";
       headerTitle.style.color = tokens.foreground;
     }
-    container.appendChild?.(headerTitle);
+    headerRow.appendChild?.(headerTitle);
+
+    const closeBtn = doc.createElement("span");
+    closeBtn.textContent = "×";
+    closeBtn.setAttribute?.("role", "button");
+    closeBtn.setAttribute?.("tabindex", "0");
+    closeBtn.setAttribute?.("aria-label", "Close");
+    closeBtn.setAttribute?.("title", "Close (Esc)");
+    closeBtn.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar-close");
+    if (closeBtn.style) {
+      closeBtn.style.display = "inline-flex";
+      closeBtn.style.alignItems = "center";
+      closeBtn.style.justifyContent = "center";
+      closeBtn.style.width = "20px";
+      closeBtn.style.height = "20px";
+      closeBtn.style.borderRadius = "4px";
+      closeBtn.style.fontSize = "16px";
+      closeBtn.style.lineHeight = "1";
+      closeBtn.style.color = tokens.foregroundMuted;
+      closeBtn.style.cursor = "pointer";
+      closeBtn.style.userSelect = "none";
+      closeBtn.style.transition = "background-color 0.15s, color 0.15s";
+    }
+    closeBtn.addEventListener?.("mouseenter", () => {
+      if (closeBtn.style) {
+        closeBtn.style.backgroundColor = `${tokens.foreground}1f`;
+        closeBtn.style.color = tokens.foreground;
+      }
+    });
+    closeBtn.addEventListener?.("mouseleave", () => {
+      if (closeBtn.style) {
+        closeBtn.style.backgroundColor = "transparent";
+        closeBtn.style.color = tokens.foregroundMuted;
+      }
+    });
+    const handleClose = (ev: MinimalMouseEvent | MinimalKeyboardEvent) => {
+      ev.preventDefault?.();
+      ev.stopPropagation?.();
+      removeMenu();
+    };
+    closeBtn.addEventListener?.("click", (ev) => handleClose(ev as MinimalMouseEvent));
+    closeBtn.addEventListener?.("keydown", (ev) => {
+      const ke = ev as MinimalKeyboardEvent;
+      if (ke.key === "Enter" || ke.key === " " || ke.key === "Escape") {
+        handleClose(ke);
+      }
+    });
+    headerRow.appendChild?.(closeBtn);
+
+    container.appendChild?.(headerRow);
 
     // 1. Rename Row
     const renameRow = doc.createElement("div");
@@ -4123,6 +4740,7 @@ export function installDesktopRevealHelpers(
 
     let currentAssigned = new Set<string>(snap.assignedLabels);
     let currentCatalog = [...snap.catalog];
+    const deletingLabels = new Set<string>();
 
     const renderChips = () => {
       if (typeof chipsWrap.replaceChildren === "function") {
@@ -4132,6 +4750,19 @@ export function installDesktopRevealHelpers(
       }
       if (Array.isArray(chipsWrap.children) && chipsWrap.children.length > 0) {
         (chipsWrap.children as MinimalElement[]).length = 0;
+      }
+      if (currentCatalog.length === 0) {
+        const emptyHint = doc.createElement("div");
+        emptyHint.setAttribute?.("data-testid", "no-labels-hint");
+        emptyHint.textContent = catalog.browser.noLabelsYet;
+        if (emptyHint.style) {
+          emptyHint.style.fontSize = "12px";
+          emptyHint.style.color = tokens.foregroundMuted;
+          emptyHint.style.padding = "4px 0";
+          emptyHint.style.userSelect = "none";
+        }
+        chipsWrap.appendChild?.(emptyHint);
+        return;
       }
       for (const entry of currentCatalog) {
         const isAssigned = currentAssigned.has(entry.name);
@@ -4151,6 +4782,15 @@ export function installDesktopRevealHelpers(
           chip.style.border = isAssigned ? `1px solid ${dotColor}` : `1px solid ${tokens.border}`;
           chip.style.color = tokens.foreground;
         }
+
+        const tagBody = doc.createElement("span");
+        if (tagBody.style) {
+          tagBody.style.display = "inline-flex";
+          tagBody.style.flexDirection = "row";
+          tagBody.style.alignItems = "center";
+          tagBody.style.gap = "5px";
+          tagBody.style.cursor = "pointer";
+        }
         const dot = doc.createElement("span");
         if (dot.style) {
           dot.style.width = "8px";
@@ -4161,8 +4801,9 @@ export function installDesktopRevealHelpers(
         }
         const txt = doc.createElement("span");
         txt.textContent = isAssigned ? `${entry.name} ✓` : entry.name;
-        chip.appendChild?.(dot);
-        chip.appendChild?.(txt);
+        tagBody.appendChild?.(dot);
+        tagBody.appendChild?.(txt);
+        chip.appendChild?.(tagBody);
 
         const delBtn = doc.createElement("span");
         delBtn.textContent = "×";
@@ -4190,34 +4831,51 @@ export function installDesktopRevealHelpers(
           delBtn.style.color = tokens.foregroundMuted;
           delBtn.style.cursor = "pointer";
           delBtn.style.opacity = "0.7";
+          delBtn.style.userSelect = "none";
           delBtn.style.transition = "background-color 0.15s, color 0.15s, opacity 0.15s";
         }
-        delBtn.addEventListener?.("mouseenter", () => {
+
+        const highlightDel = () => {
           if (delBtn.style) {
             delBtn.style.backgroundColor = `${tokens.foreground}1f`;
             delBtn.style.color = tokens.foreground;
             delBtn.style.opacity = "1";
           }
-        });
-        delBtn.addEventListener?.("mouseleave", () => {
+        };
+        const resetDel = () => {
           if (delBtn.style) {
             delBtn.style.backgroundColor = "transparent";
             delBtn.style.color = tokens.foregroundMuted;
             delBtn.style.opacity = "0.7";
           }
+        };
+
+        delBtn.addEventListener?.("mouseenter", highlightDel);
+        delBtn.addEventListener?.("mouseleave", resetDel);
+        delBtn.addEventListener?.("focus", highlightDel);
+        delBtn.addEventListener?.("blur", resetDel);
+        delBtn.addEventListener?.("mousedown", (ev) => {
+          const me = ev as MinimalMouseEvent;
+          me.stopPropagation?.();
         });
 
         const handleDelete = (ev: MinimalMouseEvent | MinimalKeyboardEvent) => {
           ev.preventDefault?.();
           ev.stopPropagation?.();
+          if (deletingLabels.has(entry.name)) return;
+          deletingLabels.add(entry.name);
           void callbacks
             .onDeleteLabel?.(entry.name, snap.workspaceId)
-            .then((updated) => {
+            ?.then((updated) => {
+              deletingLabels.delete(entry.name);
               if (updated) {
                 currentAssigned = new Set(updated.assignedLabels);
                 currentCatalog = [...updated.catalog];
                 renderChips();
               }
+            })
+            ?.catch(() => {
+              deletingLabels.delete(entry.name);
             });
         };
 
@@ -4226,27 +4884,30 @@ export function installDesktopRevealHelpers(
         });
         delBtn.addEventListener?.("keydown", (ev) => {
           const ke = ev as MinimalKeyboardEvent;
-          if (ke.key === "Enter" || ke.key === " ") {
+          if (ke.key === "Enter" || ke.key === " " || ke.key === "Delete" || ke.key === "Backspace") {
             handleDelete(ke);
           }
         });
 
         chip.appendChild?.(delBtn);
 
-        chip.addEventListener?.("click", (ev) => {
-          const me = ev as MinimalMouseEvent;
-          me.preventDefault?.();
-          me.stopPropagation?.();
+        const handleToggle = (ev: MinimalMouseEvent) => {
+          ev.preventDefault?.();
+          ev.stopPropagation?.();
           void callbacks
             .onToggleLabel?.(entry.name, entry.color, snap.workspaceId)
-            .then((updated) => {
-            if (updated) {
-              currentAssigned = new Set(updated.assignedLabels);
-              currentCatalog = [...updated.catalog];
-              renderChips();
-            }
-          });
-        });
+            ?.then((updated) => {
+              if (updated) {
+                currentAssigned = new Set(updated.assignedLabels);
+                currentCatalog = [...updated.catalog];
+                renderChips();
+              }
+            })
+            ?.catch(() => null);
+        };
+
+        tagBody.addEventListener?.("click", (ev) => handleToggle(ev as MinimalMouseEvent));
+        chip.addEventListener?.("click", (ev) => handleToggle(ev as MinimalMouseEvent));
         chipsWrap.appendChild?.(chip);
       }
     };
@@ -4363,6 +5024,7 @@ export function installDesktopRevealHelpers(
     newLabelRow.appendChild?.(addLabelBtn);
     container.appendChild?.(newLabelRow);
 
+    doc.body.appendChild?.(backdrop);
     doc.body.appendChild?.(container);
     activeMenuEl = container;
 
@@ -4597,25 +5259,50 @@ export function installDesktopRevealHelpers(
   }
 
   const onPointerDownCapture = (ev: unknown) => {
-    if (!activeInlineSession) return;
     const me = ev as MinimalMouseEvent;
-    if (
-      me.target !== activeInlineSession.inputEl &&
-      !activeInlineSession.inputEl.contains?.(me.target)
-    ) {
-      activeInlineSession.markOutsidePointerDown();
+    if (activeMenuEl && (!me.target || !activeMenuEl.contains?.(me.target))) {
+      removeMenu();
+    }
+    if (activeInlineSession) {
+      if (
+        me.target !== activeInlineSession.inputEl &&
+        !activeInlineSession.inputEl.contains?.(me.target)
+      ) {
+        activeInlineSession.markOutsidePointerDown();
+      }
+    }
+    let currClickEl: MinimalElement | null = me.target;
+    let clickedInsideSidebar = false;
+    for (let depth = 0; currClickEl && depth < 20; depth += 1) {
+      const tid = currClickEl.getAttribute?.("data-testid") ?? "";
+      if (tid.startsWith("sidebar-workspace-row-")) {
+        const parsed = parseSidebarWorkspaceRowTestId(tid);
+        if (parsed?.workspaceId) {
+          lastSidebarDirectClickWsId = parsed.workspaceId;
+          lastSidebarDirectClickAtMs = Date.now();
+          clickedInsideSidebar = true;
+        }
+        break;
+      }
+      if (tid.startsWith("sidebar-project-row-") || isInsideSidebarOrWorkspaceRow(currClickEl)) {
+        clickedInsideSidebar = true;
+      }
+      currClickEl = currClickEl.parentElement ?? null;
+    }
+    if (!clickedInsideSidebar && !hasOpenWorkspaceContextMenu(doc)) {
+      lastSidebarDirectClickWsId = null;
+      lastSidebarDirectClickAtMs = 0;
     }
   };
 
   const onClickCapture = (ev: unknown) => {
     if (!callbacks.isEnabled()) return;
     const me = ev as MinimalMouseEvent;
-    const prefs = readInlineRenamePreferences(win.localStorage);
-    if (!prefs.enableDesktopContextMenuHelper) return;
-
     if (activeMenuEl && (!me.target || !activeMenuEl.contains?.(me.target))) {
       removeMenu();
     }
+    const prefs = readInlineRenamePreferences(win.localStorage);
+    if (!prefs.enableDesktopContextMenuHelper) return;
 
     // Programmatic `.click()` (our own reveal/expand presses, other plugins) is not a user
     // choice. Treating it as one re-entered the reveal and froze the window (T-028).
@@ -4624,7 +5311,8 @@ export function installDesktopRevealHelpers(
     // Track direct clicks on left sidebar workspace rows so we don't re-scroll what's already under the cursor,
     // and immediately clear any active jump-flash or lingering inline selection styles on other rows.
     let currClickEl: MinimalElement | null = isUserClick ? me.target : null;
-    for (let depth = 0; currClickEl && depth < 8; depth += 1) {
+    let clickedInsideSidebar = false;
+    for (let depth = 0; currClickEl && depth < 20; depth += 1) {
       const tid = currClickEl.getAttribute?.("data-testid") ?? "";
       if (tid.startsWith("sidebar-workspace-row-")) {
         clearSidebarJumpFlashes(doc);
@@ -4632,14 +5320,23 @@ export function installDesktopRevealHelpers(
         if (parsed?.workspaceId) {
           lastSidebarDirectClickWsId = parsed.workspaceId;
           lastSidebarDirectClickAtMs = Date.now();
+          clickedInsideSidebar = true;
         }
         break;
       }
       if (tid.startsWith("sidebar-project-row-")) {
         clearSidebarJumpFlashes(doc);
+        clickedInsideSidebar = true;
         break;
       }
+      if (isInsideSidebarOrWorkspaceRow(currClickEl)) {
+        clickedInsideSidebar = true;
+      }
       currClickEl = currClickEl.parentElement ?? null;
+    }
+    if (isUserClick && !clickedInsideSidebar && !isInsideSidebarOrWorkspaceRow(me.target) && !hasOpenWorkspaceContextMenu(doc)) {
+      lastSidebarDirectClickWsId = null;
+      lastSidebarDirectClickAtMs = 0;
     }
 
     // Detect clicks on Workspace or Agent rows inside Paseo's native Search / CommandCenter (⌘K / ⌘F)
@@ -4775,6 +5472,20 @@ export function installDesktopRevealHelpers(
     const prefs = readInlineRenamePreferences(win.localStorage);
     if (!prefs.enableDesktopContextMenuHelper) return;
     const me = ev as MinimalMouseEvent;
+
+    let currTargetEl: MinimalElement | null = me.target;
+    for (let depth = 0; currTargetEl && depth < 20; depth += 1) {
+      const tid = currTargetEl.getAttribute?.("data-testid") ?? "";
+      if (tid.startsWith("sidebar-workspace-row-")) {
+        const parsed = parseSidebarWorkspaceRowTestId(tid);
+        if (parsed?.workspaceId) {
+          lastSidebarDirectClickWsId = parsed.workspaceId;
+          lastSidebarDirectClickAtMs = Date.now();
+        }
+        break;
+      }
+      currTargetEl = currTargetEl.parentElement ?? null;
+    }
 
     // 1. Inside Paseo's File Explorer or existing context menu: let Paseo's native menu handle it
     if (isInsideFileExplorer(me.target) || isEditableInput(me.target)) {
@@ -4942,6 +5653,39 @@ export function installDesktopRevealHelpers(
       });
       return;
     }
+    // Delete or Backspace press once archives clicked/selected sidebar session (same as ⌘+⇧+del)
+    if (
+      prefs.enableSidebarDeleteKeyArchive !== false &&
+      isSidebarDeleteKeyboardEvent(ke) &&
+      shouldTriggerSidebarDeleteArchive({
+        event: ke,
+        doc,
+        win,
+        activeInlineSession,
+        activeQuickJumpModalEl,
+        lastSidebarDirectClickWsId,
+        lastSidebarDirectClickAtMs,
+        fallbackWorkspaceId: callbacks.getFallbackWorkspaceId?.(),
+        enableSidebarDeleteKeyArchive: prefs.enableSidebarDeleteKeyArchive,
+      })
+    ) {
+      ke.preventDefault();
+      ke.stopPropagation?.();
+      const wsToArchive = lastSidebarDirectClickWsId;
+      lastSidebarDirectClickWsId = null;
+      lastSidebarDirectClickAtMs = 0;
+      void archiveCurrentSidebarSession({
+        doc,
+        win,
+        callbacks,
+        lastClickedWsId: wsToArchive,
+        onArchiveComplete: () => {
+          lastSidebarDirectClickWsId = null;
+          lastSidebarDirectClickAtMs = 0;
+        },
+      });
+      return;
+    }
     // Cmd+L or Cmd+Shift+L opens Quick Workspace Rename & Labels Bar (focused on labels)
     const isCmdOrCtrl = ke.metaKey || ke.ctrlKey;
     const isKeyL =
@@ -4958,7 +5702,20 @@ export function installDesktopRevealHelpers(
       const combo = prefs.labelShortcutCombo ?? "both";
       const isShift = Boolean(ke.shiftKey);
 
-      // 1. Shift chord: Cmd+Shift+L is universal and never collides with Paseo's chat input focus
+      // If typing inside an input/textarea (like prompt composer), blur input so focus moves cleanly to labels bar:
+      if (isEditableInput(ke.target ?? null)) {
+        (ke.target as unknown as { blur?: () => void })?.blur?.();
+      }
+
+      // If the quick labels bar is already open on screen, pressing Cmd+L or Cmd+Shift+L toggles it off!
+      if (activeMenuEl) {
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        removeMenu();
+        return;
+      }
+
+      // 1. Shift chord: Cmd+Shift+L is universal
       if (isShift && (combo === "cmd_shift_l" || combo === "both")) {
         ke.preventDefault();
         ke.stopPropagation?.();
@@ -4969,29 +5726,11 @@ export function installDesktopRevealHelpers(
 
       // 2. Non-shift chord: Cmd+L
       if (!isShift && (combo === "cmd_l" || combo === "both")) {
-        // If actively typing inside an editable input (input, textarea, contenteditable), never hijack
-        if (isEditableInput(ke.target ?? null)) {
-          // Do not hijack typing inside textboxes
-        } else {
-          // If combo is "both" (default), Cmd+L targets labels when in a workspace context:
-          // A) Workspace context menu is currently open on screen
-          // B) Focus/target is on sidebar or workspace row
-          // C) Focus/target is on workspace header title or tab
-          // D) If combo === "cmd_l", user explicitly chose Cmd+L as universal trigger
-          const hasOpenMenu = hasOpenWorkspaceContextMenu(doc);
-          const inSidebar = isInsideSidebarOrWorkspaceRow(ke.target ?? null);
-          const inHeaderOrTab = isInsideWorkspaceHeaderOrTab(ke.target ?? null);
-
-          if (combo === "cmd_l" || hasOpenMenu || inSidebar || inHeaderOrTab) {
-            ke.preventDefault();
-            ke.stopPropagation?.();
-            dismissNativeMenu(win, doc);
-            void showQuickThreadMetadataBar("labels");
-            return;
-          }
-          // Otherwise in chat view with combo === "both":
-          // Allow event to bubble through to Paseo's native message-input-focus-cmd-l-mac!
-        }
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        dismissNativeMenu(win, doc);
+        void showQuickThreadMetadataBar("labels");
+        return;
       }
     }
     // Cmd+J (Ctrl+J) or Cmd+Shift+O (Ctrl+Shift+O) opens Quick Project Workspace Switcher
