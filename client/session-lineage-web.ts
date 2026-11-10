@@ -7,7 +7,7 @@ import {
   inspectSystemPromptRpc,
 } from "../shared/contracts";
 import { isChineseLocale } from "./i18n";
-import { syncPaseoThemeCssVariables } from "./theme-web";
+import { syncPaseoThemeCssVariables, resolveActivePaseoTheme } from "./theme-web";
 import { focusWorkspaceInApp } from "./web";
 import {
   findCadenceScheduleForWorkspace,
@@ -2018,6 +2018,8 @@ export function openSystemPromptViewer(
     return;
   }
 
+  const theme = resolveActivePaseoTheme(doc, win);
+
   const root = doc.createElement("div");
   root.id = "paseo-finder-system-prompt-modal-root";
   root.setAttribute("data-testid", "paseo-finder-system-prompt-modal-root");
@@ -2028,7 +2030,8 @@ export function openSystemPromptViewer(
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.45)",
+    backgroundColor:
+      theme.colorScheme === "dark" ? "rgba(0, 0, 0, 0.72)" : "rgba(0, 0, 0, 0.45)",
     backdropFilter: "blur(2px)",
     padding: "20px",
   });
@@ -2038,11 +2041,11 @@ export function openSystemPromptViewer(
   dialog.setAttribute("aria-modal", "true");
   dialog.setAttribute("data-testid", "paseo-finder-system-prompt-modal");
   Object.assign(dialog.style, {
-    backgroundColor: "var(--color-background-primary, #ffffff)",
-    color: "var(--color-text-primary, #1f2328)",
-    border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.25))",
+    backgroundColor: theme.surface0,
+    color: theme.foreground,
+    border: `1px solid ${theme.border}`,
     borderRadius: "10px",
-    boxShadow: "0 12px 32px rgba(0, 0, 0, 0.2)",
+    boxShadow: theme.shadowLg || "0 12px 32px rgba(0, 0, 0, 0.25)",
     width: "100%",
     maxWidth: "760px",
     maxHeight: "85vh",
@@ -2054,7 +2057,7 @@ export function openSystemPromptViewer(
   const header = doc.createElement("div");
   Object.assign(header.style, {
     padding: "14px 18px",
-    borderBottom: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.2))",
+    borderBottom: `1px solid ${theme.border}`,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -2070,7 +2073,7 @@ export function openSystemPromptViewer(
 
   const subtitle = doc.createElement("div");
   subtitle.style.fontSize = "12px";
-  subtitle.style.color = "var(--color-text-secondary, #656d76)";
+  subtitle.style.color = theme.foregroundMuted;
   subtitle.style.marginTop = "2px";
   subtitle.textContent = zh ? "加载中..." : "Loading configuration...";
 
@@ -2088,7 +2091,7 @@ export function openSystemPromptViewer(
     fontSize: "20px",
     cursor: "pointer",
     padding: "0 6px",
-    color: "var(--color-text-secondary, #656d76)",
+    color: theme.foregroundMuted,
     lineHeight: "1",
   });
   closeBtn.addEventListener("click", () => root.remove());
@@ -2110,23 +2113,23 @@ export function openSystemPromptViewer(
     ? "正在从 ~/.paseo/config.json 读取配置..."
     : "Reading from ~/.paseo/config.json...";
   loading.style.fontSize = "13px";
-  loading.style.color = "var(--color-text-secondary, #656d76)";
+  loading.style.color = theme.foregroundMuted;
   body.appendChild(loading);
   dialog.appendChild(body);
 
   const footer = doc.createElement("div");
   Object.assign(footer.style, {
     padding: "12px 18px",
-    borderTop: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.2))",
+    borderTop: `1px solid ${theme.border}`,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "var(--color-background-secondary, rgba(0, 0, 0, 0.02))",
+    backgroundColor: theme.surface1,
   });
 
   const footerLeft = doc.createElement("div");
   footerLeft.style.fontSize = "12px";
-  footerLeft.style.color = "var(--color-text-secondary, #656d76)";
+  footerLeft.style.color = theme.foregroundMuted;
 
   const footerRight = doc.createElement("div");
   footerRight.style.display = "flex";
@@ -2164,8 +2167,8 @@ export function openSystemPromptViewer(
             fontSize: "11px",
             padding: "2px 8px",
             borderRadius: "10px",
-            backgroundColor: "rgba(128, 128, 128, 0.12)",
-            color: "var(--color-text-secondary, #57606a)",
+            backgroundColor: theme.surface2,
+            color: theme.foregroundMuted,
           });
           tag.textContent = `${sec.title} (${sec.charCount}c)`;
           sectionsBar.appendChild(tag);
@@ -2178,15 +2181,15 @@ export function openSystemPromptViewer(
         margin: "0",
         padding: "12px",
         borderRadius: "6px",
-        backgroundColor: "var(--color-background-code, rgba(0, 0, 0, 0.04))",
-        color: "var(--color-text-code, inherit)",
+        backgroundColor: theme.surface1,
+        color: theme.foreground,
         fontSize: "12px",
         lineHeight: "1.5",
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
         fontFamily:
           "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.15))",
+        border: `1px solid ${theme.border}`,
         maxHeight: "45vh",
         overflowY: "auto",
         userSelect: "text",
@@ -2203,8 +2206,9 @@ export function openSystemPromptViewer(
       Object.assign(copyBtn.style, {
         padding: "6px 12px",
         borderRadius: "6px",
-        border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.3))",
-        backgroundColor: "var(--color-background-primary, #ffffff)",
+        border: `1px solid ${theme.border}`,
+        backgroundColor: theme.surface0,
+        color: theme.foreground,
         cursor: "pointer",
         fontSize: "12px",
         fontWeight: "500",
@@ -2227,8 +2231,9 @@ export function openSystemPromptViewer(
       Object.assign(openBtn.style, {
         padding: "6px 12px",
         borderRadius: "6px",
-        border: "1px solid var(--color-border-subtle, rgba(128, 128, 128, 0.3))",
-        backgroundColor: "var(--color-background-primary, #ffffff)",
+        border: `1px solid ${theme.border}`,
+        backgroundColor: theme.surface0,
+        color: theme.foreground,
         cursor: "pointer",
         fontSize: "12px",
         fontWeight: "500",

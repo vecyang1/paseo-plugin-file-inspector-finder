@@ -2265,8 +2265,8 @@ export function isPinWorkspaceKeyboardEvent(ke?: MinimalKeyboardEvent | null): b
   const key = (ke.key ?? "").toLowerCase();
   const code = ke.code;
   const keyCode = ke.keyCode;
-  // On macOS Chromium, Option+P produces 'π'
-  return code === "KeyP" || key === "p" || ke.key === "π" || keyCode === 80;
+  // On macOS Chromium, Option+P produces 'π' / 'Π'
+  return code === "KeyP" || key === "p" || key === "π" || ke.key === "π" || ke.key === "Π" || keyCode === 80;
 }
 
 let lastNavigatedWorkspaceKey: string | null = null;
@@ -2780,13 +2780,119 @@ export function navigateSidebarThreadRelative(options?: {
   };
 }
 
+export function shouldTriggerPinWorkspaceShortcut(options: {
+  event?: MinimalKeyboardEvent | null;
+  eventTarget?: unknown;
+  doc: MinimalDocument;
+  win?: MinimalWindow | null;
+  hoveredElement?: MinimalElement | null;
+  isMouseInsideSidebar?: boolean;
+  lastSidebarDirectClickWsId?: string | null;
+  lastSidebarDirectClickAtMs?: number;
+  enablePinWorkspaceShortcut?: boolean;
+  prefs?: { enablePinWorkspaceShortcut?: boolean };
+}): boolean {
+  const enabled =
+    options.prefs?.enablePinWorkspaceShortcut ??
+    options.enablePinWorkspaceShortcut;
+  if (enabled === false) return false;
+  if (options.event && !isPinWorkspaceKeyboardEvent(options.event)) return false;
+
+  // 1. Hard-blocking interactive overlays
+  // Active inline rename input
+  if (options.doc.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]')) {
+    return false;
+  }
+  // Active search / Command Center palette (⌘K / ⌘F)
+  if (
+    options.doc.querySelector?.(
+      '[data-testid="command-center-panel"], [data-testid="command-center-input"]',
+    )
+  ) {
+    return false;
+  }
+  // True modal dialogs (excluding passive popovers / tooltips)
+  if (
+    options.doc.querySelector?.(
+      '[role="dialog"][aria-modal="true"], [data-testid*="rename-modal"]:not([aria-hidden="true"])',
+    )
+  ) {
+    return false;
+  }
+
+  // 2. Cursor is on the sidebar or user recently clicked/interacted with the sidebar
+  if (options.isMouseInsideSidebar) return true;
+  if (options.hoveredElement && isInsideSidebarOrWorkspaceRow(options.hoveredElement)) {
+    return true;
+  }
+  if (hasOpenWorkspaceContextMenu(options.doc)) {
+    return true;
+  }
+  if (options.lastSidebarDirectClickWsId) {
+    const elapsed = Date.now() - (options.lastSidebarDirectClickAtMs ?? 0);
+    if (elapsed < 30000) {
+      return true;
+    }
+  }
+
+  // 3. Inspect target and activeElement
+  const target = (options.event?.target ?? options.eventTarget ?? null) as MinimalElement | null;
+  const activeEl = (options.doc.activeElement ?? null) as MinimalElement | null;
+
+  for (const el of [target, activeEl]) {
+    if (!el) continue;
+    // Inside sidebar or workspace row
+    if (isInsideSidebarOrWorkspaceRow(el)) {
+      return true;
+    }
+    // Message composer textarea / input root: ALWAYS allowed (never blocks ⌘⌥P)
+    if (
+      el.closest?.('[data-testid="message-input-root"], [data-composer-input]') &&
+      !el.closest?.("input")
+    ) {
+      continue;
+    }
+    const tag = (el.tagName ?? "").toUpperCase();
+    if (tag === "TEXTAREA") {
+      continue;
+    }
+    // Single-line text input (search input, settings input) outside sidebar: block
+    const inputEl = el.closest?.("input");
+    if (inputEl) {
+      const type = (inputEl.getAttribute?.("type") ?? "text").toLowerCase();
+      if (
+        type !== "button" &&
+        type !== "submit" &&
+        type !== "checkbox" &&
+        type !== "radio" &&
+        type !== "reset"
+      ) {
+        return false;
+      }
+    }
+    // Inside active code editor (CodeMirror, Monaco)
+    if (
+      el.closest?.(
+        '.cm-editor, .cm-content, .cm-line, .monaco-editor, [contenteditable="true"], [contenteditable="plaintext-only"]',
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function toggleActiveWorkspacePin(options?: {
   doc?: MinimalDocument | null;
   win?: MinimalWindow | null;
   callbacks?: Partial<DesktopRevealHelperCallbacks>;
+  targetWorkspaceId?: string | null;
+  hoveredWorkspaceId?: string | null;
+  hoveredRowEl?: MinimalElement | null;
 }): {
   ok: boolean;
-  source: "native-shortcut" | "context-menu" | "not-handled";
+  source: "native-shortcut" | "context-menu" | "hovered-row" | "not-handled";
   message: string;
 } {
   const win = options?.win ?? getWebWindow();
@@ -2801,7 +2907,47 @@ export function toggleActiveWorkspacePin(options?: {
   }
   const isMac = isMacPlatform(win ?? null);
 
-  // 1. Dispatch native KeyboardEvent for Cmd+Shift+P (workspace.pin)
+  // 1. Fallback: if context menu is open with pin item
+  const pinMenuItem = doc.querySelector?.(
+    '[data-testid^="sidebar-workspace-menu-pin-"]',
+  );
+  if (pinMenuItem) {
+    try {
+      if (typeof pinMenuItem.click === "function") {
+        pinMenuItem.click();
+        return {
+          ok: true,
+          source: "context-menu",
+          message: "Toggled pin via context menu",
+        };
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // 2. If a specific hovered row element has a pin button or menu action
+  if (options?.hoveredRowEl) {
+    const rowPinItem = options.hoveredRowEl.querySelector?.(
+      '[data-testid^="sidebar-workspace-menu-pin-"]',
+    );
+    if (rowPinItem) {
+      try {
+        if (typeof rowPinItem.click === "function") {
+          rowPinItem.click();
+          return {
+            ok: true,
+            source: "hovered-row",
+            message: `Toggled pin for workspace ${options.targetWorkspaceId ?? "sidebar"}`,
+          };
+        }
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  // 3. Dispatch native KeyboardEvent for Cmd+Shift+P (workspace.pin)
   let nativeHandled = false;
   try {
     if (win?.dispatchEvent) {
@@ -2833,30 +2979,14 @@ export function toggleActiveWorkspacePin(options?: {
     // Ignore and fallback to DOM
   }
 
-  // 2. Fallback: if context menu is open with pin item
-  const pinMenuItem = doc.querySelector?.(
-    '[data-testid^="sidebar-workspace-menu-pin-"]',
-  );
-  if (pinMenuItem) {
-    try {
-      if (typeof pinMenuItem.click === "function") {
-        pinMenuItem.click();
-        return {
-          ok: true,
-          source: "context-menu",
-          message: "Toggled pin via context menu",
-        };
-      }
-    } catch {
-      // Ignore
-    }
-  }
-
-  const activeWsId = resolveCurrentActiveWorkspaceId(
-    doc,
-    win,
-    callbacks?.getFallbackWorkspaceId?.(),
-  );
+  const activeWsId =
+    options?.targetWorkspaceId ??
+    options?.hoveredWorkspaceId ??
+    resolveCurrentActiveWorkspaceId(
+      doc,
+      win,
+      callbacks?.getFallbackWorkspaceId?.(),
+    );
   return {
     ok: nativeHandled || Boolean(activeWsId),
     source: nativeHandled ? "native-shortcut" : "not-handled",
@@ -6069,11 +6199,53 @@ export function installDesktopRevealHelpers(
   );
   let lastSidebarDirectClickWsId: string | null = null;
   let lastSidebarDirectClickAtMs = 0;
+  let lastHoveredElement: MinimalElement | null = null;
+  let lastHoveredSidebarWorkspaceId: string | null = null;
+  let lastHoveredSidebarRowEl: MinimalElement | null = null;
+  let isMouseInsideSidebar = false;
   let pendingCommandCenterHint: {
     workspaceId?: string;
     candidateProjectNames: string[];
     atMs: number;
   } | null = null;
+
+  const onPointerMoveCapture = (ev: unknown) => {
+    const me = ev as MinimalMouseEvent;
+    const target = (me.target ?? null) as MinimalElement | null;
+    lastHoveredElement = target;
+    if (!target) {
+      isMouseInsideSidebar = false;
+      lastHoveredSidebarWorkspaceId = null;
+      lastHoveredSidebarRowEl = null;
+      return;
+    }
+    const inside = isInsideSidebarOrWorkspaceRow(target);
+    isMouseInsideSidebar = inside;
+    if (!inside) {
+      lastHoveredSidebarWorkspaceId = null;
+      lastHoveredSidebarRowEl = null;
+      return;
+    }
+    let curr: MinimalElement | null = target;
+    let foundWs = false;
+    for (let depth = 0; curr && depth < 20; depth += 1) {
+      const tid = curr.getAttribute?.("data-testid") ?? "";
+      if (tid.startsWith("sidebar-workspace-row-")) {
+        const parsed = parseSidebarWorkspaceRowTestId(tid);
+        if (parsed?.workspaceId) {
+          lastHoveredSidebarWorkspaceId = parsed.workspaceId;
+          lastHoveredSidebarRowEl = curr;
+          foundWs = true;
+          break;
+        }
+      }
+      curr = curr.parentElement ?? null;
+    }
+    if (!foundWs) {
+      lastHoveredSidebarWorkspaceId = null;
+      lastHoveredSidebarRowEl = null;
+    }
+  };
 
   // Ensure CSS variables, inline /skill autocomplete bridge, and arrival-pulse styles are active
   ensureInlineRenameStyleTag(doc, win);
@@ -6685,22 +6857,52 @@ export function installDesktopRevealHelpers(
       return;
     }
     // Cmd+Option+P (Mac, ⌘⌥P) / Ctrl+Alt+P (non-Mac): Toggle pin/unpin on current workspace
+    // Works reliably whether cursor is hovering over the sidebar, focused on a sidebar row,
+    // or inside the main session (even if the chat composer textarea has focus).
     if (
-      prefs.enablePinWorkspaceShortcut !== false &&
-      isPinWorkspaceKeyboardEvent(ke) &&
-      !isEditableInput(ke.target ?? null) &&
-      !isEditableInput(doc.activeElement ?? null) &&
-      !doc.querySelector?.('[data-testid="paseo-finder-inline-rename-input"]') &&
-      !doc.querySelector?.('[data-testid*="command-center"]') &&
-      !doc.querySelector?.('[role="dialog"]')
+      shouldTriggerPinWorkspaceShortcut({
+        event: ke,
+        doc,
+        win,
+        hoveredElement: lastHoveredSidebarRowEl ?? lastHoveredElement,
+        isMouseInsideSidebar,
+        lastSidebarDirectClickWsId,
+        lastSidebarDirectClickAtMs,
+        prefs,
+      })
     ) {
       ke.preventDefault();
       ke.stopPropagation?.();
+      const prevActive = doc.activeElement as unknown as { blur?: () => void; focus?: () => void } | null;
+      const hadComposerFocus = Boolean(
+        prevActive &&
+        typeof prevActive.focus === "function" &&
+        isEditableInput(prevActive as unknown as MinimalElement),
+      );
+      if (hadComposerFocus) {
+        try {
+          prevActive?.blur?.();
+        } catch {
+          // ignore
+        }
+      }
       const res = toggleActiveWorkspacePin({
         doc,
         win,
         callbacks,
+        targetWorkspaceId: lastHoveredSidebarWorkspaceId ?? lastSidebarDirectClickWsId,
+        hoveredWorkspaceId: lastHoveredSidebarWorkspaceId,
+        hoveredRowEl: lastHoveredSidebarRowEl,
       });
+      if (hadComposerFocus) {
+        setTimeout(() => {
+          try {
+            prevActive?.focus?.();
+          } catch {
+            // ignore
+          }
+        }, 50);
+      }
       showDropReceiptToast(res.message);
       return;
     }
@@ -7126,8 +7328,16 @@ export function installDesktopRevealHelpers(
     checkActiveWorkspaceRouteSync();
   };
 
+  const onWindowBlur = () => {
+    hideSidebarDropOverlay();
+    isMouseInsideSidebar = false;
+    lastHoveredSidebarWorkspaceId = null;
+    lastHoveredSidebarRowEl = null;
+  };
+
   doc.addEventListener("pointerdown", onPointerDownCapture, true);
   doc.addEventListener("mousedown", onPointerDownCapture, true);
+  doc.addEventListener("pointermove", onPointerMoveCapture, { capture: true, passive: true } as unknown as boolean);
   doc.addEventListener("click", onClickCapture, true);
   doc.addEventListener("dblclick", onDblClickCapture, true);
   doc.addEventListener("contextmenu", onContextMenuCapture, true);
@@ -7139,7 +7349,7 @@ export function installDesktopRevealHelpers(
   win.addEventListener("keydown", onKeyDownCapture, true);
   win.addEventListener("popstate", onPopState, false);
   win.addEventListener("hashchange", onPopState, false);
-  win.addEventListener("blur", hideSidebarDropOverlay, false);
+  win.addEventListener("blur", onWindowBlur, false);
 
   return () => {
     activeShowQuickThreadMetadataBar = null;
@@ -7158,6 +7368,7 @@ export function installDesktopRevealHelpers(
     observer?.disconnect();
     doc.removeEventListener("pointerdown", onPointerDownCapture, true);
     doc.removeEventListener("mousedown", onPointerDownCapture, true);
+    doc.removeEventListener("pointermove", onPointerMoveCapture, true);
     doc.removeEventListener("click", onClickCapture, true);
     doc.removeEventListener("dblclick", onDblClickCapture, true);
     doc.removeEventListener("contextmenu", onContextMenuCapture, true);
@@ -7169,6 +7380,6 @@ export function installDesktopRevealHelpers(
     win.removeEventListener("keydown", onKeyDownCapture, true);
     win.removeEventListener("popstate", onPopState, false);
     win.removeEventListener("hashchange", onPopState, false);
-    win.removeEventListener("blur", hideSidebarDropOverlay, false);
+    win.removeEventListener("blur", onWindowBlur, false);
   };
 }

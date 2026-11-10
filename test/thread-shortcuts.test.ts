@@ -12,6 +12,7 @@ import {
   simulateReactNativePress,
   navigateSidebarThreadRelative,
   toggleActiveWorkspacePin,
+  shouldTriggerPinWorkspaceShortcut,
   annotateNativeWorkspaceMenusWithShortcuts,
   syncInlineRenamePreferences,
   readInlineRenamePreferences,
@@ -1078,4 +1079,265 @@ test("Thread Shortcuts 13: matchesWorkspaceRowTestId handles all testId variatio
     matchesWorkspaceRowTestId("sidebar-workspace-row-local:wks_alpha", "wks_beta"),
     false,
   );
+});
+
+test("Thread Shortcuts 14: shouldTriggerPinWorkspaceShortcut allows ⌘⌥P when cursor is on sidebar even if chat composer is focused, allows when composer is focused, and blocks only in true modal/search overlays", () => {
+  function makeMockNode(opts: {
+    tagName: string;
+    attrs?: Record<string, string>;
+    className?: string;
+    parent?: MinimalElement | null;
+  }): MinimalElement {
+    const attrs = new Map<string, string>(Object.entries(opts.attrs ?? {}));
+    const el: MinimalElement = {
+      tagName: opts.tagName,
+      className: opts.className ?? "",
+      parentElement: opts.parent ?? null,
+      getAttribute: (n: string) => attrs.get(n) ?? null,
+      setAttribute: (n: string, v: string) => attrs.set(n, v),
+      closest: (sel: string) => {
+        let cur: MinimalElement | null = el;
+        while (cur) {
+          const tag = (cur.tagName ?? "").toLowerCase();
+          const cls = (typeof cur.className === "string" ? cur.className : "") || "";
+          const ce = cur.getAttribute?.("contenteditable") ?? "";
+          const dt = cur.getAttribute?.("data-testid") ?? "";
+          if (sel.includes(".cm-editor") && cls.includes("cm-editor")) return cur;
+          if (sel.includes(".cm-content") && cls.includes("cm-content")) return cur;
+          if (sel.includes(".cm-line") && cls.includes("cm-line")) return cur;
+          if (sel.includes(".monaco-editor") && cls.includes("monaco-editor")) return cur;
+          if (sel.includes('[contenteditable="true"]') && ce === "true") return cur;
+          if (sel.includes('[contenteditable="plaintext-only"]') && ce === "plaintext-only") return cur;
+          if (sel.includes("[data-composer-input]") && cur.getAttribute?.("data-composer-input") === "true") return cur;
+          if (sel.includes('[data-testid="message-input-root"]') && dt === "message-input-root") return cur;
+          if (sel.includes("sidebar-workspace-") && dt.startsWith("sidebar-workspace-")) return cur;
+          if (sel.includes("sidebar") && (dt.startsWith("sidebar") || dt === "sidebar")) return cur;
+          if ((sel === "input" || sel.split(",").map((s) => s.trim()).includes("input")) && tag === "input") return cur;
+          if ((sel === "textarea" || sel.split(",").map((s) => s.trim()).includes("textarea")) && tag === "textarea") return cur;
+          cur = cur.parentElement ?? null;
+        }
+        return null;
+      },
+    };
+    return el;
+  }
+
+  const pinKe: MinimalKeyboardEvent = {
+    key: "p",
+    code: "KeyP",
+    keyCode: 80,
+    metaKey: true,
+    altKey: true,
+    ctrlKey: false,
+    shiftKey: false,
+    preventDefault: () => {},
+  };
+
+  const chatTextarea = makeMockNode({
+    tagName: "TEXTAREA",
+    attrs: { "data-composer-input": "true", "data-testid": "message-input-root" },
+  });
+
+  const sidebarRow = makeMockNode({
+    tagName: "DIV",
+    attrs: { "data-testid": "sidebar-workspace-row-local:wks_alpha" },
+  });
+
+  const baseDoc: MinimalDocument = {
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    createElement: (tag: string) => makeMockNode({ tagName: tag }),
+    activeElement: chatTextarea,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // Case 1: Cursor on sidebar (isMouseInsideSidebar: true) even though chatTextarea has focus!
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: baseDoc,
+      isMouseInsideSidebar: true,
+      hoveredElement: sidebarRow,
+    }),
+    true,
+    "⌘⌥P triggers when cursor is on the sidebar even if chat composer has focus",
+  );
+
+  // Case 2: Cursor hovering directly over a sidebar workspace row
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: baseDoc,
+      hoveredElement: sidebarRow,
+    }),
+    true,
+    "⌘⌥P triggers when hovering over a sidebar workspace row",
+  );
+
+  // Case 3: User recently clicked a sidebar workspace row
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: baseDoc,
+      lastSidebarDirectClickWsId: "wks_alpha",
+      lastSidebarDirectClickAtMs: Date.now() - 5000,
+    }),
+    true,
+    "⌘⌥P triggers when user recently clicked a sidebar row",
+  );
+
+  // Case 4: Inside chat composer textarea in main session: ALWAYS allowed!
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: baseDoc,
+    }),
+    true,
+    "⌘⌥P triggers even when focused inside the chat composer textarea",
+  );
+
+  // Case 5: When activeElement is body or a non-input element: allowed!
+  const docWithBodyActive: MinimalDocument = {
+    ...baseDoc,
+    activeElement: makeMockNode({ tagName: "DIV" }),
+  };
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: docWithBodyActive,
+    }),
+    true,
+    "⌘⌥P triggers when non-input element has focus",
+  );
+
+  // Case 6: Blocked when inline rename is actively mounted
+  const docWithInlineRename: MinimalDocument = {
+    ...baseDoc,
+    querySelector: (sel: string) =>
+      sel.includes("paseo-finder-inline-rename-input")
+        ? makeMockNode({ tagName: "INPUT" })
+        : null,
+  };
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: docWithInlineRename,
+    }),
+    false,
+    "⌘⌥P is blocked when inline rename is active",
+  );
+
+  // Case 7: Blocked when Command Center is open
+  const docWithCommandCenter: MinimalDocument = {
+    ...baseDoc,
+    querySelector: (sel: string) =>
+      sel.includes("command-center") ? makeMockNode({ tagName: "DIV" }) : null,
+  };
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: docWithCommandCenter,
+    }),
+    false,
+    "⌘⌥P is blocked when command center is open",
+  );
+
+  // Case 8: Blocked when true modal dialog is open
+  const docWithModal: MinimalDocument = {
+    ...baseDoc,
+    querySelector: (sel: string) =>
+      sel.includes('[role="dialog"][aria-modal="true"]')
+        ? makeMockNode({ tagName: "DIV" })
+        : null,
+  };
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: docWithModal,
+    }),
+    false,
+    "⌘⌥P is blocked when modal dialog is open",
+  );
+
+  // Case 9: Blocked when typing in single-line text input outside sidebar
+  const singleLineInput = makeMockNode({
+    tagName: "INPUT",
+    attrs: { type: "text" },
+  });
+  const docWithSingleLineInput: MinimalDocument = {
+    ...baseDoc,
+    activeElement: singleLineInput,
+  };
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: { ...pinKe, target: singleLineInput },
+      doc: docWithSingleLineInput,
+    }),
+    false,
+    "⌘⌥P is blocked when typing in single-line text input outside sidebar",
+  );
+
+  // Case 10: Blocked when editing code in CodeMirror or Monaco
+  const codeEditorEl = makeMockNode({
+    tagName: "DIV",
+    className: "cm-content",
+  });
+  const docWithCodeEditor: MinimalDocument = {
+    ...baseDoc,
+    activeElement: codeEditorEl,
+  };
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: { ...pinKe, target: codeEditorEl },
+      doc: docWithCodeEditor,
+    }),
+    false,
+    "⌘⌥P is blocked when editing in code editor",
+  );
+
+  // Case 11: Respects enablePinWorkspaceShortcut: false
+  assert.equal(
+    shouldTriggerPinWorkspaceShortcut({
+      event: pinKe,
+      doc: baseDoc,
+      enablePinWorkspaceShortcut: false,
+    }),
+    false,
+    "⌘⌥P is disabled when enablePinWorkspaceShortcut is false",
+  );
+});
+
+test("Thread Shortcuts 15: toggleActiveWorkspacePin handles hoveredRowEl direct pin click and dispatches synthetic Cmd+Shift+P cleanly", () => {
+  let clickedRowPin = false;
+  const mockRowPinItem: MinimalElement = {
+    tagName: "DIV",
+    getAttribute: (n: string) => (n === "data-testid" ? "sidebar-workspace-menu-pin-local:wks_alpha" : null),
+    click: () => {
+      clickedRowPin = true;
+    },
+  };
+
+  const mockHoveredRow: MinimalElement = {
+    tagName: "DIV",
+    getAttribute: (n: string) => (n === "data-testid" ? "sidebar-workspace-row-local:wks_alpha" : null),
+    querySelector: (sel: string) => (sel.includes("sidebar-workspace-menu-pin-") ? mockRowPinItem : null),
+  };
+
+  const fakeDoc: MinimalDocument = {
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    createElement: (tag: string) => ({ tagName: tag.toUpperCase() } as unknown as MinimalElement),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const rowResult = toggleActiveWorkspacePin({
+    doc: fakeDoc,
+    targetWorkspaceId: "wks_alpha",
+    hoveredRowEl: mockHoveredRow,
+  });
+  assert.equal(rowResult.ok, true);
+  assert.equal(rowResult.source, "hovered-row");
+  assert.equal(clickedRowPin, true);
 });

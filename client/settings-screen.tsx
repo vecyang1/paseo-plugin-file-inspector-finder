@@ -3961,7 +3961,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             : "System Starter Prompt & Instructions"
         }
       >
-        <View style={styles.diagBox}>
+        <View style={styles.diagBox} testID="system-prompt-settings-status">
           <Text style={styles.detail}>
             • {isZh ? "配置文件路径" : "Config Path"}:{" "}
             {systemPromptSnap?.configPath ?? "~/.paseo/config.json"} (
@@ -3983,6 +3983,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           <View style={styles.row}>
             <View style={{ flex: 1, minWidth: 260 }}>
               <TextInput
+                testID="system-prompt-test-clean-input"
                 placeholder={
                   isZh
                     ? "粘贴转录文本测试气泡清洗..."
@@ -3994,6 +3995,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             </View>
             <Pressable
               accessibilityRole="button"
+              testID="system-prompt-test-clean-button"
               onPress={() => {
                 void inspectSystemPrompt({
                   action: "test_clean",
@@ -4035,7 +4037,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
           </View>
 
           {testCleanResult ? (
-            <View style={{ gap: 4, marginTop: 6 }}>
+            <View style={{ gap: 4, marginTop: 6 }} testID="system-prompt-test-clean-result">
               <Text style={styles.detail}>• {isZh ? "清洗测试结果" : "Sanitization Result"}:</Text>
               <Text style={{ fontSize: 11, fontFamily: "monospace", color: "#16a34a", marginTop: 4 }}>
                 {testCleanResult}
