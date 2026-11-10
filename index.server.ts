@@ -66,6 +66,8 @@ import {
   runLinkFirstRetitle,
   runLinkRetitleBackfill,
 } from "./server/link-first-retitle";
+import { handleResolveCommitOrigin } from "./server/commit-origin";
+import { resolveCommitOriginRpc } from "./shared/commit-origin-contracts";
 
 export default function contribute(server: PluginServerContext) {
   const settingsHandle = server.registerSettings(pluginSettings);
@@ -98,6 +100,29 @@ export default function contribute(server: PluginServerContext) {
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
   server.handle(managePeerAgentsRpc, handleManagePeerAgents);
   server.handle(forkSessionRpc, handleForkSession);
+  server.handle(resolveCommitOriginRpc, (input) => handleResolveCommitOrigin(input));
+
+  // Same resolver as the inline commit pill (client/commit-origin-web.ts).
+  const commitOriginTool = defineAgentTool({
+    name: "resolve_commit_origin",
+    title: "Find the Session That Made a Commit",
+    description:
+      "Given git commit hashes (7-40 hex), find which Paseo session made each one. Searches the repositories Paseo sessions work in, " +
+      "then the transcripts of sessions active at commit time: the session whose first mention of the hash falls 10 min before to " +
+      "3 min after the commit time, earliest first, made it. Returns repo, subject, origin session (id, title, status) and the evidence. Read-only.",
+    input: z.object({
+      shas: z.array(z.string()).min(1).max(40).describe("Commit hashes, short or full"),
+      refresh: z.boolean().optional().describe("Skip the cache and rescan repositories"),
+    }),
+    async execute(input) {
+      const result = await handleResolveCommitOrigin({
+        shas: input.shas,
+        refresh: input.refresh,
+        source: "agent-tool",
+      });
+      return { text: JSON.stringify(result, null, 2), structuredContent: result, isError: !result.ok };
+    },
+  });
 
   const revealTool = defineAgentTool({
     name: "reveal_in_finder",
@@ -799,6 +824,7 @@ export default function contribute(server: PluginServerContext) {
         settingsSearchTool,
         forkSessionTool,
         linkRetitleTool,
+        commitOriginTool,
       ],
     };
   });

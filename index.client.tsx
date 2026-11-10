@@ -68,6 +68,8 @@ import {
 } from "./client/markdown-table-web";
 import { installDesktopSessionTimeEnhancer } from "./client/session-time-web";
 import { installQuoteReply } from "./client/quote-reply-web";
+import { installCommitOriginPills } from "./client/commit-origin-web";
+import { installSessionRefText } from "./client/session-ref-text-web";
 import {
   extractCurrentRouteAgentId,
   installDesktopSubagentsTreeEnhancer,
@@ -1651,6 +1653,13 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupQuoteReply = installQuoteReply({ getLocale: () => client.i18n.locale });
 
+  const cleanupCommitOriginPills = installCommitOriginPills({
+    call: (def, input) => client.rpc(def as never, input as never) as never,
+    getLocale: () => client.i18n.locale,
+  });
+
+  const cleanupSessionRefText = installSessionRefText({ getLocale: () => client.i18n.locale });
+
   const cleanupSubagentsTreeEnhancer = installDesktopSubagentsTreeEnhancer({
     call: (def, input) => client.rpc(def as never, input as never) as never,
     getLocale: () => client.i18n.locale,
@@ -1678,6 +1687,8 @@ export default function contribute(client: PluginClientContext) {
     cleanupMarkdownTableEnhancer();
     cleanupSessionTimeEnhancer();
     cleanupQuoteReply();
+    cleanupCommitOriginPills();
+    cleanupSessionRefText();
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
