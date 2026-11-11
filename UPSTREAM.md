@@ -1,6 +1,6 @@
 # Contributions to getpaseo/paseo
 
-What [@vecyang1](https://github.com/vecyang1) has sent upstream to [getpaseo/paseo](https://github.com/getpaseo/paseo), and the local fixes that run until upstream ships them. Generated 2026-11-11 20:21 from GitHub by `paseo_upstream_ledger.py`.
+What [@vecyang1](https://github.com/vecyang1) has sent upstream to [getpaseo/paseo](https://github.com/getpaseo/paseo), and the local fixes that run until upstream ships them. Generated 2026-11-11 21:31 from GitHub by `paseo_upstream_ledger.py`.
 
 ## Pull requests
 
@@ -31,6 +31,7 @@ What [@vecyang1](https://github.com/vecyang1) has sent upstream to [getpaseo/pas
 
 | # | Title | Votes | Replies | Opened |
 |---|---|---|---|---|
+| [#9403](https://github.com/getpaseo/paseo/discussions/9403) | New Workspace: configurable shortcut to open "Choose the project" while typing | 1 | 0 | 2026-11-11 |
 | [#9399](https://github.com/getpaseo/paseo/discussions/9399) | Command Center (Cmd+K): a workspace with one agent is listed twice, under Workspaces and under Agents | 1 | 0 | 2026-11-11 |
 | [#9178](https://github.com/getpaseo/paseo/discussions/9178) | Clipboard copy: keep clean plain text in text/plain (no ** asterisks in Beeper/LinkedIn/WeChat) while preserving rich HTML in text/html for Notion | 3 | 0 | 2026-11-09 |
 | [#9127](https://github.com/getpaseo/paseo/discussions/9127) | Dictation: option to insert the transcript without sending (Enter / Cmd+D currently send) | 1 | 0 | 2026-11-08 |
