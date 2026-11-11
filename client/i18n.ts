@@ -237,6 +237,9 @@ export const enMessages = {
     commandCenterProjectsLabel: "Pin direct Project Jump actions at top of Cmd+K",
     commandCenterProjectsHint:
       "Register one direct 'Jump to Workspace' action per project folder above thread results in Cmd+K",
+    commandCenterDedupeLabel: "Show each session once in Cmd+K",
+    commandCenterDedupeHint:
+      "A workspace with one agent is listed under Workspaces only; its Agents row would open the same place. Workspaces with several agents keep every agent row.",
     autoRevealSidebarLabel:
       "Auto-reveal & scroll left sidebar when switching workspace from Search (Cmd+F / Cmd+K)",
     autoRevealSidebarHint:
@@ -620,6 +623,9 @@ export const zhMessages: PluginMessageCatalog = {
     commandCenterProjectsLabel: "在 Cmd+K 顶部置顶项目工作区直达项",
     commandCenterProjectsHint:
       "在 Cmd+K 搜索结果顶部为每个项目文件夹生成一条「跳转工作区」直达动作，排在所有子会话上方",
+    commandCenterDedupeLabel: "Cmd+K 中每个会话只显示一次",
+    commandCenterDedupeHint:
+      "只有一个 Agent 的工作区只列在 Workspaces 分区，它的 Agents 行打开的是同一位置。含多个 Agent 的工作区保留全部 Agent 行。",
     autoRevealSidebarLabel: "搜索跳转后左侧边栏自动展开并滚动定位到当前工作区 (Cmd+F / Cmd+K)",
     autoRevealSidebarHint:
       "在搜索面板 (Cmd+F / Cmd+K) 点击任意工作区或智能体会话后，自动展开其所属项目目录、将左侧边栏滚动到视野中央并高亮闪烁对应工作区行",

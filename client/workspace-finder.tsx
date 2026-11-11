@@ -80,6 +80,8 @@ function FinderBrowserView({
         enableWorkspaceQuickJump: settingsState.values.enableWorkspaceQuickJump,
         enableCommandCenterProjectItems:
           settingsState.values.enableCommandCenterProjectItems,
+        dedupeCommandCenterAgentRows:
+          settingsState.values.dedupeCommandCenterAgentRows,
         quickJumpDefaultAction: settingsState.values.quickJumpDefaultAction,
       });
     }

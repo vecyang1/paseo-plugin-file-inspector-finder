@@ -154,6 +154,7 @@ export const pluginSettings = defineSettings({
     sidebarDropDefaultBehavior: SidebarDropBehaviorSchema.default("open-or-create"),
     enableWorkspaceQuickJump: z.boolean().default(true),
     enableCommandCenterProjectItems: z.boolean().default(true),
+    dedupeCommandCenterAgentRows: z.boolean().default(true),
     autoRevealActiveWorkspaceInSidebar: z.boolean().default(true),
     startNewProjectsCollapsed: z.boolean().default(true),
     enableSettingsSearch: z.boolean().default(true),

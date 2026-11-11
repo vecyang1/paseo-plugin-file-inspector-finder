@@ -225,6 +225,7 @@ const QUICK_JUMP_STORAGE_KEY = "paseo:finder-plugin:quick-jump-config";
 export interface QuickJumpPreferences {
   enableWorkspaceQuickJump: boolean;
   enableCommandCenterProjectItems: boolean;
+  dedupeCommandCenterAgentRows: boolean;
   autoRevealActiveWorkspaceInSidebar: boolean;
   quickJumpDefaultAction: QuickJumpAction;
 }
@@ -243,6 +244,8 @@ export function syncQuickJumpPreferences(
         prefs.enableWorkspaceQuickJump ?? existing.enableWorkspaceQuickJump,
       enableCommandCenterProjectItems:
         prefs.enableCommandCenterProjectItems ?? existing.enableCommandCenterProjectItems,
+      dedupeCommandCenterAgentRows:
+        prefs.dedupeCommandCenterAgentRows ?? existing.dedupeCommandCenterAgentRows,
       autoRevealActiveWorkspaceInSidebar:
         prefs.autoRevealActiveWorkspaceInSidebar ??
         existing.autoRevealActiveWorkspaceInSidebar,
@@ -261,6 +264,7 @@ export function readQuickJumpPreferences(
   const defaults: QuickJumpPreferences = {
     enableWorkspaceQuickJump: true,
     enableCommandCenterProjectItems: true,
+    dedupeCommandCenterAgentRows: true,
     autoRevealActiveWorkspaceInSidebar: true,
     quickJumpDefaultAction: "new-workspace",
   };
@@ -273,6 +277,7 @@ export function readQuickJumpPreferences(
     return {
       enableWorkspaceQuickJump: parsed.enableWorkspaceQuickJump !== false,
       enableCommandCenterProjectItems: parsed.enableCommandCenterProjectItems !== false,
+      dedupeCommandCenterAgentRows: parsed.dedupeCommandCenterAgentRows !== false,
       autoRevealActiveWorkspaceInSidebar:
         parsed.autoRevealActiveWorkspaceInSidebar !== false,
       quickJumpDefaultAction:

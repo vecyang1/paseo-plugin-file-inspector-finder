@@ -365,6 +365,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       syncQuickJumpPreferences({
         enableWorkspaceQuickJump: settings.values.enableWorkspaceQuickJump,
         enableCommandCenterProjectItems: settings.values.enableCommandCenterProjectItems,
+        dedupeCommandCenterAgentRows: settings.values.dedupeCommandCenterAgentRows,
         quickJumpDefaultAction: settings.values.quickJumpDefaultAction,
       });
       syncScheduleRunsPreferences(
@@ -1349,6 +1350,16 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 quickJumpDefaultAction: values.quickJumpDefaultAction,
               });
               void save({ ...values, enableCommandCenterProjectItems: next }, revision);
+            }}
+          />
+
+          <SettingsSwitch
+            label={t("settings.commandCenterDedupeLabel")}
+            hint={t("settings.commandCenterDedupeHint")}
+            value={values.dedupeCommandCenterAgentRows}
+            onValueChange={(next) => {
+              syncQuickJumpPreferences({ dedupeCommandCenterAgentRows: next });
+              void save({ ...values, dedupeCommandCenterAgentRows: next }, revision);
             }}
           />
 

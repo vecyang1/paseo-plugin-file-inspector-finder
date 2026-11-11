@@ -8,7 +8,14 @@ import {
 } from "../shared/contracts";
 import { isChineseLocale } from "./i18n";
 import { syncPaseoThemeCssVariables, resolveActivePaseoTheme } from "./theme-web";
-import { focusWorkspaceInApp } from "./web";
+import { focusWorkspaceInApp, readQuickJumpPreferences } from "./web";
+import {
+  dropAgentRowsCoveredByWorkspaceRows,
+  getCommandCenterDedupeStatus,
+  recordAgentPassReceipt,
+  recordShownWorkspaceRows,
+  shownWorkspaceKeysForQuery,
+} from "./command-center-dedupe";
 import {
   findCadenceScheduleForWorkspace,
   findRunningCadenceElapsedSec,
@@ -978,10 +985,32 @@ export function clearReturnBreadcrumbForSession(
   saveJumpBreadcrumbs(win);
 }
 
+/**
+ * New on every evaluation of this module. The search hooks are stamped with it, so a reloaded
+ * copy of the plugin replaces the hooks an earlier copy installed instead of leaving the old
+ * behaviour in place until the app restarts.
+ */
+const COMMAND_CENTER_PATCH_INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+function isCommandCenterAgentDedupeEnabled(win?: Window | null): boolean {
+  try {
+    return readQuickJumpPreferences(win?.localStorage ?? null).dedupeCommandCenterAgentRows;
+  } catch {
+    return true;
+  }
+}
+
 export function patchCommandCenterSearch(win?: Window | null): boolean {
   const w = win ?? (typeof window !== "undefined" ? window : null);
   const modules = getMetroModuleList(w);
   if (modules.length === 0) return false;
+
+  if (w && (w as any).__paseoFinderCommandCenterDedupe?.instance !== COMMAND_CENTER_PATCH_INSTANCE) {
+    (w as any).__paseoFinderCommandCenterDedupe = {
+      instance: COMMAND_CENTER_PATCH_INSTANCE,
+      status: () => getCommandCenterDedupeStatus(isCommandCenterAgentDedupeEnabled(w)),
+    };
+  }
 
   syncSessionDirectoryFromMetro(w);
   let patchedAny = false;
@@ -994,9 +1023,13 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
     // 1. Patch CommandCenter built-in agent search (filterAndRankBuiltInResults)
     if (
       typeof exp.filterAndRankBuiltInResults === "function" &&
-      !exp.__paseoSessionIdSearchPatched
+      exp.__paseoSessionIdSearchPatched !== COMMAND_CENTER_PATCH_INSTANCE
     ) {
-      const origFilterBuiltIn = exp.filterAndRankBuiltInResults;
+      // Wrap Paseo's own function, kept from the first patch. A hook left by a copy that did not
+      // keep it (flag `true`) is wrapped as it is; it only repeats the id enrichment.
+      const origFilterBuiltIn =
+        exp.__paseoSessionIdSearchOriginal ?? exp.filterAndRankBuiltInResults;
+      exp.__paseoSessionIdSearchOriginal = origFilterBuiltIn;
       exp.filterAndRankBuiltInResults = function patchedFilterAndRankBuiltInResults(
         items: any[],
         query: string,
@@ -1026,7 +1059,19 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
           );
         };
 
-        const enrichedItems = items.map((row) => {
+        // One session, one row: see command-center-dedupe.ts for the rule.
+        let searchableItems = items;
+        if (items.some((row) => row?.kind === "agent")) {
+          const rawQuery = String(query ?? "");
+          const shownWorkspaceKeys = isCommandCenterAgentDedupeEnabled(w)
+            ? shownWorkspaceKeysForQuery(rawQuery)
+            : null;
+          const deduped = dropAgentRowsCoveredByWorkspaceRows(items, shownWorkspaceKeys);
+          searchableItems = deduped.kept;
+          recordAgentPassReceipt(rawQuery, deduped.kept.length, deduped.hidden);
+        }
+
+        const enrichedItems = searchableItems.map((row) => {
           if (row?.kind !== "agent" || !row.agent?.id) return row;
           const aid = String(row.agent.id).trim();
           const wsId = String(row.agent.workspaceId ?? "").trim();
@@ -1099,16 +1144,18 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
 
         return origFilterBuiltIn.call(this, enrichedItems, query, wrappedGetFields);
       };
-      exp.__paseoSessionIdSearchPatched = true;
+      exp.__paseoSessionIdSearchPatched = COMMAND_CENTER_PATCH_INSTANCE;
       patchedAny = true;
     }
 
     // 2. Patch CommandCenter workspace search (filterAndRankWorkspaces)
     if (
       typeof exp.filterAndRankWorkspaces === "function" &&
-      !exp.__paseoWorkspaceIdSearchPatched
+      exp.__paseoWorkspaceIdSearchPatched !== COMMAND_CENTER_PATCH_INSTANCE
     ) {
-      const origFilterWorkspaces = exp.filterAndRankWorkspaces;
+      const origFilterWorkspaces =
+        exp.__paseoWorkspaceIdSearchOriginal ?? exp.filterAndRankWorkspaces;
+      exp.__paseoWorkspaceIdSearchOriginal = origFilterWorkspaces;
       exp.filterAndRankWorkspaces = function patchedFilterAndRankWorkspaces(
         workspaces: any[],
         query: string,
@@ -1116,10 +1163,15 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
         if (!Array.isArray(workspaces)) {
           return origFilterWorkspaces.call(this, workspaces, query);
         }
+        const rawQuery = String(query ?? "");
+        const recordShown = <T,>(shown: T): T => {
+          recordShownWorkspaceRows(rawQuery, Array.isArray(shown) ? shown : []);
+          return shown;
+        };
         syncSessionDirectoryFromMetro(w);
         const qTrim = (query ?? "").trim();
         if (!qTrim) {
-          return origFilterWorkspaces.call(this, workspaces, query);
+          return recordShown(origFilterWorkspaces.call(this, workspaces, query));
         }
         const qTokens = qTrim
           .toLowerCase()
@@ -1196,9 +1248,9 @@ export function patchCommandCenterSearch(win?: Window | null): boolean {
           };
         });
 
-        return origFilterWorkspaces.call(this, enrichedWorkspaces, query);
+        return recordShown(origFilterWorkspaces.call(this, enrichedWorkspaces, query));
       };
-      exp.__paseoWorkspaceIdSearchPatched = true;
+      exp.__paseoWorkspaceIdSearchPatched = COMMAND_CENTER_PATCH_INSTANCE;
       patchedAny = true;
     }
   }
