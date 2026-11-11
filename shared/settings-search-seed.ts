@@ -6,7 +6,7 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
   "version": 1,
   "paseoVersion": "0.15.3",
   "locale": "en",
-  "generatedAt": "2026-11-09",
+  "generatedAt": "2026-11-11",
   "pages": [
     {
       "key": "section:general",
@@ -181,6 +181,10 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
         },
         {
           "title": ".jpg",
+          "group": "Files"
+        },
+        {
+          "title": ".pdf",
           "group": "Files"
         },
         {
@@ -564,6 +568,348 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
         {
           "title": "file-inspector-finder",
           "group": "Plugins"
+        }
+      ],
+      "source": "seed"
+    },
+    {
+      "key": "plugin:file-inspector-finder/finder-settings",
+      "label": "file-inspector-finder · File Inspector & Finder",
+      "entries": [
+        {
+          "title": "Behavior & Native Integration"
+        },
+        {
+          "title": "Default primary action",
+          "hint": "Default action when running /reveal or clicking quick reveal buttons"
+        },
+        {
+          "title": "Preferred code editor",
+          "hint": "Editor shortcut button shown in the image inspector toolbar"
+        },
+        {
+          "title": "Default image canvas background",
+          "hint": "Background style for transparent PNG, WebP, and SVG files"
+        },
+        {
+          "title": "Use Image Inspector for image tabs",
+          "hint": "Automatically open PNG, JPG, WebP, SVG, and GIF tabs with the Finder toolbar"
+        },
+        {
+          "title": "Extend desktop context menus & shortcuts",
+          "hint": "Add 'Reveal in Finder' to file tab menus and chat file links, plus Option+Click and Cmd+Shift+R"
+        },
+        {
+          "title": "Cmd+Click to open files in default application",
+          "hint": "Holding Command and left-clicking any file link, pill, code path, or file tab directly opens it in the system default external application."
+        },
+        {
+          "title": "Command-click default action",
+          "hint": "The action performed when Command-clicking a file link or pill"
+        },
+        {
+          "title": "Command-click sidebar item to open folder in Finder",
+          "hint": "Holding Command and left-clicking a workspace or project row in the left sidebar opens its folder directly in Finder."
+        },
+        {
+          "title": "Double-click to rename inline without popup",
+          "hint": "Double-click any left sidebar workspace row, top workspace header title, or agent tab (or press F2 / Cmd+Shift+E) to edit its title directly in place"
+        },
+        {
+          "title": "Auto-jump cursor to first place (start of input) on inline rename"
+        },
+        {
+          "title": "Inline rename initial cursor position",
+          "hint": "Where the cursor lands when opening an inline rename input box"
+        },
+        {
+          "title": "Enable quick thread rename & label shortcuts",
+          "hint": "Press F2 or Cmd+Shift+E for in-place inline rename, or Cmd+L / Cmd+Shift+L for colored workspace labels"
+        },
+        {
+          "title": "Workspace label shortcut trigger",
+          "hint": "Choose which keyboard shortcut opens the quick labels bar. Cmd+L provides fast 2-key access; Cmd+Shift+L avoids overriding Paseo's composer focus"
+        },
+        {
+          "title": "Test open workspace labels bar",
+          "hint": "Click to test opening the workspace labels bar (verify active labels, color picker, and tag toggles)"
+        },
+        {
+          "title": "Enable thread jump shortcuts (Cmd+; / Cmd+')",
+          "hint": "Press Cmd+; (Ctrl+;) for previous thread and Cmd+' (Ctrl+') for next thread across sidebar workspaces. Protected while typing in text inputs or code editors."
+        },
+        {
+          "title": "Test jump to previous thread (Cmd+;)",
+          "hint": "Click to test jumping to the previous thread in the sidebar with auto-scroll and highlight"
+        },
+        {
+          "title": "Test jump to next thread (Cmd+')",
+          "hint": "Click to test jumping to the next thread in the sidebar with auto-scroll and highlight"
+        },
+        {
+          "title": "Enable pin workspace shortcut (Cmd+Option+P / ⌘⌥P)",
+          "hint": "Press Cmd+Option+P (Ctrl+Alt+P) to pin or unpin current workspace. Injects ⌘⌥P shortcut hint into sidebar context menu next to 'Pin to top'."
+        },
+        {
+          "title": "Test pin toggle (Cmd+Option+P / ⌘⌥P)",
+          "hint": "Click to test toggling pin on the active workspace and verify workspace.pin dispatch with ⌘⌥P hint"
+        },
+        {
+          "title": "Enable mark session done shortcut (Option+D / ⌥D)",
+          "hint": "Press Option+D or Option+Shift+D to toggle the 'd ' prefix on the current session. The sidebar row flashes in place and the sidebar does not scroll"
+        },
+        {
+          "title": "Test toggle 'd ' prefix on current session",
+          "hint": "Click to toggle the 'd ' prefix on the active session and verify left sidebar auto-reveal and highlight"
+        },
+        {
+          "title": "Delete key archives clicked sidebar session",
+          "hint": "Press Delete or Backspace once when clicking a sidebar session or opening its menu to archive it"
+        },
+        {
+          "title": "Test sidebar Delete key archive target resolution",
+          "hint": "Click to test sidebar Delete key archive target resolution (checks open context menus, selected session row, or active workspace with input protection)"
+        },
+        {
+          "title": "Smart Clipboard Copy (Clean Plain Text + Rich HTML for Notion)"
+        },
+        {
+          "title": "Default Copy Mode (Cmd+C / Copy Button)",
+          "hint": "Smart Dual-Format (Recommended): Beeper/web inputs get clean text while Notion gets rich HTML · Raw Markdown: keeps ** · Plain Text Only: strips HTML too"
+        },
+        {
+          "title": "Quote Selection as Reply Context"
+        },
+        {
+          "title": "Quote Reply Diagnostics"
+        },
+        {
+          "title": "Clear Tray / Reset Defaults",
+          "hint": "Clear pending quotes for the current session and reset Quote Reply to defaults (on, 4000 chars per quote)"
+        },
+        {
+          "title": "Drag & drop folder onto sidebar as workspace",
+          "hint": "Drop any folder from Finder onto the left Workspaces sidebar to switch if existing or create if new (Option+Drop forces new)"
+        },
+        {
+          "title": "Default folder drop behavior",
+          "hint": "How Paseo handles folders dropped onto the left sidebar when Option is not held"
+        },
+        {
+          "title": "Enable Quick Workspace Switcher (Cmd+J / Cmd+Shift+O)",
+          "hint": "Open a deduplicated project workspace switcher without sub-thread clutter using Cmd+J or Cmd+Shift+O"
+        },
+        {
+          "title": "Pin direct Project Jump actions at top of Cmd+K",
+          "hint": "Register one direct 'Jump to Workspace' action per project folder above thread results in Cmd+K"
+        },
+        {
+          "title": "Show each session once in Cmd+K",
+          "hint": "A workspace with one agent is listed under Workspaces only; its Agents row would open the same place. Workspaces with several agents keep every agent row."
+        },
+        {
+          "title": "Auto-reveal & scroll left sidebar when switching workspace from Search (Cmd+F / Cmd+K)"
+        },
+        {
+          "title": "Start new projects collapsed"
+        },
+        {
+          "title": "Default Enter action in Quick Workspace Switcher",
+          "hint": "What pressing Enter on a project folder does (Shift+Enter always locates in sidebar; Option+Enter switches to latest thread)"
+        },
+        {
+          "title": "Sidebar Cadence Timer Badges, 1-Click Run Now & Schedules Runs Drawer (⌘⇧H)"
+        },
+        {
+          "title": "Extend Settings -> Voice with SiliconFlow & Custom STT Models"
+        },
+        {
+          "title": "Keep dictation in the composer (never auto-send)"
+        },
+        {
+          "title": "Change model with ⌘/ and 1–9"
+        },
+        {
+          "title": "Plain 1–9 picks when search is empty",
+          "hint": "Off: only ⌘1–⌘9 pick, and plain digits always go into search."
+        },
+        {
+          "title": "Shortcut for 'Choose the project' while typing",
+          "hint": "Opens the 'Choose the project' dropdown even while typing in the composer, then returns focus to your prompt after picking."
+        },
+        {
+          "title": "Project picker shortcut combination",
+          "hint": "Select a conflict-free preset or enter any custom key chord."
+        },
+        {
+          "title": "Show Finder button in chat composer",
+          "hint": "Display a shortcut pill below the chat input box"
+        },
+        {
+          "title": "Re-sync image file associations",
+          "hint": "Ensure all image extensions open with the Image Inspector toolbar by default"
+        },
+        {
+          "title": "Project Workspace Quick Jump Reconciler (Cmd+J / Cmd+K)"
+        },
+        {
+          "title": "Inline Rename & Workspace Title Reconciler"
+        },
+        {
+          "title": "Folder -> Workspace Dedupe Reconciler"
+        },
+        {
+          "title": "Path Resolution & Action Reconciler"
+        },
+        {
+          "title": "Schedule Runs & Anti-Freeze DOM Inspector (⌘⇧H)"
+        },
+        {
+          "title": "Sub-sessions in the sidebar"
+        },
+        {
+          "title": "List sub-sessions under the session that started them"
+        },
+        {
+          "title": "Also list sub-sessions that run as tabs",
+          "hint": "A sub-session in its parent's workspace is otherwise only a tab. With this on it gets a row under the workspace; click it to open the tab."
+        },
+        {
+          "title": "Search field in Settings",
+          "hint": "A search box above the settings list. Enter opens the page and highlights the row"
+        },
+        {
+          "title": "Focus with ⌘F",
+          "hint": "Press ⌘F (Ctrl+F) while Settings is open"
+        },
+        {
+          "title": "Choose the project shortcut"
+        },
+        {
+          "title": "Voice & Custom STT Model Reconciler (SiliconFlow / OpenWhispr / Audio Pool :8787)"
+        },
+        {
+          "title": "Customize: Slash Commands, Skills, Rules, Subagents, MCPs & Plugins"
+        },
+        {
+          "title": "Agent History, Slash Skills & Session Patch Reconciler"
+        },
+        {
+          "title": "Startup Auto-Pull-Up & Interrupted Agent Reconciler (/pull-up)"
+        },
+        {
+          "title": "Stop Hook & Writeback Gate Reconciler (finishing-with-writeback)"
+        },
+        {
+          "title": "Smart Clipboard Copy & Markdown Stripper Reconciler (⌘C / ⌘⇧C / ⌥⌘C)"
+        },
+        {
+          "title": "Markdown Table Rendering & Row-Split Reconciler"
+        },
+        {
+          "title": "Enable Markdown table cell line-break & truncated row healer",
+          "hint": "Prevents normalizeMarkdownHtml from splitting GFM table rows on <br> and heals truncated rows"
+        },
+        {
+          "title": "Enable LaTeX Math Rendering (KaTeX MathML)",
+          "hint": "Fixes Paseo's disabled latexMath flag by rendering mathematical formulas ($$...$$) into native MathML via bundled KaTeX"
+        },
+        {
+          "title": "Mermaid diagram rendering"
+        },
+        {
+          "title": "Render diagrams that use formatting tags",
+          "hint": "Allows <b>, <strong>, <em> and other attribute-free tags in labels. Paseo's other safety checks stay on."
+        },
+        {
+          "title": "Detect unlabelled diagram fences",
+          "hint": "Renders fences with no language that start with a Mermaid header (flowchart TD, sequenceDiagram), and mmd fences."
+        },
+        {
+          "title": "Explain diagrams shown as source",
+          "hint": "Adds one line under a diagram that stays as source, naming what blocked it."
+        },
+        {
+          "title": "Multi-document preview & drag navigation"
+        },
+        {
+          "title": "Auto-open PDF and Office documents",
+          "hint": "Opens pdf, docx, doc, xlsx, xls, pptx, ppt, rtf, odt, epub, pages, numbers, and key files directly instead of showing Binary preview unavailable."
+        },
+        {
+          "title": "Default pointer mode",
+          "hint": "Drag mode pans pages and wide sheets by dragging; Select mode lets you highlight text for Quote Reply (hold Space to pan)."
+        },
+        {
+          "title": "Default PDF view",
+          "hint": "Canvas view supports grab-to-pan drag, synchronized multi-doc scroll, and zoom; Native uses Paseo's built-in frame."
+        },
+        {
+          "title": "File drop on preview pane",
+          "hint": "Dropping files from Finder or chat links onto the preview pane compares them side-by-side or opens separate tabs (hold Option to invert)."
+        },
+        {
+          "title": "Synchronize scroll in multi-doc compare",
+          "hint": "Scrolls compared documents proportionally when viewing two or more files side-by-side."
+        },
+        {
+          "title": "Remote Relay & Timeline Reconciler"
+        },
+        {
+          "title": "Session Finished Time & Local Timezone Reconciler"
+        },
+        {
+          "title": "Show concise finished clock time in user timezone alongside relative age"
+        },
+        {
+          "title": "Clock Format",
+          "hint": "24-hour concise clock (01:38 / 11/09 23:48) or 12-hour clock (1:38 AM)"
+        },
+        {
+          "title": "Show finished time in Left Sidebar workspace rows (e.g. 7h · 01:38)",
+          "hint": "Appends concise local finished time to compact sidebar timestamps with full timezone tooltip on hover."
+        },
+        {
+          "title": "Include relative age in chat turn footer (e.g. Worked for 1h 29m · 01:38 (7h ago))",
+          "hint": "Shows both the local finished clock time and relative age on finished assistant turns."
+        },
+        {
+          "title": "Peer Agents & Cross-Model Review Reconciler (v5)"
+        },
+        {
+          "title": "System Starter Prompt & Instructions"
+        },
+        {
+          "title": "Custom Voice & SiliconFlow STT Models (Settings -> Voice, /voice & Audio Pool :8787)"
+        },
+        {
+          "title": "Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O, Top of Cmd+K & /jump)"
+        },
+        {
+          "title": "Zero-Popup Inline Rename (Sidebar Row, Header Title, Agent Tab & F2)"
+        },
+        {
+          "title": "Sidebar Folder Drag & Drop (Auto-Dedupe)"
+        },
+        {
+          "title": "Native File Tab Context Menu",
+          "hint": "Right-click any open file tab to access 'Reveal in Finder', 'Open containing folder', and 'Open in Preview' directly in Paseo's native menu"
+        },
+        {
+          "title": "Image Tab Toolbar",
+          "hint": "Open any image tab for one-click Finder reveal, Preview, editor launch, path copy, and zoom controls"
+        },
+        {
+          "title": "Quick Shortcuts (F2 / Cmd+Shift+E, Cmd+Shift+L, Option+Click & Cmd+Shift+R)",
+          "hint": "F2 or Cmd+Shift+E starts in-place inline rename; Cmd+Shift+L manages colored labels; Option+Click or Cmd+Shift+R reveals files in Finder"
+        },
+        {
+          "title": "Header Popover, Command Center (Cmd+K) & /reveal /rename /label",
+          "hint": "Click the top-right folder icon, search in Cmd+K, or run /reveal, /rename <title>, or /label <name> [color] in chat"
+        },
+        {
+          "title": "Sidebar Delete Key Archive (Click Side Session -> Delete to Archive)",
+          "hint": "Click any sidebar session or open its menu and press Delete once to archive it immediately (same as Shift+Cmd+Backspace), with full input safety"
         }
       ],
       "source": "seed"

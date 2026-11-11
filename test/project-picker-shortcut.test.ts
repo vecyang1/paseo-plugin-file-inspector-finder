@@ -76,6 +76,7 @@ type FakeNode = {
   focus(): void;
   getClientRects(): { length: number };
   onClick?: () => void;
+  dispatchEvent?: (ev: unknown) => boolean;
 };
 
 function matchesSelector(node: FakeNode, selector: string): boolean {
@@ -145,6 +146,7 @@ function el(
       node.focusCalls += 1;
     },
     getClientRects: () => ({ length: 1 }),
+    dispatchEvent: () => true,
   };
   for (const child of children) child.parentElement = node;
   if (!text) node.textContent = children.map((c) => c.textContent).join("");
@@ -428,13 +430,23 @@ test("project picker shortcut: full installer lifecycle with toggle, search focu
   const screen = buildFakePaseoWorkspace();
   const { doc, body, panes, comboboxDialog, triggerA, textareaA, searchInput, opt1 } = screen;
 
-  // Simulate Paseo native trigger behaviour: clicking toggles open/close
-  triggerA.onClick = () => {
-    const isOpen = body.children.includes(comboboxDialog);
-    body.children = isOpen ? [panes] : [panes, comboboxDialog];
-    comboboxDialog.parentElement = isOpen ? null : body;
-    comboboxDialog.isConnected = !isOpen;
+  // Simulate Paseo native FieldTrigger (`onPress: W.open`) + Escape closing Combobox
+  const setOpen = (open: boolean) => {
+    body.children = open ? [panes, comboboxDialog] : [panes];
+    comboboxDialog.parentElement = open ? body : null;
+    comboboxDialog.isConnected = open;
   };
+  triggerA.onClick = () => setOpen(true);
+  opt1.onClick = () => setOpen(false);
+  const onEsc = (ev: unknown) => {
+    if ((ev as { key?: string })?.key === "Escape") {
+      setOpen(false);
+      return true;
+    }
+    return false;
+  };
+  searchInput.dispatchEvent = onEsc;
+  comboboxDialog.dispatchEvent = onEsc;
 
   const listeners = new Map<string, (ev: unknown) => void>();
   const fakeWin = {
@@ -489,7 +501,6 @@ test("project picker shortcut: full installer lifecycle with toggle, search focu
   // 2. Select a project option through native click -> closes picker and restores focus to composer
   opt1.click();
   // In real Paseo, selecting an option closes the Combobox and leaves activeElement on the trigger
-  triggerA.click();
   docWithWin.activeElement = triggerA;
   assert.equal(findOpenProjectPicker(docWithWin as never), null, "picker closed");
 
@@ -530,4 +541,339 @@ test("project picker shortcut: full installer lifecycle with toggle, search focu
   cleanup();
   assert.equal(openProjectPickerFromShortcut(), false);
   assert.equal(getProjectPickerShortcutStatus(docWithWin as never).installed, false);
+});
+
+test("project picker shortcut: compact bottom-sheet modal detection and closing", () => {
+  memory.clear();
+  const searchInput = el(
+    { placeholder: PROJECT_PICKER_SEARCH_PLACEHOLDER },
+    [],
+    "",
+    "INPUT",
+  );
+  const bottomSheet = el(
+    { role: "slider", "aria-label": "Bottom Sheet" },
+    [searchInput],
+  );
+  const root = el({ id: "root" }, [bottomSheet]);
+  const doc = el({}, [root]);
+  (doc as unknown as { body?: FakeNode }).body = root;
+
+  let closedViaFiber = false;
+  (searchInput as unknown as Record<string, unknown>).__reactFiber$fake = {
+    memoizedProps: {
+      onClose: () => {
+        closedViaFiber = true;
+      },
+    },
+    return: null,
+  };
+
+  const detected = findOpenProjectPicker(doc as never);
+  assert.ok(detected, "must detect compact bottom-sheet project picker");
+  assert.equal(detected?.searchInput, searchInput);
+
+  const listeners = new Map<string, (ev: unknown) => void>();
+  const fakeWin = {
+    navigator: { platform: "MacIntel", userAgent: "Macintosh" },
+    localStorage: (globalThis as Record<string, unknown>).window as Window["localStorage"],
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`win:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`win:${t}`),
+    setTimeout: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    clearTimeout: () => {},
+    requestAnimationFrame: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    cancelAnimationFrame: () => {},
+  };
+  const docWithWin = {
+    ...doc,
+    body: root,
+    defaultView: fakeWin,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`doc:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`doc:${t}`),
+    activeElement: searchInput,
+  };
+
+  const cleanup = installProjectPickerShortcut(docWithWin as never);
+  // Reconcile establishes wasPickerOpen
+  cleanup.reconcileNow?.();
+
+  // Press shortcut while picker is open -> must close via fiber onClose
+  listeners.get("win:keydown")?.({
+    code: "KeyP",
+    key: "π",
+    altKey: true,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    target: searchInput,
+  });
+
+  assert.equal(closedViaFiber, true, "compact bottom-sheet must be closed via React Fiber onClose");
+  cleanup();
+});
+
+test("project picker shortcut: Cmd+P race condition on /new keeps open and toggle-closes", () => {
+  memory.clear();
+  syncProjectPickerShortcutPrefs({
+    enabled: true,
+    preset: "cmd_p",
+    customShortcut: "Mod+P",
+  });
+
+  const { doc, body, panes, triggerA, textareaA, searchInput, comboboxDialog } = buildFakePaseoWorkspace({
+    pickerOpen: false,
+  });
+
+  let pickerMounted = false;
+  const setPickerMounted = (open: boolean) => {
+    pickerMounted = open;
+    body.children = open ? [panes, comboboxDialog] : [panes];
+    comboboxDialog.parentElement = open ? body : null;
+    comboboxDialog.isConnected = open;
+  };
+
+  triggerA.onClick = () => {
+    setPickerMounted(!pickerMounted);
+  };
+
+  const handleEscape = (ev: unknown) => {
+    if ((ev as { key?: string })?.key === "Escape") {
+      setPickerMounted(false);
+      return true;
+    }
+    return false;
+  };
+  searchInput.dispatchEvent = handleEscape;
+  comboboxDialog.dispatchEvent = handleEscape;
+
+  const listeners = new Map<string, (ev: unknown) => void>();
+  const fakeWin = {
+    navigator: { platform: "MacIntel", userAgent: "Macintosh" },
+    localStorage: (globalThis as Record<string, unknown>).window as Window["localStorage"],
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`win:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`win:${t}`),
+    setTimeout: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    clearTimeout: () => {},
+    requestAnimationFrame: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    cancelAnimationFrame: () => {},
+  };
+
+  const docWithWin = {
+    ...doc,
+    defaultView: fakeWin,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`doc:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`doc:${t}`),
+  };
+
+  const cleanup = installProjectPickerShortcut(docWithWin as never);
+
+  // Initial state: picker is NOT open
+  assert.equal(findOpenProjectPicker(docWithWin as never), null);
+
+  // Press 1: Simulate Paseo core's `useKeyboardShortcuts` running first on keydown
+  // Paseo core dispatches workspace.project.pick synchronously, opening the picker and preventing default!
+  setPickerMounted(true);
+  assert.ok(findOpenProjectPicker(docWithWin as never), "Paseo opened picker");
+
+  // Now plugin's keydown listener runs on the same keydown event
+  let prevented = false;
+  listeners.get("win:keydown")?.({
+    code: "KeyP",
+    key: "p",
+    metaKey: true,
+    defaultPrevented: true,
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: () => {},
+    target: textareaA,
+  });
+
+  // CRITICAL INVARIANT: Plugin must NOT immediately slam the picker shut!
+  assert.ok(findOpenProjectPicker(docWithWin as never), "first Cmd+P press must KEEP the picker open");
+  assert.ok(searchInput.focusCalls > 0, "must ensure search input is focused");
+
+  // Press 2: User presses Cmd+P again while looking at the open picker -> TOGGLE-CLOSE!
+  listeners.get("win:keydown")?.({
+    code: "KeyP",
+    key: "p",
+    metaKey: true,
+    defaultPrevented: true,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    target: searchInput,
+  });
+
+  // Now picker must be closed!
+  assert.equal(findOpenProjectPicker(docWithWin as never), null, "second Cmd+P press must toggle-close the picker");
+
+  cleanup();
+});
+
+test("project picker shortcut: recovers focus after delayed compact Keyboard.dismiss without stealing option focus", () => {
+  memory.clear();
+  syncProjectPickerShortcutPrefs({ enabled: true, preset: "alt_p" });
+
+  const { doc, body, panes, triggerA, textareaA, searchInput, comboboxDialog, opt1 } = buildFakePaseoWorkspace({
+    pickerOpen: false,
+  });
+
+  triggerA.onClick = () => {
+    body.children = [panes, comboboxDialog];
+    comboboxDialog.parentElement = body;
+    comboboxDialog.isConnected = true;
+    // Simulate Paseo useDismissKeyboardOnOpen immediate dismiss to body
+    doc.activeElement = body;
+  };
+
+  const listeners = new Map<string, (ev: unknown) => void>();
+  const scheduled: Array<{ delay: number; fn: () => void; cancelled: boolean }> = [];
+  const fakeWin = {
+    navigator: { platform: "MacIntel", userAgent: "Macintosh" },
+    localStorage: (globalThis as Record<string, unknown>).window as Window["localStorage"],
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`win:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`win:${t}`),
+    setTimeout: (fn: () => void, ms = 0) => {
+      const entry = { delay: ms, fn, cancelled: false };
+      scheduled.push(entry);
+      return scheduled.length;
+    },
+    clearTimeout: (id: number) => {
+      const entry = scheduled[id - 1];
+      if (entry) entry.cancelled = true;
+    },
+    requestAnimationFrame: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    cancelAnimationFrame: () => {},
+  };
+
+  const docWithWin = {
+    ...doc,
+    get activeElement() {
+      return doc.activeElement;
+    },
+    set activeElement(v) {
+      doc.activeElement = v;
+    },
+    defaultView: fakeWin,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`doc:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`doc:${t}`),
+  };
+
+  searchInput.focus = () => {
+    searchInput.focusCalls += 1;
+    doc.activeElement = searchInput;
+  };
+
+  const cleanup = installProjectPickerShortcut(docWithWin as never);
+  doc.activeElement = textareaA;
+
+  listeners.get("win:keydown")?.({
+    code: "KeyP",
+    key: "π",
+    altKey: true,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    target: textareaA,
+  });
+
+  // Run early timers (< 150ms)
+  for (const t of scheduled.filter((e) => !e.cancelled && e.delay < 150)) {
+    t.fn();
+  }
+  assert.equal(doc.activeElement, searchInput, "initial focus moves to Search projects");
+
+  // Simulate Paseo BottomSheet's setTimeout(Keyboard.dismiss, 150) blurring back to body
+  doc.activeElement = body;
+
+  // Run post-150ms recovery timers (>= 150ms)
+  for (const t of scheduled.filter((e) => !e.cancelled && e.delay >= 150 && e.delay < 300)) {
+    t.fn();
+  }
+  assert.equal(doc.activeElement, searchInput, "post-150ms recovery restores focus to Search projects");
+
+  // If user subsequently moves focus onto an option inside the picker, late check (>= 300ms) must NOT yank focus away
+  doc.activeElement = opt1;
+  const focusCallsBeforeLate = searchInput.focusCalls;
+  for (const t of scheduled.filter((e) => !e.cancelled && e.delay >= 300)) {
+    t.fn();
+  }
+  assert.equal(doc.activeElement, opt1, "does not yank focus away from option inside picker");
+  assert.equal(searchInput.focusCalls, focusCallsBeforeLate, "no redundant focus() when inside picker");
+
+  cleanup();
+});
+
+test("cross-evaluation handoff keeps openProjectPickerFromShortcut working and supports silentNoTrigger", () => {
+  const attachWin = (doc: ReturnType<typeof buildFakePaseoWorkspace>["doc"]) => {
+    const fakeWin = {
+      navigator: { platform: "MacIntel", userAgent: "Macintosh" },
+      localStorage: ((globalThis as Record<string, unknown>).window as Window).localStorage,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setTimeout: (fn: () => void) => {
+        fn();
+        return 1;
+      },
+      clearTimeout: () => {},
+      requestAnimationFrame: (fn: () => void) => {
+        fn();
+        return 1;
+      },
+      cancelAnimationFrame: () => {},
+    };
+    return {
+      ...doc,
+      get activeElement() {
+        return doc.activeElement;
+      },
+      set activeElement(v) {
+        doc.activeElement = v;
+      },
+      defaultView: fakeWin,
+    };
+  };
+
+  const { doc: rawDoc1 } = buildFakePaseoWorkspace();
+  const cleanup1 = installProjectPickerShortcut(attachWin(rawDoc1) as never);
+
+  // Silent check on a screen without triggers should return false and emit zero error receipts
+  const { doc: rawEmptyDoc } = buildFakePaseoWorkspace();
+  rawEmptyDoc.querySelectorAll = () => [];
+  cleanup1();
+  const cleanupEmpty = installProjectPickerShortcut(attachWin(rawEmptyDoc) as never);
+  const receiptsBeforeSilent = readProjectPickerShortcutReceipts().length;
+  assert.equal(openProjectPickerFromShortcut({ silentNoTrigger: true }), false);
+  assert.equal(readProjectPickerShortcutReceipts().length, receiptsBeforeSilent, "silentNoTrigger skips error receipt");
+  cleanupEmpty();
+
+  // Simulate old evaluation cleaned up while a new evaluation mounts after route navigation
+  const cleanupStale = installProjectPickerShortcut(attachWin(rawEmptyDoc) as never);
+  cleanupStale();
+  assert.equal(openProjectPickerFromShortcut({ silentNoTrigger: true }), false);
+
+  const { doc: rawDoc2, triggerA, body, panes, comboboxDialog } = buildFakePaseoWorkspace();
+  triggerA.onClick = () => {
+    body.children = [panes, comboboxDialog];
+    comboboxDialog.parentElement = body;
+    comboboxDialog.isConnected = true;
+  };
+  const cleanupNew = installProjectPickerShortcut(attachWin(rawDoc2) as never);
+  assert.equal(openProjectPickerFromShortcut(), true, "new instance opens picker cleanly");
+  assert.equal(Boolean(findOpenProjectPicker(rawDoc2 as never)), true);
+
+  cleanupNew();
 });

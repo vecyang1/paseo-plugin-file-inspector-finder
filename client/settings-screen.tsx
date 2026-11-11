@@ -18,7 +18,7 @@ import {
   useToast,
 } from "@getpaseo/plugin/client/ui";
 import { useMutation } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   type CustomizeCategory,
@@ -252,6 +252,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [projectPickerStatus, setProjectPickerStatus] =
     useState<ProjectPickerShortcutStatus | null>(null);
   const [customProjectShortcutInput, setCustomProjectShortcutInput] = useState("Alt+P");
+  const lastSyncedCustomShortcutRef = useRef<string | null>(null);
   const [recordingProjectShortcut, setRecordingProjectShortcut] = useState(false);
   const [projectShortcutError, setProjectShortcutError] = useState<string | null>(null);
   useEffect(() => {
@@ -280,6 +281,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       }
       setRecordingProjectShortcut(false);
       setProjectShortcutError(null);
+      lastSyncedCustomShortcutRef.current = captured.spec;
       setCustomProjectShortcutInput(captured.spec);
       syncProjectPickerShortcutPrefs({
         preset: "custom",
@@ -449,7 +451,11 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         preset: settings.values.projectPickerShortcutPreset ?? "alt_p",
         customShortcut: settings.values.projectPickerCustomShortcut ?? "Alt+P",
       });
-      setCustomProjectShortcutInput(settings.values.projectPickerCustomShortcut ?? "Alt+P");
+      const savedCustomShortcut = settings.values.projectPickerCustomShortcut ?? "Alt+P";
+      if (lastSyncedCustomShortcutRef.current !== savedCustomShortcut) {
+        lastSyncedCustomShortcutRef.current = savedCustomShortcut;
+        setCustomProjectShortcutInput(savedCustomShortcut);
+      }
       setProjectPickerStatus(getProjectPickerShortcutStatus());
       syncSidebarDefaultCollapsePrefs({ enabled: settings.values.startNewProjectsCollapsed });
       syncSettingsSearchPrefs({
@@ -1592,6 +1598,29 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                       setCustomProjectShortcutInput(txt);
                       setProjectShortcutError(null);
                     }}
+                    onSubmitEditing={() => {
+                      const trimmed = customProjectShortcutInput.trim();
+                      const parsed = parseProjectPickerShortcutChord(trimmed);
+                      if (!parsed) {
+                        setProjectShortcutError(t("settings.projectPickerInvalidShortcut"));
+                        return;
+                      }
+                      setProjectShortcutError(null);
+                      syncProjectPickerShortcutPrefs({
+                        preset: "custom",
+                        customShortcut: trimmed,
+                      });
+                      setProjectPickerStatus(getProjectPickerShortcutStatus());
+                      lastSyncedCustomShortcutRef.current = trimmed;
+                      void save(
+                        {
+                          ...values,
+                          projectPickerShortcutPreset: "custom",
+                          projectPickerCustomShortcut: trimmed,
+                        },
+                        revision,
+                      );
+                    }}
                     placeholder="Alt+P / Mod+Shift+J"
                     placeholderTextColor={theme.colors.foregroundMuted}
                     style={styles.input}
@@ -1612,6 +1641,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                         customShortcut: trimmed,
                       });
                       setProjectPickerStatus(getProjectPickerShortcutStatus());
+                      lastSyncedCustomShortcutRef.current = trimmed;
                       void save(
                         {
                           ...values,
@@ -1646,6 +1676,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                     onPress={() => {
                       setProjectShortcutError(null);
                       setRecordingProjectShortcut(false);
+                      lastSyncedCustomShortcutRef.current = "Alt+P";
                       setCustomProjectShortcutInput("Alt+P");
                       syncProjectPickerShortcutPrefs({
                         preset: "alt_p",

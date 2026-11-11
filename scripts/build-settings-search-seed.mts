@@ -174,7 +174,14 @@ async function main(): Promise<number> {
         continue;
       }
       const label = normalizeSettingsText(harvested.label);
-      if (!inCorpus(corpus, label)) {
+      const isCompoundLabelInCorpus =
+        inCorpus(corpus, label) ||
+        (label.includes(" · ") &&
+          label
+            .split(" · ")
+            .map((part) => part.trim())
+            .every((part) => inCorpus(corpus, part)));
+      if (!isCompoundLabelInCorpus) {
         console.log(`  ${target.key.padEnd(44)} page title is not UI copy, skipped`);
         continue;
       }

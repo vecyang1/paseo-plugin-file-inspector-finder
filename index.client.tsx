@@ -370,7 +370,22 @@ export default function contribute(client: PluginClientContext) {
     context: "global",
     onSelect() {
       // Let the Command Center close and hand focus back to the composer first.
-      setTimeout(() => openProjectPickerFromShortcut(), 160);
+      setTimeout(() => {
+        const opened = openProjectPickerFromShortcut({ silentNoTrigger: true });
+        if (!opened) {
+          openNewWorkspaceInApp({});
+          let attempts = 0;
+          const poll = () => {
+            attempts += 1;
+            const isFinal = attempts >= 35;
+            if (openProjectPickerFromShortcut({ silentNoTrigger: !isFinal })) return;
+            const winLoc = (globalThis as { location?: { pathname?: string } }).location?.pathname;
+            if (attempts > 8 && winLoc && winLoc !== "/new") return;
+            if (!isFinal) setTimeout(poll, 60);
+          };
+          setTimeout(poll, 80);
+        }
+      }, 160);
     },
   });
 

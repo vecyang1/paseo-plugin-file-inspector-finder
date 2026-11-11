@@ -75,10 +75,14 @@ async function findByTexts(page: Page, texts: string[]) {
   return null;
 }
 
-async function openPresetSelectorToCustom(page: Page): Promise<boolean> {
+async function selectPresetOption(
+  page: Page,
+  nativeValue: string,
+  optionLabels: string[],
+): Promise<boolean> {
   // Paseo SettingsSelect renders a row whose label is "Project picker shortcut combination" / "快捷键组合"
   // with a clickable control (<select> or Combobox trigger) in the same container.
-  const opened = await page.evaluate(() => {
+  const opened = await page.evaluate((targetVal: string) => {
     const labels = ["Project picker shortcut combination", "快捷键组合"];
     const labelEl = Array.from(document.querySelectorAll("*")).find(
       (el) => el.children.length === 0 && labels.includes((el.textContent ?? "").trim()),
@@ -88,7 +92,7 @@ async function openPresetSelectorToCustom(page: Page): Promise<boolean> {
     for (let d = 0; d < 6 && row; d += 1, row = row.parentElement) {
       const sel = row.querySelector("select") as HTMLSelectElement | null;
       if (sel) {
-        sel.value = "custom";
+        sel.value = targetVal;
         sel.dispatchEvent(new Event("change", { bubbles: true }));
         return "native-select";
       }
@@ -100,13 +104,13 @@ async function openPresetSelectorToCustom(page: Page): Promise<boolean> {
       }
     }
     return "no-control";
-  });
+  }, nativeValue);
   if (opened === "native-select") return true;
   if (opened !== "clicked-trigger") return false;
   await sleep(300);
-  const opt = await findByTexts(page, ["Custom shortcut", "自定义快捷键"]);
+  const opt = await findByTexts(page, optionLabels);
   if (!opt) return false;
-  await opt.click();
+  await opt.click({ force: true });
   await sleep(300);
   return true;
 }
@@ -330,10 +334,51 @@ async function main() {
 
       await page.screenshot({ path: path.join(SHOTS, "02-settings-screen.png") });
 
-      // 8. Test configurability: switch to Custom -> Record keys -> Ctrl+Shift+Y -> verify in /new -> Reset default
-      const customSelected = await openPresetSelectorToCustom(page);
+      // 8. Test configurability: Custom TextInput typing & validation, Record keys, cmd_p preset, compact mode & reset
+      const customSelected = await selectPresetOption(page, "custom", ["Custom shortcut", "自定义快捷键"]);
       check("12. Switched preset selector to Custom shortcut", customSelected);
       if (customSelected) {
+        // 8a. Test manual TextInput entry: invalid shortcut error validation
+        const customInput = page.locator('input[placeholder="Alt+P / Mod+Shift+J"]').first();
+        if (await customInput.isVisible().catch(() => false)) {
+          await customInput.scrollIntoViewIfNeeded();
+          await customInput.click();
+          await customInput.fill("invalidchord");
+          const applyBtn = await findByTexts(page, ["Apply", "应用"]);
+          if (applyBtn) {
+            await applyBtn.scrollIntoViewIfNeeded();
+            await applyBtn.click();
+            await sleep(250);
+            const invalidCheck = await page.evaluate(() => {
+              const alerts = Array.from(document.querySelectorAll('[role="alert"]')).map((el) =>
+                (el.textContent ?? "").trim(),
+              );
+              const body = document.body.innerText;
+              return {
+                alerts,
+                hasText:
+                  body.includes("Invalid shortcut: include at least Cmd, Ctrl, or Alt (or F1-F12).") ||
+                  body.includes("无效快捷键：请至少包含 Cmd、Ctrl 或 Alt 修饰键（或 F1-F12）。"),
+              };
+            });
+            check(
+              "13a. Custom shortcut input rejects invalid chords with inline error",
+              invalidCheck.hasText && invalidCheck.alerts.length > 0,
+              JSON.stringify(invalidCheck),
+            );
+          }
+
+          // 8b. Type valid shortcut and press Enter (onSubmitEditing)
+          await customInput.click();
+          await customInput.fill("Control+Shift+U");
+          await customInput.press("Enter");
+          await sleep(400);
+          const storedFromInput = await waitForStored(
+            (v) => v?.projectPickerShortcutPreset === "custom" && v?.projectPickerCustomShortcut === "Control+Shift+U",
+          );
+          check("13b. Pressing Enter in Custom shortcut input saves Control+Shift+U", storedFromInput);
+        }
+
         const recordBtn = await findByTexts(page, ["Record keys", "录制按键"]);
         if (recordBtn) {
           await recordBtn.scrollIntoViewIfNeeded();
@@ -346,7 +391,7 @@ async function main() {
             (v) => v?.projectPickerShortcutPreset === "custom" && v?.projectPickerCustomShortcut === "Ctrl+Shift+Y",
           );
           check(
-            "13. Live Record keys captured Ctrl+Shift+Y and saved to finder-settings.json",
+            "13c. Live Record keys captured Ctrl+Shift+Y and saved to finder-settings.json",
             storedCustom,
             JSON.stringify({
               preset: readStoredSettings()?.projectPickerShortcutPreset,
@@ -377,6 +422,46 @@ async function main() {
             await sleep(250);
           }
 
+          // 8c. Switch to cmd_p preset via Settings UI dropdown, then test live on /new
+          await page.goto(settingsUrl, { waitUntil: "domcontentloaded" });
+          await page
+            .waitForFunction(
+              (titles: string[]) =>
+                Array.from(document.querySelectorAll("*")).some(
+                  (el) => el.children.length === 0 && titles.includes((el.textContent ?? "").trim()),
+                ),
+              ["Choose the project shortcut", "选择项目快捷键"],
+              { timeout: 25_000 },
+            )
+            .catch(() => false);
+          await sleep(400);
+          const switchedCmdP = await selectPresetOption(page, "cmd_p", [
+            "Cmd+P / Ctrl+P · New Workspace only",
+            "Cmd+P · 仅新建工作区生效",
+          ]);
+          const storedCmdP = switchedCmdP && (await waitForStored((v) => v?.projectPickerShortcutPreset === "cmd_p"));
+
+          await page.goto(`http://127.0.0.1:${PORT}/new`, { waitUntil: "domcontentloaded" });
+          await page.waitForSelector(TRIGGER, { timeout: 20_000 });
+          await page.waitForSelector(COMPOSER, { timeout: 20_000 });
+          await sleep(400);
+
+          const cmdPAria = await page.evaluate((sel: string) => document.querySelector(sel)?.getAttribute("aria-keyshortcuts"), TRIGGER);
+          await page.locator(COMPOSER).first().focus();
+          // Press Meta+P (Cmd+P) to open
+          await page.keyboard.press("Meta+p");
+          await sleep(350);
+          const cmdPOpened = await page.$(COMBOBOX) !== null;
+          // Press Meta+P a second time to toggle-close
+          await page.keyboard.press("Meta+p");
+          await sleep(400);
+          const cmdPClosed = await page.$(COMBOBOX) === null;
+          check(
+            "15. Preset cmd_p (via Settings dropdown) opens and toggle-closes cleanly without race",
+            storedCmdP && (cmdPAria === "Meta+P" || cmdPAria === "Control+P") && cmdPOpened && cmdPClosed,
+            `saved=${storedCmdP} aria="${cmdPAria}" opened=${cmdPOpened} closed=${cmdPClosed}`,
+          );
+
           // Restore default via Settings Reset default button
           await page.goto(settingsUrl, { waitUntil: "domcontentloaded" });
           await sleep(1200);
@@ -387,12 +472,81 @@ async function main() {
             switchedCustom = false;
           }
           const restored = await waitForStored((v) => v?.projectPickerShortcutPreset === "alt_p");
-          check("15. Reset default restored alt_p preset cleanly", restored);
+          check("16. Reset default restored alt_p preset cleanly", restored);
+
+          // 8d. Test compact mobile viewport (width: 500, height: 800)
+          const compactPage = await browser.newPage({ viewport: { width: 500, height: 800 } });
+          try {
+            await compactPage.goto(`http://127.0.0.1:${PORT}/new`, { waitUntil: "domcontentloaded" });
+            await compactPage.waitForSelector(TRIGGER, { timeout: 20_000 });
+            await compactPage.waitForSelector(COMPOSER, { timeout: 20_000 });
+            await sleep(300);
+
+            await compactPage.locator(COMPOSER).first().focus();
+            await compactPage.keyboard.press("Alt+p");
+            const compactSearchInput = await compactPage
+              .waitForSelector(SEARCH_INPUT, { timeout: 5_000 })
+              .then(() => true, () => false);
+            // Wait past Paseo's 150ms useDismissKeyboardOnOpen Keyboard.dismiss() timer and our recovery check
+            await sleep(400);
+
+            const searchActiveInCompact = await compactPage.evaluate(
+              (sel: string) => document.activeElement === document.querySelector(sel),
+              SEARCH_INPUT,
+            );
+
+            // Toggle-close in compact mode
+            await compactPage.keyboard.press("Alt+p");
+            await sleep(500);
+            const compactClosed = await compactPage.$(SEARCH_INPUT) === null;
+
+            check(
+              "17. Compact mobile mode (500x800) opens bottom sheet, focuses search, and toggle-closes",
+              compactSearchInput && searchActiveInCompact && compactClosed,
+              `searchInput=${compactSearchInput} focused=${searchActiveInCompact} closed=${compactClosed}`,
+            );
+          } finally {
+            await compactPage.close();
+          }
+
+          // 8e. Command Center "Choose the project (New Workspace)" from an active workspace session
+          await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "domcontentloaded" });
+          await sleep(1200);
+          const firstWsRow = page.locator('[data-testid^="sidebar-workspace-row-"]').first();
+          if (await firstWsRow.isVisible().catch(() => false)) {
+            await firstWsRow.click();
+            await sleep(800);
+          }
+          await page.keyboard.press("Meta+k");
+          await sleep(500);
+          const ccInput = page
+            .locator('input[placeholder*="Search"], input[placeholder*="Type a command"]')
+            .first();
+          await ccInput.fill("Choose the project");
+          await sleep(400);
+          const ccItem = page.getByText("Choose the project (New Workspace)").first();
+          const ccVisible = await ccItem.isVisible().catch(() => false);
+          if (ccVisible) {
+            await ccItem.click();
+            await sleep(1500);
+          }
+          const ccResult = await page.evaluate((sel: string) => ({
+            onNew: location.pathname === "/new",
+            trigger: Boolean(document.querySelector('[data-testid="new-workspace-project-picker-trigger"]')),
+            combo: Boolean(document.querySelector('[data-testid="combobox-desktop-container"]')),
+            search: Boolean(document.querySelector(sel)),
+            focused: document.activeElement === document.querySelector(sel),
+          }), SEARCH_INPUT);
+          check(
+            "18. Cmd+K Choose the project from workspace navigates to /new, opens picker, and focuses search",
+            ccVisible && ccResult.onNew && ccResult.trigger && ccResult.combo && ccResult.search && ccResult.focused,
+            JSON.stringify(ccResult),
+          );
         }
       }
     }
 
-    check("16. Zero fatal console errors during execution", consoleErrors.length === 0, `${consoleErrors.length} errors`);
+    check("19. Zero fatal console errors during execution", consoleErrors.length === 0, `${consoleErrors.length} errors`);
   } finally {
     // Defensive reset if interrupted mid-test while on custom shortcut
     if (switchedCustom && page) {

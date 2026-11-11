@@ -4344,6 +4344,15 @@ export function openNewWorkspaceInApp(
   }
 
   const focusComposer = (): boolean => {
+    const openPickerEl =
+      doc.querySelector('input[placeholder="Search projects"]') ??
+      doc.querySelector('[data-testid="combobox-desktop-container"]');
+    if (openPickerEl) {
+      const rect = openPickerEl.getBoundingClientRect?.();
+      if (!rect || (rect.width > 0 && rect.height > 0)) {
+        return true;
+      }
+    }
     const textarea = doc.querySelector(
       '[data-testid="message-input-root"] textarea, textarea',
     );

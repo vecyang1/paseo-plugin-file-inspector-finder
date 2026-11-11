@@ -73,7 +73,7 @@ const MAX_RECEIPTS = 15;
 /** Code editors and terminals own their keybindings; composer inputs are explicitly allowed. */
 const FOREIGN_OWNERS = [".cm-editor", ".monaco-editor", ".xterm"];
 const OPEN_CHECK_DELAY_MS = 200;
-const FOCUS_CHECK_DELAYS_MS = [35, 110];
+const FOCUS_CHECK_DELAYS_MS = [35, 110, 210, 320];
 const RESTORE_DELAY_MS = 35;
 
 export const DEFAULT_PROJECT_PICKER_SHORTCUT_PREFS: ProjectPickerShortcutPrefs = {
@@ -90,9 +90,10 @@ const PRESET_TO_SPEC: Record<Exclude<ProjectPickerShortcutPreset, "custom">, str
 };
 
 const VALID_PRESETS = new Set<string>(["alt_p", "cmd_shift_j", "cmd_alt_o", "cmd_p", "custom"]);
+const GLOBAL_PROJECT_PICKER_BRIDGE_KEY = "__paseoFinderProjectPickerShortcut";
 
 let installedOwner: object | null = null;
-let activeOpen: (() => boolean) | null = null;
+let activeOpen: ((options?: { silentNoTrigger?: boolean }) => boolean) | null = null;
 
 // ---------------------------------------------------------------------------
 // Preferences + receipts (localStorage mirror of host-scoped plugin settings)
@@ -626,6 +627,7 @@ function insideForeignOwner(target: unknown): boolean {
 function isEditableComposerTarget(target: unknown, openPicker: OpenProjectPicker | null): boolean {
   const el = target as ElementLike | null;
   if (!el) return false;
+  if (openPicker?.searchInput === el) return false;
   if (openPicker?.container.contains?.(el)) return false;
   const tag = (el.tagName ?? "").toUpperCase();
   if (el.getAttribute("data-composer-input") !== null) return true;
@@ -679,6 +681,7 @@ function isProjectPickerContainer(container: ElementLike): boolean {
 }
 
 export function findOpenProjectPicker(doc: DocLike): OpenProjectPicker | null {
+  // 1. Desktop Combobox or role="dialog" container
   const containers = [
     ...all(doc, '[data-testid="combobox-desktop-container"]'),
     ...all(doc, '[role="dialog"]'),
@@ -694,6 +697,47 @@ export function findOpenProjectPicker(doc: DocLike): OpenProjectPicker | null {
       null;
     return { container, searchInput };
   }
+
+  // 2. Compact / bottom sheet mode: find visible search input with project placeholder
+  const visibleInputs = all(doc, `input[placeholder="${PROJECT_PICKER_SEARCH_PLACEHOLDER}"]`).filter(isVisible);
+  for (const searchInput of visibleInputs) {
+    let container: ElementLike | null = searchInput.parentElement ?? null;
+    let foundContainer: ElementLike | null = null;
+    for (let depth = 0; container && depth < 20; depth += 1) {
+      if (
+        container.getAttribute?.("role") === "slider" ||
+        container.getAttribute?.("aria-label") === "Bottom Sheet" ||
+        container.getAttribute?.("data-testid") === "compact-shell" ||
+        (container.parentElement === doc.body || (container as unknown as { id?: string }).id === "root")
+      ) {
+        foundContainer = container;
+        break;
+      }
+      container = container.parentElement ?? null;
+    }
+    return {
+      container: foundContainer ?? (searchInput.parentElement ?? searchInput),
+      searchInput,
+    };
+  }
+
+  // 3. Fallback: project picker options visible without search input
+  const visibleOptions = all(doc, `[data-testid^="${PROJECT_PICKER_OPTION_PREFIX}"]`).filter(isVisible);
+  if (visibleOptions.length > 0) {
+    let container: ElementLike | null = visibleOptions[0]?.parentElement ?? null;
+    for (let depth = 0; container && depth < 16; depth += 1) {
+      const box = container;
+      if (isProjectPickerContainer(box)) {
+        const searchInput =
+          box.querySelector?.(`input[placeholder="${PROJECT_PICKER_SEARCH_PLACEHOLDER}"]`) ??
+          box.querySelector?.("input") ??
+          null;
+        return { container: box, searchInput };
+      }
+      container = box.parentElement ?? null;
+    }
+  }
+
   return null;
 }
 
@@ -817,6 +861,7 @@ export function installProjectPickerShortcut(
   let pendingRestorePane: ElementLike | null = null;
   let userClickedOutsideWhileOpen = false;
   let wasPickerOpen = false;
+  let focusEpoch = 0;
   let observer: MutationObserver | null = null;
   let frame = 0;
 
@@ -846,9 +891,11 @@ export function installProjectPickerShortcut(
     const activeIsNeutralOrTrigger =
       !active ||
       active === dom.body ||
+      active === (dom as unknown as { documentElement?: ElementLike | null }).documentElement ||
       active === triggerRef ||
       Boolean(triggerRef?.contains?.(active)) ||
-      active.getAttribute?.("data-testid") === PROJECT_PICKER_TRIGGER_TESTID;
+      active.getAttribute?.("data-testid") === PROJECT_PICKER_TRIGGER_TESTID ||
+      (active.tagName === "DIV" && !active.getAttribute?.("role") && !active.getAttribute?.("tabindex"));
 
     if (!activeIsNeutralOrTrigger) return;
 
@@ -898,27 +945,43 @@ export function installProjectPickerShortcut(
   }
 
   const ensureSearchFocused = () => {
+    const epoch = ++focusEpoch;
     for (const ms of FOCUS_CHECK_DELAYS_MS) {
       later(() => {
+        if (epoch !== focusEpoch || userClickedOutsideWhileOpen) return;
         const picker = findOpenProjectPicker(dom);
         if (!picker?.searchInput) return;
-        if (dom.activeElement !== picker.searchInput) {
+        const active = dom.activeElement ?? null;
+        if (active === picker.searchInput || picker.container.contains?.(active)) return;
+        const activeCanTransition =
+          !active ||
+          active === dom.body ||
+          active === (dom as unknown as { documentElement?: ElementLike | null }).documentElement ||
+          active === lastTrigger ||
+          Boolean(lastTrigger?.contains?.(active)) ||
+          active === pendingRestoreComposer;
+        if (activeCanTransition) {
           picker.searchInput.focus?.();
         }
       }, ms);
     }
   };
 
-  const open = (restoreTarget?: ElementLike | null): boolean => {
+  const open = (
+    restoreTarget?: ElementLike | null,
+    options?: { silentNoTrigger?: boolean },
+  ): boolean => {
     const trigger = pickProjectPickerTrigger(dom, lastFocused);
     if (!trigger || isDisabled(trigger)) {
-      recordProjectPickerShortcutReceipt(
-        "no-trigger",
-        false,
-        trigger
-          ? "Project picker ('Choose the project') is disabled here."
-          : "No 'Choose the project' picker on this screen (open New Workspace).",
-      );
+      if (!options?.silentNoTrigger) {
+        recordProjectPickerShortcutReceipt(
+          "no-trigger",
+          false,
+          trigger
+            ? "Project picker ('Choose the project') is disabled here."
+            : "No 'Choose the project' picker on this screen (open New Workspace).",
+        );
+      }
       return false;
     }
 
@@ -956,9 +1019,44 @@ export function installProjectPickerShortcut(
   };
 
   const close = (picker: OpenProjectPicker): boolean => {
-    // Paseo's FieldTrigger has `onPress: W.open` (not toggle). To cleanly dismiss an open Combobox,
-    // dispatch an Escape keydown event to the focused search input or Combobox dialog container.
-    const target = (picker.searchInput ?? picker.container) as { dispatchEvent?: (ev: Event) => boolean };
+    // Paseo's FieldTrigger has `onPress: W.open` (not toggle).
+    // 1. Try component fiber onClose / onDismiss / handleClose first (especially for compact BottomSheet modal).
+    try {
+      const el = (picker.searchInput ?? picker.container) as unknown as Record<string, unknown> | null;
+      if (el) {
+        const k = Object.keys(el).find((key) => key.startsWith("__reactFiber"));
+        let cur = k ? (el[k] as Record<string, unknown> | null) : null;
+        while (cur) {
+          const p = cur.memoizedProps as Record<string, unknown> | null;
+          if (p && typeof p === "object") {
+            if (typeof p.onClose === "function") {
+              (p.onClose as () => void)();
+              break;
+            }
+            if (typeof p.onDismiss === "function") {
+              (p.onDismiss as () => void)();
+              break;
+            }
+            if (typeof p.handleClose === "function") {
+              (p.handleClose as () => void)();
+              break;
+            }
+          }
+          cur = (cur.return as Record<string, unknown> | null) ?? null;
+        }
+      }
+    } catch {
+      // Fall through to Escape dispatch
+    }
+
+    // 2. Dispatch Escape to focused search input, picker container, active element, and body.
+    const targets = [
+      picker.searchInput,
+      picker.container,
+      dom.activeElement,
+      dom.body,
+    ].filter(Boolean) as Array<{ dispatchEvent?: (ev: Event) => boolean }>;
+
     const esc =
       typeof KeyboardEvent === "function"
         ? new KeyboardEvent("keydown", {
@@ -969,18 +1067,21 @@ export function installProjectPickerShortcut(
             bubbles: true,
             cancelable: true,
           })
-        : null;
+        : ({
+            key: "Escape",
+            code: "Escape",
+            keyCode: 27,
+            which: 27,
+            type: "keydown",
+          } as unknown as Event);
 
-    if (esc && typeof target.dispatchEvent === "function") {
-      target.dispatchEvent(esc);
-    } else {
-      const trigger =
-        lastTrigger && lastTrigger.isConnected !== false
-          ? lastTrigger
-          : pickProjectPickerTrigger(dom, lastFocused);
-      trigger?.click?.();
+    for (const target of targets) {
+      if (typeof target.dispatchEvent === "function") {
+        target.dispatchEvent(esc);
+      }
     }
 
+    focusEpoch += 1;
     wasPickerOpen = false;
     later(maybeRestoreComposerFocus, RESTORE_DELAY_MS);
     recordProjectPickerShortcutReceipt(
@@ -996,6 +1097,7 @@ export function installProjectPickerShortcut(
     if (!prefs.enabled) return;
     if (!isProjectPickerShortcutEvent(event, prefs, isMac)) return;
 
+    const wasOpenBefore = wasPickerOpen;
     const picker = findOpenProjectPicker(dom);
     if (!picker) {
       if (insideForeignOwner(event.target) || otherModalOpen(dom, null)) return;
@@ -1007,8 +1109,34 @@ export function installProjectPickerShortcut(
     event.stopImmediatePropagation?.();
     if (event.repeat) return;
 
+    const justOpenedByCore =
+      Boolean(event.defaultPrevented) && !wasOpenBefore && Boolean(picker);
+
     if (picker) {
-      close(picker);
+      if (justOpenedByCore) {
+        // Picker was opened during this event (e.g. by Paseo core's `workspace.project.pick` for Cmd+P):
+        // Keep it open, record composer restore, focus search input, and record receipt.
+        wasPickerOpen = true;
+        const composer =
+          event.target && isEditableComposerTarget(event.target, picker)
+            ? (event.target as unknown as ElementLike)
+            : isEditableComposerTarget(dom.activeElement ?? null, picker)
+              ? (dom.activeElement ?? null)
+              : null;
+        pendingRestoreComposer = composer;
+        const trigger = pickProjectPickerTrigger(dom, lastFocused);
+        pendingRestorePane = composer && trigger ? findPaneRoot(dom, trigger, composer) : null;
+        userClickedOutsideWhileOpen = false;
+        ensureSearchFocused();
+        const label = triggerLabel(trigger) ?? "?";
+        recordProjectPickerShortcutReceipt(
+          "open",
+          true,
+          `Opened project picker (current: "${label}").`,
+        );
+      } else {
+        close(picker);
+      }
     } else {
       open((event.target as ElementLike | null) ?? dom.activeElement ?? null);
     }
@@ -1061,14 +1189,24 @@ export function installProjectPickerShortcut(
   }
 
   const owner = {};
-  const openFn = () => open();
+  const openFn = (options?: { silentNoTrigger?: boolean }) => open(null, options);
+  const bridge = { openNow: openFn };
   installedOwner = owner;
   activeOpen = openFn;
+  if (typeof globalThis !== "undefined") {
+    (globalThis as Record<string, unknown>)[GLOBAL_PROJECT_PICKER_BRIDGE_KEY] = bridge;
+  }
   reconcile();
 
   const cleanup = (() => {
     if (installedOwner === owner) installedOwner = null;
     if (activeOpen === openFn) activeOpen = null;
+    if (typeof globalThis !== "undefined") {
+      const g = globalThis as Record<string, unknown>;
+      if (g[GLOBAL_PROJECT_PICKER_BRIDGE_KEY] === bridge) {
+        delete g[GLOBAL_PROJECT_PICKER_BRIDGE_KEY];
+      }
+    }
     for (const id of timers) win.clearTimeout(id);
     timers.clear();
     win.removeEventListener("keydown", onKeyDown, true);
@@ -1086,6 +1224,15 @@ export function installProjectPickerShortcut(
 }
 
 /** Triggers the live installed project picker helper (for Command Center / Settings tests). */
-export function openProjectPickerFromShortcut(): boolean {
-  return activeOpen?.() ?? false;
+export function openProjectPickerFromShortcut(
+  options?: { silentNoTrigger?: boolean },
+): boolean {
+  if (activeOpen) return activeOpen(options);
+  if (typeof globalThis !== "undefined") {
+    const bridge = (globalThis as Record<string, unknown>)[GLOBAL_PROJECT_PICKER_BRIDGE_KEY] as
+      | { openNow?: (opts?: { silentNoTrigger?: boolean }) => boolean }
+      | undefined;
+    if (typeof bridge?.openNow === "function") return bridge.openNow(options);
+  }
+  return false;
 }
