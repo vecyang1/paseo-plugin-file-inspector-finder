@@ -106,7 +106,13 @@ import {
   syncDocumentPanelAssociations,
 } from "./client/doc-preview-web";
 import { installCompactionAndContextEnhancer } from "./client/compaction-context-web";
+import { createKeyedSerialQueue } from "./client/keyed-serial";
 import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
+
+// One queue for every title write path (Option+D, /done, the Command Center action, F2, slash rename).
+// Each rename sends a native setTitle and then a plugin RPC that sets the title again; without
+// per-workspace ordering a slow RPC from an earlier rename can land after a later one and win.
+const workspaceTitleWrites = createKeyedSerialQueue();
 
 export default function contribute(client: PluginClientContext) {
   // 0. Install in-flight timeline wire sanitizer so sessions with pre-patch `status:"failed", error:null` never freeze
@@ -303,15 +309,17 @@ export default function contribute(client: PluginClientContext) {
               if (newTitle) {
                 synchronizeWorkspaceTitleDom(doc, win, targetWsId, newTitle);
               }
-              try {
-                await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
-              } catch {
-                // Fallback
-              }
-              await rpc(renameWorkspaceOrAgentRpc, {
-                workspaceId: targetWsId,
-                title: newTitle,
-                source: "mark-done-shortcut",
+              await workspaceTitleWrites.run(targetWsId, async () => {
+                try {
+                  await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
+                } catch {
+                  // Fallback
+                }
+                await rpc(renameWorkspaceOrAgentRpc, {
+                  workspaceId: targetWsId,
+                  title: newTitle,
+                  source: "mark-done-shortcut",
+                });
               });
             },
           },
@@ -1107,15 +1115,17 @@ export default function contribute(client: PluginClientContext) {
                 if (newTitle) {
                   synchronizeWorkspaceTitleDom(doc, win, targetWsId, newTitle);
                 }
-                try {
-                  await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
-                } catch {
-                  // Fallback
-                }
-                await rpc(renameWorkspaceOrAgentRpc, {
-                  workspaceId: targetWsId,
-                  title: newTitle,
-                  source: "mark-done-shortcut",
+                await workspaceTitleWrites.run(targetWsId, async () => {
+                  try {
+                    await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
+                  } catch {
+                    // Fallback
+                  }
+                  await rpc(renameWorkspaceOrAgentRpc, {
+                    workspaceId: targetWsId,
+                    title: newTitle,
+                    source: "mark-done-shortcut",
+                  });
                 });
               },
             },
@@ -1608,18 +1618,21 @@ export default function contribute(client: PluginClientContext) {
           synchronizeWorkspaceTitleDom(doc, win, targetWsId, newTitle);
         }
       }
-      if (targetWsId && !options?.agentId) {
-        try {
-          await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
-        } catch {
-          // Fallback to RPC
+      const writeKey = targetWsId ?? `agent:${options?.agentId ?? ""}`;
+      await workspaceTitleWrites.run(writeKey, async () => {
+        if (targetWsId && !options?.agentId) {
+          try {
+            await client.paseo.workspaces.ref(targetWsId).setTitle(newTitle);
+          } catch {
+            // Fallback to RPC
+          }
         }
-      }
-      await client.rpc(renameWorkspaceOrAgentRpc, {
-        workspaceId: targetWsId,
-        agentId: options?.agentId,
-        title: newTitle,
-        source: options?.source,
+        await client.rpc(renameWorkspaceOrAgentRpc, {
+          workspaceId: targetWsId,
+          agentId: options?.agentId,
+          title: newTitle,
+          source: options?.source,
+        });
       });
     },
     onToggleLabel: async (

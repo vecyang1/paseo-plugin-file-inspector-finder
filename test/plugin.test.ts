@@ -3956,7 +3956,8 @@ test("35. Mark session as done shortcut (Option+D / ⌥D) & slash command: toggl
   assert.equal(markRes?.newTitle, "d Fix Paseo auto-launch not triggering");
   assert.equal(titleNode.textContent, "d Fix Paseo auto-launch not triggering");
   assert.equal(headerTitleNode.textContent, "d Fix Paseo auto-launch not triggering");
-  assert.equal(rowScrolled, true);
+  // ⌥D must not move the sidebar: flash the row in place, never scroll or center it
+  assert.equal(rowScrolled, false);
   assert.equal((rowNode as Record<string, unknown>)["data-paseo-workspace-jump-flash"], "true");
   assert.equal(renameCalls.length, 1);
   assert.equal(renameCalls[0].newTitle, "d Fix Paseo auto-launch not triggering");
@@ -3981,7 +3982,7 @@ test("35. Mark session as done shortcut (Option+D / ⌥D) & slash command: toggl
   assert.equal(unmarkRes?.newTitle, "Fix Paseo auto-launch not triggering");
   assert.equal(titleNode.textContent, "Fix Paseo auto-launch not triggering");
   assert.equal(headerTitleNode.textContent, "Fix Paseo auto-launch not triggering");
-  assert.equal(rowScrolled, true);
+  assert.equal(rowScrolled, false);
   assert.equal(renameCalls.length, 2);
   assert.equal(renameCalls[1].newTitle, "Fix Paseo auto-launch not triggering");
 });

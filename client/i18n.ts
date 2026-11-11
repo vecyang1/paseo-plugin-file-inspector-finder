@@ -40,7 +40,7 @@ export const enMessages = {
     voiceSlashHint: "[sensevoice | qwen | telespeech | gemini | test | reset | <custom-model-id>]",
     toggleSessionDone: "Finder: Toggle Session Done (Option+D / ⌥D)",
     doneSlashDescription:
-      "Toggle the completed 'd ' prefix on the current session and reveal in sidebar",
+      "Toggle the completed 'd ' prefix on the current session (sidebar row flashes in place)",
     doneSlashHint: "[prefix, defaults to 'd ']",
     copyCleanText: "Copy Clean Plain Text (No Markdown **) (⌘⇧C)",
     copyRawMarkdown: "Copy Raw Markdown (⌥⌘C)",
@@ -218,7 +218,7 @@ export const enMessages = {
     testPinWorkspaceBtn: "Test Pin (⌘⌥P)",
     markDoneShortcutLabel: "Enable mark session done shortcut (Option+D / ⌥D)",
     markDoneShortcutHint:
-      "Press Option+D or Option+Shift+D to automatically toggle the 'd ' prefix on the current session and scroll the left sidebar to its row",
+      "Press Option+D or Option+Shift+D to toggle the 'd ' prefix on the current session. The sidebar row flashes in place and the sidebar does not scroll",
     testMarkDoneLabel: "Test toggle 'd ' prefix on current session",
     sidebarDeleteKeyArchiveLabel: "Delete key archives clicked sidebar session",
     sidebarDeleteKeyArchiveHint:
@@ -456,7 +456,7 @@ export const zhMessages: PluginMessageCatalog = {
       "一键切换 Paseo 语音转文字模型（如 sensevoice、qwen、telespeech、gemini 或任意自定义模型 ID）或实测转录",
     voiceSlashHint: "[sensevoice | qwen | telespeech | gemini | test | reset | <自定义模型ID>]",
     toggleSessionDone: "Finder：标记或取消当前会话完成 (Option+D / ⌥D)",
-    doneSlashDescription: "为当前会话切换「d 」已完成标记前缀，并自动展开左侧边栏定位",
+    doneSlashDescription: "为当前会话切换「d 」已完成标记前缀，左侧边栏原位闪烁，不滚动",
     doneSlashHint: "[前缀，默认 d ]",
     copyCleanText: "复制纯文本（去除 ** 等 Markdown 符号）(⌘⇧C)",
     copyRawMarkdown: "复制原始 Markdown (⌥⌘C)",
@@ -629,7 +629,7 @@ export const zhMessages: PluginMessageCatalog = {
     testPinWorkspaceBtn: "测试置顶切换 (⌘⌥P)",
     markDoneShortcutLabel: "启用快捷键一键标记会话已完成 (Option+D / ⌥D)",
     markDoneShortcutHint:
-      "按 Option+D 或 Option+Shift+D 自动为当前会话名称切换「d 」前缀，并在左侧边栏高亮闪烁定位该会话",
+      "按 Option+D 或 Option+Shift+D 为当前会话名称切换「d 」前缀，左侧边栏该行原位闪烁，不滚动、不居中",
     testMarkDoneLabel: "测试当前会话切换「d 」标记",
     sidebarDeleteKeyArchiveLabel: "侧边栏会话按 Delete 键归档",
     sidebarDeleteKeyArchiveHint:

@@ -2435,14 +2435,17 @@ function flashAndScrollWorkspaceRow(
   doc: MinimalDocument,
   win: MinimalWindow | null,
   highlightFlash = true,
+  scroll = true,
 ): void {
-  try {
-    row.scrollIntoView?.({ block: "center", behavior: "smooth" });
-  } catch {
+  if (scroll) {
     try {
-      row.scrollIntoView?.(true);
+      row.scrollIntoView?.({ block: "center", behavior: "smooth" });
     } catch {
-      // Ignore if scrollIntoView is unsupported in mock DOM
+      try {
+        row.scrollIntoView?.(true);
+      } catch {
+        // Ignore if scrollIntoView is unsupported in mock DOM
+      }
     }
   }
 
@@ -4070,9 +4073,11 @@ export async function toggleCurrentSessionDone(
     headerTitleEl.textContent = newTitle;
   }
 
-  // Left sidebar jump & flash highlight (the core user requirement!)
-  if (effectiveWsId) {
-    revealWorkspaceInSidebar({ workspaceId: effectiveWsId, highlightFlash: true }, doc, win);
+  // Flash the sidebar row in place. Never scroll, center or expand the sidebar here:
+  // marking done is a quiet in-place action and must not move what the user is looking at.
+  const rowToFlash = effectiveWsId ? findSidebarWorkspaceRow(doc, effectiveWsId) : null;
+  if (rowToFlash) {
+    flashAndScrollWorkspaceRow(rowToFlash, doc, win, true, false);
   }
 
   // Server persistence
@@ -7621,7 +7626,7 @@ export function installDesktopRevealHelpers(
       return;
     }
     // Option+D (Alt+D) or Option+Shift+D: Mark/unmark current session as done ("d " prefix)
-    // and automatically jump/scroll left sidebar to its position with highlight flash
+    // and flash its sidebar row in place (no scroll, no expand)
     if (
       prefs.enableMarkDoneShortcut &&
       isMarkDoneKeyboardEvent(ke) &&
