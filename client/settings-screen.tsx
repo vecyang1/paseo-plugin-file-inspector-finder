@@ -4247,6 +4247,35 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               .map((s) => `${s.title} (${s.charCount}c)`)
               .join(" · ") || (isZh ? "无" : "none")}
           </Text>
+          <Text style={styles.detail}>
+            • {isZh ? "用户提示词分界健康度" : "User Prompt Boundary"}:{" "}
+            {systemPromptSnap?.boundaryOk === false
+              ? isZh
+                ? `[WARN] <user prompt>: 后溢出 ${systemPromptSnap.leakedAfterUserPromptChars ?? 0} 字符系统指令（易导致模型误判为用户主任务）`
+                : `[WARN] ${systemPromptSnap.leakedAfterUserPromptChars ?? 0} system chars placed below <user prompt>: marker`
+              : isZh
+                ? "[OK] 干净（系统指令全部位于 <user prompt>: 之上）"
+                : "[OK] Clean (all system directives precede <user prompt>:)"}
+          </Text>
+          {systemPromptSnap?.boundaryOk === false ? (
+            <View style={styles.row}>
+              <Pressable
+                accessibilityRole="button"
+                testID="system-prompt-normalize-boundary-button"
+                onPress={() => {
+                  void inspectSystemPrompt({ action: "normalize_boundary" }).then((res) => {
+                    setSystemPromptSnap(res);
+                    toast.show(res.message);
+                  });
+                }}
+                style={styles.btn}
+              >
+                <Text style={styles.btnText}>
+                  {isZh ? "收拢分界标记到底部" : "Normalize Boundary"}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
 
           <View style={styles.row}>
             <View style={{ flex: 1, minWidth: 260 }}>

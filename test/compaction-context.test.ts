@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import {
   formatEnhancedCompactionLabel,
+  resolveAntigravityAutoCompactCeilingTokens,
   resolveAntigravityModelContextMaxTokens,
 } from "../shared/compaction-context-contracts";
 import {
@@ -12,11 +13,18 @@ import {
   handleInspectAntigravityContext,
 } from "../server/compaction-context-handlers";
 import {
+  cleanPromptTextPure,
+  inspectPromptBoundary,
+  normalizePromptUserBoundary,
+} from "../server/system-prompt-handlers";
+import {
   type SessionStoreShape,
   type SessionStoreStateShape,
   hydrateAntigravityContextWindowInStore,
   patchMetroCompactionMarkerLabel,
+  recordCompactionPostTokens,
   syncCompactionContextPrefs,
+  upgradeRenderedCompactionLabelsInDom,
 } from "../client/compaction-context-web";
 
 test("formatEnhancedCompactionLabel preserves loading state and enriches manual/auto preTokens in single language", () => {
@@ -308,4 +316,117 @@ test("hydrateAntigravityContextWindowInStore updates Antigravity lastUsage immut
   ]);
   assert.equal(repeat, 0);
   assert.equal(setStateCalls, 1);
+});
+
+test("formatEnhancedCompactionLabel & recordCompactionPostTokens render preTokens -> postTokens across sequential auto-compactions", () => {
+  assert.equal(
+    formatEnhancedCompactionLabel({
+      status: "completed",
+      trigger: "auto",
+      preTokens: 268170,
+      postTokens: 48974,
+      baseLabel: "Context automatically compacted",
+      locale: "en",
+    }),
+    "Context automatically compacted · 268K → 49K tokens",
+  );
+  assert.equal(
+    formatEnhancedCompactionLabel({
+      status: "completed",
+      trigger: "auto",
+      preTokens: 303550,
+      postTokens: 47901,
+      baseLabel: "Context automatically compacted",
+      locale: "zh-CN",
+    }),
+    "已自动压缩上下文 · 304K → 48K 词元",
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("gemini-3.8-flash-high"),
+    262_144,
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("gemini-4-argon-high"),
+    262_144,
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("gemini-4-carbon-high"),
+    1_000_000,
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("claude-opus-5-5-high"),
+    1_000_000,
+  );
+
+  // Exact postTokens refinement from first PLANNER_RESPONSE after CHECKPOINT
+  const multiRows = [
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "record url" },
+    {
+      step_index: 102,
+      source: "SYSTEM",
+      type: "CHECKPOINT",
+      status: "DONE",
+      input_tokens: 3319,
+      cache_read_tokens: 255514,
+      output_tokens: 9337,
+      content: "# Resuming from a compaction\nSummary 1",
+    },
+    {
+      step_index: 103,
+      source: "MODEL",
+      type: "PLANNER_RESPONSE",
+      input_tokens: 24449,
+      cache_read_tokens: 24525,
+      output_tokens: 1272,
+      content: "",
+    },
+  ];
+  const parsed = parseAntigravityTranscriptContext(
+    multiRows.map((r) => JSON.stringify(r)).join("\n"),
+    "gemini-3.8-flash-high",
+  );
+  assert.equal(parsed.autoCompactCeilingTokens, 262_144);
+  assert.equal(parsed.lastCompaction?.preTokens, 268170);
+  assert.equal(parsed.lastCompaction?.postTokens, 48974);
+  assert.equal(parsed.compactions?.length, 1);
+
+  recordCompactionPostTokens([
+    {
+      agentId: "ag_seq",
+      workspaceId: "wks_seq",
+      conversationId: "cid_seq",
+      model: "gemini-3.8-flash-high",
+      ...parsed,
+    },
+  ]);
+
+  const fakeNode = { children: [] as unknown[], textContent: "Context automatically compacted · 268K tokens" };
+  const fakeDoc = {
+    body: {
+      querySelectorAll: () => [fakeNode],
+    },
+  } as unknown as Document;
+  const upgraded = upgradeRenderedCompactionLabelsInDom(fakeDoc, "wks_seq");
+  assert.equal(upgraded, 1);
+  assert.equal(fakeNode.textContent, "Context automatically compacted · 268K → 49K tokens");
+});
+
+test("inspectPromptBoundary & normalizePromptUserBoundary detect and repair system rules stranded below <user prompt>:", () => {
+  const polluted =
+    "<system starter prompt in paseo>\nReply in Chinese.\n-----------------\n\n<user prompt>:\n\n<cadance>\nscan patterns or skip.\n</cadance>\n\nIf u need make change to Paseo app, make sure it would survive auto updates and see if need contribute back to community auto.";
+  const checkBefore = inspectPromptBoundary(polluted);
+  assert.equal(checkBefore.boundaryOk, false);
+  assert.ok(checkBefore.leakedAfterUserPromptChars > 40);
+
+  const normalized = normalizePromptUserBoundary(polluted);
+  const checkAfter = inspectPromptBoundary(normalized);
+  assert.equal(checkAfter.boundaryOk, true);
+  assert.equal(checkAfter.leakedAfterUserPromptChars, 0);
+  assert.ok(normalized.endsWith("\n-----------------\n\n<user prompt>:"));
+
+  // Legacy transcript bubble sanitization removes leaked <cadance> block cleanly
+  const cleanedBubble = cleanPromptTextPure(
+    `${polluted}\n\nrecord dear's freelancer url; /beeper-ops if need;`,
+  );
+  assert.equal(cleanedBubble, "record dear's freelancer url; /beeper-ops if need;");
 });

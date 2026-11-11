@@ -175,10 +175,15 @@ async function run(page: Page, shots: string[]): Promise<void> {
     for (const m of (modMap as Map<number, any>).values()) {
       const fn = m?.isInitialized ? m.publicModule?.exports?.getCompactionMarkerLabel : null;
       if (typeof fn === "function") {
+        const renderedMarkers = Array.from(document.body.querySelectorAll("div, span"))
+          .filter((el) => el.children.length === 0 && /Context (?:automatically|manually) compacted/.test(el.textContent || ""))
+          .map((el) => (el.textContent || "").trim());
         return {
           loading: fn({ status: "loading", trigger: "manual", preTokens: 169465 }),
           manualCompleted: fn({ status: "completed", trigger: "manual", preTokens: 169465 }),
           autoCompleted: fn({ status: "completed", trigger: "auto", preTokens: 262910 }),
+          autoRangeCompleted: fn({ status: "completed", trigger: "auto", preTokens: 268170, postTokens: 48974 }),
+          renderedMarkers: renderedMarkers.slice(0, 8),
         };
       }
     }
@@ -186,12 +191,13 @@ async function run(page: Page, shots: string[]): Promise<void> {
   });
 
   check(
-    "live bundle getCompactionMarkerLabel formats 'Compacting...' and completed '169K' / '263K' labels",
+    "live bundle getCompactionMarkerLabel formats 'Compacting...', '169K', and '268K -> 49K' post-compaction ranges",
     Boolean(
       liveLabelProbe &&
         /compact/i.test(liveLabelProbe.loading) &&
         liveLabelProbe.manualCompleted.includes("169K") &&
-        liveLabelProbe.autoCompleted.includes("263K"),
+        liveLabelProbe.autoCompleted.includes("263K") &&
+        liveLabelProbe.autoRangeCompleted.includes("268K → 49K"),
     ),
     JSON.stringify(liveLabelProbe),
   );

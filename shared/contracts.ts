@@ -1379,7 +1379,7 @@ export type SystemPromptSection = z.infer<typeof SystemPromptSectionSchema>;
 export const inspectSystemPromptRpc = defineRpc({
   name: "finder.inspect_system_prompt",
   input: z.object({
-    action: z.enum(["inspect", "test_clean"]).default("inspect"),
+    action: z.enum(["inspect", "test_clean", "normalize_boundary"]).default("inspect"),
     testInput: z.string().optional(),
     workspaceId: z.string().optional(),
     agentId: z.string().optional(),
@@ -1394,6 +1394,8 @@ export const inspectSystemPromptRpc = defineRpc({
     charCount: z.number(),
     lineCount: z.number(),
     estimatedTokens: z.number(),
+    boundaryOk: z.boolean().optional(),
+    leakedAfterUserPromptChars: z.number().optional(),
     sections: z.array(SystemPromptSectionSchema),
     cleanedPreview: z.string().optional(),
     testResult: z

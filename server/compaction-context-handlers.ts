@@ -6,6 +6,7 @@ import {
   type AntigravityContextSnapshot,
   type CompactionSummaryItem,
   type inspectAntigravityContextRpc,
+  resolveAntigravityAutoCompactCeilingTokens,
   resolveAntigravityModelContextMaxTokens,
 } from "../shared/compaction-context-contracts";
 
@@ -104,6 +105,8 @@ function cleanUserPromptBody(raw: string): string {
   text = text
     .replace(/^\s*<system starter prompt in paseo>[\s\S]*?(?:-----------------[\s\S]*?<user prompt>:\s*|-----------------)/i, "")
     .replace(/<!--\s*paseo-peers:start[\s\S]*?(?:<!--\s*paseo-peers:end\s*-->|$)/gi, "")
+    .replace(/^\s*<cadance>[\s\S]*?(?:<\/cadance>|(?=If u need make change to Paseo app)|(?=\r?\n\r?\n(?!\s*\/scheduled-task-rescheduler|\s*scan patterns|\s*reply concisly|\s*e2e test)))/gi, "")
+    .replace(/^\s*If u need make change to Paseo app,\s*make sure it would survive auto updates and see if need contribute back to community auto\.?\s*/i, "")
     .replace(/^\s*<user prompt>:\s*/i, "");
   return text.trim();
 }
@@ -113,6 +116,7 @@ export function parseAntigravityTranscriptContext(
   modelId?: string | null,
 ): Omit<AntigravityContextSnapshot, "agentId" | "workspaceId" | "conversationId" | "model"> {
   const contextWindowMaxTokens = resolveAntigravityModelContextMaxTokens(modelId);
+  const autoCompactCeilingTokens = resolveAntigravityAutoCompactCeilingTokens(modelId);
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedInputTokens = 0;
@@ -121,6 +125,8 @@ export function parseAntigravityTranscriptContext(
   let compactionCount = 0;
   let lastUserBody = "";
   let lastCompaction: CompactionSummaryItem | null = null;
+  const compactions: CompactionSummaryItem[] = [];
+  let awaitingPostStepCompaction: CompactionSummaryItem | null = null;
 
   for (const line of rawTranscript.split("\n")) {
     if (!line) continue;
@@ -180,6 +186,13 @@ export function parseAntigravityTranscriptContext(
         cachedInputTokens += cacheTok;
         outputTokens += outTok;
         contextWindowUsedTokens = sum;
+        if (awaitingPostStepCompaction) {
+          const measuredPost = inTok + cacheTok;
+          if (measuredPost > 0 && measuredPost < awaitingPostStepCompaction.preTokens) {
+            awaitingPostStepCompaction.postTokens = measuredPost;
+          }
+          awaitingPostStepCompaction = null;
+        }
       }
       continue;
     }
@@ -210,7 +223,7 @@ export function parseAntigravityTranscriptContext(
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 220);
-        lastCompaction = {
+        const item: CompactionSummaryItem = {
           stepIndex: stepIdx >= 0 ? stepIdx : stepCount,
           trigger: isManual ? "manual" : "auto",
           preTokens,
@@ -218,12 +231,16 @@ export function parseAntigravityTranscriptContext(
           createdAt: typeof row.created_at === "string" ? row.created_at : null,
           summaryPreview: cleanedSummary,
         };
+        compactions.push(item);
+        lastCompaction = item;
+        awaitingPostStepCompaction = item;
       }
     }
   }
 
   return {
     contextWindowMaxTokens,
+    autoCompactCeilingTokens,
     contextWindowUsedTokens,
     inputTokens,
     outputTokens,
@@ -231,6 +248,7 @@ export function parseAntigravityTranscriptContext(
     stepCount,
     compactionCount,
     lastCompaction,
+    compactions: compactions.slice(-25),
   };
 }
 
@@ -303,6 +321,7 @@ export async function handleInspectAntigravityContext(
         conversationId: null,
         model,
         contextWindowMaxTokens: resolveAntigravityModelContextMaxTokens(model),
+        autoCompactCeilingTokens: resolveAntigravityAutoCompactCeilingTokens(model),
         contextWindowUsedTokens: 0,
         inputTokens: 0,
         outputTokens: 0,
@@ -330,6 +349,7 @@ export async function handleInspectAntigravityContext(
       model,
       ...parsed,
       lastCompaction: input.includeCompactionHistory === false ? null : parsed.lastCompaction,
+      compactions: input.includeCompactionHistory === false ? undefined : parsed.compactions,
     });
   }
 

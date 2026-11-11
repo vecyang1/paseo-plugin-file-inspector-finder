@@ -20,16 +20,19 @@ import { type MetroWindow, getMetroModuleMap, requireMetroExport } from "./metro
 export interface CompactionContextPrefs {
   enrichCompactionTokens: boolean;
   hydrateContextWindowMeter: boolean;
+  useEffectiveAutoCompactCeiling: boolean;
 }
 
 export const DEFAULT_COMPACTION_CONTEXT_PREFS: CompactionContextPrefs = {
   enrichCompactionTokens: true,
   hydrateContextWindowMeter: true,
+  useEffectiveAutoCompactCeiling: true,
 };
 
 export interface CompactionContextStatus {
   labelHook: { installed: boolean; moduleId: number | null };
   hydratedAgentsCount: number;
+  knownCompactionPairsCount: number;
   lastHydratedAt: string | null;
   prefs: CompactionContextPrefs;
 }
@@ -76,6 +79,95 @@ function storage(): Storage | null {
   }
 }
 
+const postTokensByPreTokens = new Map<number, number>();
+const postTokensByWorkspace = new Map<string, Array<{ preK: number; postK: number }>>();
+
+export function recordCompactionPostTokens(snapshots: readonly AntigravityContextSnapshot[]): number {
+  let added = 0;
+  for (const snap of snapshots) {
+    const list =
+      snap.compactions && snap.compactions.length > 0
+        ? snap.compactions
+        : snap.lastCompaction
+          ? [snap.lastCompaction]
+          : [];
+    if (list.length === 0) continue;
+    const wsPairs: Array<{ preK: number; postK: number }> = [];
+    for (const item of list) {
+      if (
+        typeof item.preTokens === "number" &&
+        typeof item.postTokens === "number" &&
+        item.preTokens > 0 &&
+        item.postTokens > 0 &&
+        item.postTokens < item.preTokens
+      ) {
+        if (postTokensByPreTokens.get(item.preTokens) !== item.postTokens) {
+          postTokensByPreTokens.set(item.preTokens, item.postTokens);
+          added += 1;
+        }
+        const preK = Math.max(1, Math.round(item.preTokens / 1000));
+        const postK = Math.max(1, Math.round(item.postTokens / 1000));
+        if (postK < preK) wsPairs.push({ preK, postK });
+      }
+    }
+    if (snap.workspaceId && wsPairs.length > 0) {
+      postTokensByWorkspace.set(snap.workspaceId, wsPairs);
+    }
+  }
+  return added;
+}
+
+export function upgradeRenderedCompactionLabelsInDom(
+  rootDoc?: Document | null,
+  activeWorkspaceId?: string | null,
+): number {
+  if (!runtimeState.prefs.enrichCompactionTokens) return 0;
+  const doc = rootDoc ?? (typeof document !== "undefined" ? document : null);
+  if (!doc?.body) return 0;
+  const wsPairs = activeWorkspaceId ? (postTokensByWorkspace.get(activeWorkspaceId) ?? []) : [];
+  if (wsPairs.length === 0 && postTokensByPreTokens.size === 0) return 0;
+
+  const roundedFallback = new Map<number, number>();
+  for (const [pre, post] of postTokensByPreTokens.entries()) {
+    const preK = Math.max(1, Math.round(pre / 1000));
+    const postK = Math.max(1, Math.round(post / 1000));
+    if (postK < preK && !roundedFallback.has(preK)) roundedFallback.set(preK, postK);
+  }
+
+  const labelRe =
+    /^(Context (?:automatically|manually) compacted|Context compacted|已(?:自动|手动)压缩上下文|上下文已压缩) · (\d+)K (tokens|词元)$/;
+  let upgraded = 0;
+  let wsCursor = 0;
+  const nodes = doc.body.querySelectorAll("div, span");
+  for (let i = 0; i < nodes.length; i += 1) {
+    const el = nodes[i];
+    if (!el || el.children.length > 0) continue;
+    const txt = el.textContent?.trim() ?? "";
+    if (!txt || txt.includes("→")) continue;
+    const m = labelRe.exec(txt);
+    if (!m) continue;
+    const prefix = m[1];
+    const preK = Number(m[2]);
+    const unit = m[3];
+    let matchedPostK: number | undefined;
+    for (let j = wsCursor; j < wsPairs.length; j += 1) {
+      if (wsPairs[j]?.preK === preK) {
+        matchedPostK = wsPairs[j]?.postK;
+        wsCursor = j + 1;
+        break;
+      }
+    }
+    if (matchedPostK === undefined) {
+      matchedPostK = roundedFallback.get(preK);
+    }
+    if (typeof matchedPostK === "number" && matchedPostK > 0 && matchedPostK < preK) {
+      el.textContent = `${prefix} · ${preK}K → ${matchedPostK}K ${unit}`;
+      upgraded += 1;
+    }
+  }
+  return upgraded;
+}
+
 export function loadCompactionContextPrefs(): CompactionContextPrefs {
   const raw = storage()?.getItem(PREFS_KEY);
   if (!raw) return { ...DEFAULT_COMPACTION_CONTEXT_PREFS };
@@ -84,6 +176,7 @@ export function loadCompactionContextPrefs(): CompactionContextPrefs {
     return {
       enrichCompactionTokens: parsed.enrichCompactionTokens !== false,
       hydrateContextWindowMeter: parsed.hydrateContextWindowMeter !== false,
+      useEffectiveAutoCompactCeiling: parsed.useEffectiveAutoCompactCeiling !== false,
     };
   } catch {
     return { ...DEFAULT_COMPACTION_CONTEXT_PREFS };
@@ -102,6 +195,7 @@ export function getCompactionContextStatus(): CompactionContextStatus {
   return {
     labelHook: { ...runtimeState.labelHook },
     hydratedAgentsCount: runtimeState.hydratedAgentsCount,
+    knownCompactionPairsCount: postTokensByPreTokens.size,
     lastHydratedAt: runtimeState.lastHydratedAt,
     prefs: { ...runtimeState.prefs },
   };
@@ -122,6 +216,7 @@ export function patchMetroCompactionMarkerLabel(
       status: "loading" | "completed";
       trigger?: "auto" | "manual";
       preTokens?: number;
+      postTokens?: number;
     }) => string;
 
     Object.defineProperty(exp, "__paseoFinderCompactionLabelPatched", {
@@ -133,13 +228,21 @@ export function patchMetroCompactionMarkerLabel(
       status: "loading" | "completed";
       trigger?: "auto" | "manual";
       preTokens?: number;
+      postTokens?: number;
     }): string {
       const baseLabel = origFn(input);
       if (!runtimeState.prefs.enrichCompactionTokens) return baseLabel;
+      const postTokens =
+        typeof input.postTokens === "number"
+          ? input.postTokens
+          : typeof input.preTokens === "number"
+            ? postTokensByPreTokens.get(input.preTokens)
+            : undefined;
       return formatEnhancedCompactionLabel({
         status: input.status,
         trigger: input.trigger,
         preTokens: input.preTokens,
+        postTokens,
         baseLabel,
         locale: runtimeState.getLocale(),
       });
@@ -184,6 +287,7 @@ export function hydrateAntigravityContextWindowInStore(
   store: SessionStoreShape | null,
   snapshots: readonly AntigravityContextSnapshot[],
 ): number {
+  recordCompactionPostTokens(snapshots);
   if (!store || typeof store.setState !== "function" || snapshots.length === 0) return 0;
   const byAgentId = new Map<string, AntigravityContextSnapshot>();
   for (const snap of snapshots) {
@@ -208,7 +312,12 @@ export function hydrateAntigravityContextWindowInStore(
         const snap = byAgentId.get(agentId);
         if (!snap || agent.provider !== "antigravity") continue;
         const prevUsage = (agent.lastUsage ?? {}) as Record<string, unknown>;
-        const nextMax = snap.contextWindowMaxTokens;
+        const nextMax =
+          runtimeState.prefs.useEffectiveAutoCompactCeiling &&
+          typeof snap.autoCompactCeilingTokens === "number" &&
+          snap.autoCompactCeilingTokens > 0
+            ? snap.autoCompactCeilingTokens
+            : snap.contextWindowMaxTokens;
         const nextUsed =
           snap.contextWindowUsedTokens > 0
             ? snap.contextWindowUsedTokens
@@ -376,10 +485,14 @@ export function installCompactionAndContextEnhancer(options: {
     try {
       const res = await options.call(inspectAntigravityContextRpc, {
         agentIds,
-        includeCompactionHistory: false,
+        includeCompactionHistory: Boolean(activeWsId) || Boolean(forceAgentIds && forceAgentIds.length > 0),
       });
       if (!res?.ok || !Array.isArray(res.items)) return 0;
       const count = hydrateAntigravityContextWindowInStore(store, res.items);
+      upgradeRenderedCompactionLabelsInDom(
+        typeof document !== "undefined" ? document : null,
+        activeWsId,
+      );
       if (hasMore) schedulePass(140);
       return count;
     } catch {

@@ -18,6 +18,7 @@ export const AntigravityContextSnapshotSchema = z.object({
   conversationId: z.string().nullable(),
   model: z.string().nullable(),
   contextWindowMaxTokens: z.number(),
+  autoCompactCeilingTokens: z.number().optional(),
   contextWindowUsedTokens: z.number(),
   inputTokens: z.number(),
   outputTokens: z.number(),
@@ -25,6 +26,7 @@ export const AntigravityContextSnapshotSchema = z.object({
   stepCount: z.number(),
   compactionCount: z.number(),
   lastCompaction: CompactionSummaryItemSchema.nullable(),
+  compactions: z.array(CompactionSummaryItemSchema).optional(),
 });
 
 export type AntigravityContextSnapshot = z.infer<typeof AntigravityContextSnapshotSchema>;
@@ -51,10 +53,33 @@ export function resolveAntigravityModelContextMaxTokens(modelId?: string | null)
   return 1_000_000;
 }
 
+/**
+ * Returns the effective context ceiling at which `agy_cli` triggers automatic `CHECKPOINT`
+ * compaction (`cascade_config.checkpoint_config.max_token_limit`).
+ *
+ * - Built-in `agy_cli` Gemini models (`gemini-3.8-flash*`, `gemini-4-argon*`, `gemini-2.5*`)
+ *   enforce a `262,144` (`256K`) auto-compaction ceiling even though the raw API window is 1M.
+ * - Custom `gemini-api:*` routed models (`gemini-4-carbon*`, `claude-*-5-*`) use 1,000,000.
+ */
+export function resolveAntigravityAutoCompactCeilingTokens(modelId?: string | null): number {
+  const id = String(modelId ?? "").trim().toLowerCase();
+  if (id.startsWith("gpt-oss")) return 128_000;
+  if (/claude-(?:opus|sonnet|haiku)-4/.test(id) && !id.includes("1m")) return 200_000;
+  if (
+    id.startsWith("gemini-api:") ||
+    id.startsWith("gemini-4-carbon") ||
+    id.startsWith("claude-")
+  ) {
+    return 1_000_000;
+  }
+  return 262_144;
+}
+
 export function formatEnhancedCompactionLabel(input: {
   status: "loading" | "completed";
   trigger?: "auto" | "manual";
   preTokens?: number;
+  postTokens?: number;
   baseLabel: string;
   locale?: string;
 }): string {
@@ -67,11 +92,17 @@ export function formatEnhancedCompactionLabel(input: {
   if (input.baseLabel.includes(`${tokensK}K`)) {
     return input.baseLabel;
   }
+  const rawPost = input.postTokens;
+  const postK =
+    typeof rawPost === "number" && Number.isFinite(rawPost) && rawPost > 0 && rawPost < preTokens
+      ? Math.max(1, Math.round(rawPost / 1000))
+      : null;
+  const rangeLabel = postK !== null && postK < tokensK ? `${tokensK}K → ${postK}K` : `${tokensK}K`;
   const isZh = /^zh\b/i.test(String(input.locale ?? "").trim());
   if (isZh) {
-    if (input.trigger === "manual") return `已手动压缩上下文 · ${tokensK}K 词元`;
-    if (input.trigger === "auto") return `已自动压缩上下文 · ${tokensK}K 词元`;
-    return `上下文已压缩 · ${tokensK}K 词元`;
+    if (input.trigger === "manual") return `已手动压缩上下文 · ${rangeLabel} 词元`;
+    if (input.trigger === "auto") return `已自动压缩上下文 · ${rangeLabel} 词元`;
+    return `上下文已压缩 · ${rangeLabel} 词元`;
   }
-  return `${input.baseLabel} · ${tokensK}K tokens`;
+  return `${input.baseLabel} · ${rangeLabel} tokens`;
 }
