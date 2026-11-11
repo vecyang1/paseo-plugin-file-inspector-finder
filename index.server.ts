@@ -82,11 +82,14 @@ import {
   handleListSiblingDocuments,
   handlePreviewDocument,
 } from "./server/doc-preview-handlers";
+import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
+import { handleInspectAntigravityContext } from "./server/compaction-context-handlers";
 
 export default function contribute(server: PluginServerContext) {
   const settingsHandle = server.registerSettings(pluginSettings);
 
   server.handle(inspectFileRpc, handleInspectFile);
+  server.handle(inspectAntigravityContextRpc, (input) => handleInspectAntigravityContext(input));
   server.handle(previewDocumentRpc, handlePreviewDocument);
   server.handle(listSiblingDocumentsRpc, handleListSiblingDocuments);
   server.handle(diagnoseDocPreviewRpc, handleDiagnoseDocPreview);
@@ -871,6 +874,25 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const finderInspectContextTool = defineAgentTool({
+    name: "finder_inspect_context",
+    title: "Inspect Context Window & Compaction State",
+    description:
+      "Read live context window token usage (usedTokens / maxTokens), checkpoint count, and pre->post /compact compaction telemetry for the current workspace or specified Antigravity agents.",
+    input: z.object({
+      agentIds: z.array(z.string()).max(40).optional(),
+      workspaceId: z.string().optional(),
+    }),
+    async execute(input, { agent }) {
+      const res = await handleInspectAntigravityContext({
+        agentIds: input.agentIds,
+        workspaceId: input.workspaceId ?? (input.agentIds?.length ? undefined : (agent.workspaceId ?? undefined)),
+        includeCompactionHistory: true,
+      });
+      return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -901,6 +923,7 @@ export default function contribute(server: PluginServerContext) {
         commitOriginTool,
         inspectSystemPromptTool,
         docPreviewTool,
+        finderInspectContextTool,
       ],
     };
   });

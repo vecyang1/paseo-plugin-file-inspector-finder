@@ -96,6 +96,8 @@ import {
   openWorkspaceFileTabsInSidePane,
   syncDocumentPanelAssociations,
 } from "./client/doc-preview-web";
+import { installCompactionAndContextEnhancer } from "./client/compaction-context-web";
+import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
 
 export default function contribute(client: PluginClientContext) {
   // 1. Pre-associate image & document extensions with our file panels & materialize default inline rename prefs
@@ -1797,6 +1799,48 @@ export default function contribute(client: PluginClientContext) {
     getLocale: () => client.i18n.locale,
   });
 
+  const cleanupCompactionAndContextEnhancer = installCompactionAndContextEnhancer({
+    call: (def, input) => client.rpc(def, input),
+    getLocale: () => client.i18n.locale,
+  });
+
+  client.addCommandCenterItem({
+    id: "refresh-context-window-meter",
+    title: "Finder: Refresh Context Window Meter",
+    icon: "Gauge",
+    keywords: ["context", "compact", "tokens", "meter", "window", "usage"],
+    context: "workspace",
+    async onSelect({ workspace, rpc }) {
+      const res = await rpc(inspectAntigravityContextRpc, {
+        workspaceId: workspace.id,
+        includeCompactionHistory: true,
+      });
+      const ctl = (globalThis as { __paseoFinderCompactionContext?: { refreshNow?: (ids?: string[]) => Promise<number> } })
+        .__paseoFinderCompactionContext;
+      if (ctl?.refreshNow && res.items.length > 0) {
+        await ctl.refreshNow(res.items.map((i) => i.agentId));
+      }
+    },
+  });
+
+  client.addSlashCommand({
+    name: "context-window",
+    description: "Refresh live ContextWindowMeter and inspect /compact compaction telemetry",
+    argumentHint: "",
+    context: "workspace",
+    async onSubmit({ workspace, rpc }) {
+      const res = await rpc(inspectAntigravityContextRpc, {
+        workspaceId: workspace.id,
+        includeCompactionHistory: true,
+      });
+      const ctl = (globalThis as { __paseoFinderCompactionContext?: { refreshNow?: (ids?: string[]) => Promise<number> } })
+        .__paseoFinderCompactionContext;
+      if (ctl?.refreshNow && res.items.length > 0) {
+        await ctl.refreshNow(res.items.map((i) => i.agentId));
+      }
+    },
+  });
+
   client.addCommandCenterItem({
     id: "preview-latest-document",
     title: "Finder: Preview Latest Workspace Document",
@@ -1865,6 +1909,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();
     cleanupDocPreviewEnhancer();
+    cleanupCompactionAndContextEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
     for (const btn of forkButtons.values()) btn.remove();

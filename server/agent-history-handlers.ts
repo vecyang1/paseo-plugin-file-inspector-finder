@@ -110,46 +110,55 @@ async function inspectSessionPatchFiles(): Promise<{
   configSummary: string;
   details: string;
 }> {
-  const checkFile = async (fpath: string): Promise<boolean> => {
+  const checkFile = async (
+    fpath: string,
+  ): Promise<{ patched: boolean; compactExitGuard: boolean }> => {
     try {
       const content = await fs.readFile(fpath, "utf8");
-      return (
+      const patched =
         content.includes("vec-patch:session") &&
         content.includes("vecReplayHistory") &&
         content.includes("vecPrepareConversation") &&
         content.includes("vecReadTranscript") &&
         content.includes("vecGlobalSlashSkills") &&
-        content.includes("vecFinalizeDriverPrompt")
-      );
+        content.includes("vecFinalizeDriverPrompt");
+      const compactExitGuard =
+        content.includes("vecParseAgyError") && content.includes("vecConsumeSettledDriver");
+      return { patched, compactExitGuard };
     } catch {
-      return false;
+      return { patched: false, compactExitGuard: false };
     }
   };
-  const [appPatched, cliPatched] = await Promise.all([
+  const [appRes, cliRes] = await Promise.all([
     checkFile(APP_SESSION_TS),
     checkFile(CLI_SESSION_TS),
   ]);
+  const appPatched = appRes.patched;
+  const cliPatched = cliRes.patched;
   const cfgPath = path.join(os.homedir(), ".config", "vec", "paseo-patches.json");
-  let configSummary = "history_replay=on · settle_answered_errors=on · slash=on (inline+global skills)";
+  let configSummary =
+    "history_replay=on · settle_answered_errors=once · slash=on (inline+global+compact-guard)";
   try {
     const rawCfg = JSON.parse(await fs.readFile(cfgPath, "utf8")) as Record<string, unknown>;
     configSummary = `history_replay=${String(rawCfg.history_replay ?? "on")} · settle=${String(
       rawCfg.settle_answered_errors ?? "on",
-    )} · slash=${String(rawCfg.slash_commands ?? "on")} (global+inline skills) · max=${String(
+    )} · slash=${String(rawCfg.slash_commands ?? "on")} (global+inline+compact-guard) · max=${String(
       rawCfg.max_replay_messages ?? 400,
     )}`;
   } catch {
     // Use default summary
   }
   const ok = appPatched && cliPatched;
+  const fmtCopy = (res: { patched: boolean; compactExitGuard: boolean }) =>
+    res.patched
+      ? `PATCHED (v2+vault+slash-skills${res.compactExitGuard ? "+compact-exit-guard" : ""})`
+      : "UNPATCHED";
   return {
     ok,
     appPatched,
     cliPatched,
     configSummary,
-    details: `App=${appPatched ? "PATCHED (v1+vault+slash-skills)" : "UNPATCHED"} · CLI=${
-      cliPatched ? "PATCHED (v1+vault+slash-skills)" : "UNPATCHED"
-    }`,
+    details: `App=${fmtCopy(appRes)} · CLI=${fmtCopy(cliRes)}`,
   };
 }
 
