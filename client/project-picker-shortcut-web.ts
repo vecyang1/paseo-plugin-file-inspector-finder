@@ -890,6 +890,8 @@ export function installProjectPickerShortcut(
     const active = dom.activeElement ?? null;
     const activeIsNeutralOrTrigger =
       !active ||
+      active.isConnected === false ||
+      !isVisible(active) ||
       active === dom.body ||
       active === (dom as unknown as { documentElement?: ElementLike | null }).documentElement ||
       active === triggerRef ||

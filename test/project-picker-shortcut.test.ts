@@ -877,3 +877,82 @@ test("cross-evaluation handoff keeps openProjectPickerFromShortcut working and s
 
   cleanupNew();
 });
+
+test("project picker shortcut: restores composer focus even when closed sheet leaves detached or hidden active element", () => {
+  memory.clear();
+  syncProjectPickerShortcutPrefs({ enabled: true, preset: "alt_p" });
+
+  const { doc, body, panes, triggerA, textareaA, searchInput, comboboxDialog } = buildFakePaseoWorkspace({
+    pickerOpen: false,
+  });
+
+  textareaA.focus = () => {
+    textareaA.focusCalls += 1;
+    doc.activeElement = textareaA;
+  };
+
+  triggerA.onClick = () => {
+    body.children = [panes, comboboxDialog];
+    comboboxDialog.parentElement = body;
+    comboboxDialog.isConnected = true;
+    doc.activeElement = searchInput;
+  };
+
+  const listeners = new Map<string, (ev: unknown) => void>();
+  const fakeWin = {
+    navigator: { platform: "MacIntel", userAgent: "Macintosh" },
+    localStorage: ((globalThis as Record<string, unknown>).window as Window).localStorage,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`win:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`win:${t}`),
+    setTimeout: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    clearTimeout: () => {},
+    requestAnimationFrame: (fn: () => void) => {
+      fn();
+      return 1;
+    },
+    cancelAnimationFrame: () => {},
+  };
+
+  const docWithWin = {
+    ...doc,
+    get activeElement() {
+      return doc.activeElement;
+    },
+    set activeElement(v) {
+      doc.activeElement = v;
+    },
+    defaultView: fakeWin,
+    addEventListener: (t: string, fn: (ev: unknown) => void) => void listeners.set(`doc:${t}`, fn),
+    removeEventListener: (t: string) => void listeners.delete(`doc:${t}`),
+  };
+
+  const cleanup = installProjectPickerShortcut(docWithWin as never);
+  doc.activeElement = textareaA;
+  const focusBefore = textareaA.focusCalls;
+
+  listeners.get("win:keydown")?.({
+    code: "KeyP",
+    key: "π",
+    altKey: true,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    target: textareaA,
+  });
+  assert.equal(doc.activeElement, searchInput);
+
+  // Simulate animated compact BottomSheet hiding / detaching searchInput without synchronously blurring to body
+  body.children = [panes];
+  comboboxDialog.parentElement = null;
+  comboboxDialog.isConnected = false;
+  searchInput.isConnected = false;
+  doc.activeElement = searchInput;
+
+  cleanup.reconcileNow?.();
+
+  assert.equal(doc.activeElement, textareaA, "focus must return to composer when closing sheet leaves detached active element");
+  assert.ok(textareaA.focusCalls > focusBefore);
+  cleanup();
+});

@@ -754,7 +754,7 @@ export const zhMessages: PluginMessageCatalog = {
     sectionProjectPickerShortcut: "选择项目快捷键",
     projectPickerShortcutLabel: "输入时打开「选择项目」快捷键",
     projectPickerShortcutHint:
-      "在新建工作区输入框打字时直接唤起「Choose the project」项目选择器，选完或取消后自动把焦点还给输入框。",
+      "在新建工作区输入框打字时直接唤起「选择项目」选择器，选完或取消后自动把焦点还给输入框。",
     projectPickerPresetLabel: "快捷键组合",
     projectPickerPresetHint: "选择无冲突预设，或自定义任意组合键。",
     optProjectShortcutAltP: "Option+P · 推荐",

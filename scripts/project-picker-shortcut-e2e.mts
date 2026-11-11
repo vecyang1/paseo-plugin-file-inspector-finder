@@ -149,7 +149,8 @@ async function main() {
     await page.goto(`http://127.0.0.1:${PORT}/new`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector(TRIGGER, { timeout: 20_000 });
     await page.waitForSelector(COMPOSER, { timeout: 20_000 });
-    await sleep(450);
+    await page.waitForSelector(`${TRIGGER}[aria-keyshortcuts]`, { timeout: 20_000 });
+    await sleep(200);
 
     // 1. Initial trigger state
     const triggerInfo = await page.evaluate((sel: string) => {
@@ -261,6 +262,62 @@ async function main() {
         : afterPick.comboboxClosed,
       `picked="${pickedLabel}" -> trigger="${afterPick.newProject}" focused=${afterPick.composerIsActive}`,
     );
+
+    // 4b. Keyboard-Only Selection: type query -> ArrowDown -> Enter -> verify update & focus restored
+    const projectBeforeKeyboard = (await page.locator(TRIGGER).innerText()).trim();
+    const composerPromptKeyboard = "Draft prompt keep keyboard flow";
+    await composer.focus();
+    await composer.fill(composerPromptKeyboard);
+    await sleep(100);
+
+    await page.keyboard.press("Alt+p");
+    await page.waitForSelector(COMBOBOX, { timeout: 6_000 });
+    await sleep(250);
+
+    const availableOptions = await page.locator(OPTION_SELECTOR).allInnerTexts();
+    let keyboardTargetName = "";
+    for (const optText of availableOptions) {
+      const lines = optText.split(/\r?\n/).map((s: string) => s.trim()).filter(Boolean);
+      const name = lines.length >= 2 ? lines[1]! : lines[0] ?? "";
+      if (name && projectBeforeKeyboard !== name && !projectBeforeKeyboard.endsWith(name)) {
+        keyboardTargetName = name;
+        break;
+      }
+    }
+
+    if (keyboardTargetName) {
+      await page.keyboard.type(keyboardTargetName);
+      await sleep(250);
+      await page.keyboard.press("ArrowDown");
+      await sleep(100);
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(COMBOBOX, { state: "detached", timeout: 6_000 });
+      await sleep(300);
+
+      const afterKeyboardPick = await page.evaluate(
+        ({ triggerSel, comboboxSel, composerSel }: { triggerSel: string; comboboxSel: string; composerSel: string }) => {
+          const trigger = document.querySelector(triggerSel);
+          const combobox = document.querySelector(comboboxSel);
+          const comp = document.querySelector(composerSel) as HTMLTextAreaElement | null;
+          return {
+            comboboxClosed: !combobox,
+            newProject: (trigger?.textContent ?? "").trim(),
+            composerValue: comp?.value ?? "",
+            composerIsActive: document.activeElement === comp,
+          };
+        },
+        { triggerSel: TRIGGER, comboboxSel: COMBOBOX, composerSel: COMPOSER },
+      );
+
+      check(
+        "7b. Keyboard-only selection (type query -> ArrowDown -> Enter) updates project & restores composer focus",
+        afterKeyboardPick.comboboxClosed &&
+          afterKeyboardPick.newProject !== projectBeforeKeyboard &&
+          afterKeyboardPick.composerValue === composerPromptKeyboard &&
+          afterKeyboardPick.composerIsActive,
+        `target="${keyboardTargetName}" -> trigger="${afterKeyboardPick.newProject}" focused=${afterKeyboardPick.composerIsActive}`,
+      );
+    }
 
     // 5. Press Alt+P then Escape to close combobox and verify focus returns to composer
     await page.keyboard.press("Alt+p");
@@ -404,7 +461,8 @@ async function main() {
           await page.goto(`http://127.0.0.1:${PORT}/new`, { waitUntil: "domcontentloaded" });
           await page.waitForSelector(TRIGGER, { timeout: 20_000 });
           await page.waitForSelector(COMPOSER, { timeout: 20_000 });
-          await sleep(400);
+          await page.waitForSelector(`${TRIGGER}[aria-keyshortcuts="Control+Shift+Y"]`, { timeout: 20_000 });
+          await sleep(150);
 
           const customAria = await page.evaluate((sel: string) => document.querySelector(sel)?.getAttribute("aria-keyshortcuts"), TRIGGER);
           await page.locator(COMPOSER).first().focus();
@@ -444,7 +502,8 @@ async function main() {
           await page.goto(`http://127.0.0.1:${PORT}/new`, { waitUntil: "domcontentloaded" });
           await page.waitForSelector(TRIGGER, { timeout: 20_000 });
           await page.waitForSelector(COMPOSER, { timeout: 20_000 });
-          await sleep(400);
+          await page.waitForSelector(`${TRIGGER}[aria-keyshortcuts*="P"]`, { timeout: 20_000 });
+          await sleep(150);
 
           const cmdPAria = await page.evaluate((sel: string) => document.querySelector(sel)?.getAttribute("aria-keyshortcuts"), TRIGGER);
           await page.locator(COMPOSER).first().focus();
@@ -480,7 +539,8 @@ async function main() {
             await compactPage.goto(`http://127.0.0.1:${PORT}/new`, { waitUntil: "domcontentloaded" });
             await compactPage.waitForSelector(TRIGGER, { timeout: 20_000 });
             await compactPage.waitForSelector(COMPOSER, { timeout: 20_000 });
-            await sleep(300);
+            await compactPage.waitForSelector(`${TRIGGER}[aria-keyshortcuts]`, { timeout: 20_000 });
+            await sleep(200);
 
             await compactPage.locator(COMPOSER).first().focus();
             await compactPage.keyboard.press("Alt+p");

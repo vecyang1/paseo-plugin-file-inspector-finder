@@ -264,6 +264,18 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   }, []);
   useEffect(() => {
     if (!recordingProjectShortcut || typeof window === "undefined") return;
+    type PaseoDesktopBridge = {
+      menu?: { setCapturingShortcut?: (capturing: boolean) => Promise<void> | void };
+    };
+    const setMenuCapturing = (capturing: boolean) => {
+      try {
+        const desktop = (window as unknown as { paseoDesktop?: PaseoDesktopBridge }).paseoDesktop;
+        void desktop?.menu?.setCapturingShortcut?.(capturing);
+      } catch {
+        // Ignore on web / non-Electron hosts
+      }
+    };
+    setMenuCapturing(true);
     const onCapture = (ev: KeyboardEvent) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -300,7 +312,10 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       }
     };
     window.addEventListener("keydown", onCapture, true);
-    return () => window.removeEventListener("keydown", onCapture, true);
+    return () => {
+      window.removeEventListener("keydown", onCapture, true);
+      setMenuCapturing(false);
+    };
   }, [recordingProjectShortcut, settings, t]);
   const [sidebarChildStatus, setSidebarChildStatus] = useState<SidebarChildSessionsStatus | null>(null);
   const [sidebarChildChecks, setSidebarChildChecks] = useState<SidebarChildSessionsCheck[] | null>(null);
@@ -762,6 +777,50 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   }
 
   const { values, revision, save } = settings;
+
+  const applyCustomProjectPickerShortcut = (raw: string) => {
+    const trimmed = raw.trim();
+    const parsed = parseProjectPickerShortcutChord(trimmed);
+    if (!parsed) {
+      setProjectShortcutError(t("settings.projectPickerInvalidShortcut"));
+      return;
+    }
+    setProjectShortcutError(null);
+    lastSyncedCustomShortcutRef.current = trimmed;
+    syncProjectPickerShortcutPrefs({
+      preset: "custom",
+      customShortcut: trimmed,
+    });
+    setProjectPickerStatus(getProjectPickerShortcutStatus());
+    void save(
+      {
+        ...values,
+        projectPickerShortcutPreset: "custom",
+        projectPickerCustomShortcut: trimmed,
+      },
+      revision,
+    );
+  };
+
+  const resetProjectPickerShortcutToDefault = () => {
+    setProjectShortcutError(null);
+    setRecordingProjectShortcut(false);
+    lastSyncedCustomShortcutRef.current = "Alt+P";
+    setCustomProjectShortcutInput("Alt+P");
+    syncProjectPickerShortcutPrefs({
+      preset: "alt_p",
+      customShortcut: "Alt+P",
+    });
+    setProjectPickerStatus(getProjectPickerShortcutStatus());
+    void save(
+      {
+        ...values,
+        projectPickerShortcutPreset: "alt_p",
+        projectPickerCustomShortcut: "Alt+P",
+      },
+      revision,
+    );
+  };
 
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content}>
@@ -1599,27 +1658,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                       setProjectShortcutError(null);
                     }}
                     onSubmitEditing={() => {
-                      const trimmed = customProjectShortcutInput.trim();
-                      const parsed = parseProjectPickerShortcutChord(trimmed);
-                      if (!parsed) {
-                        setProjectShortcutError(t("settings.projectPickerInvalidShortcut"));
-                        return;
-                      }
-                      setProjectShortcutError(null);
-                      syncProjectPickerShortcutPrefs({
-                        preset: "custom",
-                        customShortcut: trimmed,
-                      });
-                      setProjectPickerStatus(getProjectPickerShortcutStatus());
-                      lastSyncedCustomShortcutRef.current = trimmed;
-                      void save(
-                        {
-                          ...values,
-                          projectPickerShortcutPreset: "custom",
-                          projectPickerCustomShortcut: trimmed,
-                        },
-                        revision,
-                      );
+                      applyCustomProjectPickerShortcut(customProjectShortcutInput);
                     }}
                     placeholder="Alt+P / Mod+Shift+J"
                     placeholderTextColor={theme.colors.foregroundMuted}
@@ -1629,27 +1668,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                     accessibilityRole="button"
                     accessibilityLabel={t("settings.projectPickerApplyBtn")}
                     onPress={() => {
-                      const trimmed = customProjectShortcutInput.trim();
-                      const parsed = parseProjectPickerShortcutChord(trimmed);
-                      if (!parsed) {
-                        setProjectShortcutError(t("settings.projectPickerInvalidShortcut"));
-                        return;
-                      }
-                      setProjectShortcutError(null);
-                      syncProjectPickerShortcutPrefs({
-                        preset: "custom",
-                        customShortcut: trimmed,
-                      });
-                      setProjectPickerStatus(getProjectPickerShortcutStatus());
-                      lastSyncedCustomShortcutRef.current = trimmed;
-                      void save(
-                        {
-                          ...values,
-                          projectPickerShortcutPreset: "custom",
-                          projectPickerCustomShortcut: trimmed,
-                        },
-                        revision,
-                      );
+                      applyCustomProjectPickerShortcut(customProjectShortcutInput);
                     }}
                     style={styles.btn}
                   >
@@ -1673,25 +1692,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={t("settings.projectPickerResetBtn")}
-                    onPress={() => {
-                      setProjectShortcutError(null);
-                      setRecordingProjectShortcut(false);
-                      lastSyncedCustomShortcutRef.current = "Alt+P";
-                      setCustomProjectShortcutInput("Alt+P");
-                      syncProjectPickerShortcutPrefs({
-                        preset: "alt_p",
-                        customShortcut: "Alt+P",
-                      });
-                      setProjectPickerStatus(getProjectPickerShortcutStatus());
-                      void save(
-                        {
-                          ...values,
-                          projectPickerShortcutPreset: "alt_p",
-                          projectPickerCustomShortcut: "Alt+P",
-                        },
-                        revision,
-                      );
-                    }}
+                    onPress={resetProjectPickerShortcutToDefault}
                     style={styles.secondaryBtn}
                   >
                     <Text style={styles.secondaryBtnText}>
@@ -2653,24 +2654,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               style={styles.btn}
               accessibilityRole="button"
               accessibilityLabel={t("settings.projectPickerResetBtn")}
-              onPress={() => {
-                setProjectShortcutError(null);
-                setRecordingProjectShortcut(false);
-                setCustomProjectShortcutInput("Alt+P");
-                syncProjectPickerShortcutPrefs({
-                  preset: "alt_p",
-                  customShortcut: "Alt+P",
-                });
-                setProjectPickerStatus(getProjectPickerShortcutStatus());
-                void save(
-                  {
-                    ...values,
-                    projectPickerShortcutPreset: "alt_p",
-                    projectPickerCustomShortcut: "Alt+P",
-                  },
-                  revision,
-                );
-              }}
+              onPress={resetProjectPickerShortcutToDefault}
             >
               <Text style={styles.btnText}>{t("settings.projectPickerResetBtn")}</Text>
             </Pressable>
