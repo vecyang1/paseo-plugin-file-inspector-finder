@@ -48,6 +48,7 @@ import {
 import { isChineseLocale, pluginTranslations } from "./i18n";
 import { DocPreviewSettingsSection } from "./doc-settings-section";
 import { MermaidSettingsSection } from "./mermaid-settings-section";
+import { RelaySettingsSection } from "./relay-settings-section";
 import {
   type ScheduleRunsDomHealthSnapshot,
   type ScheduleRunsDomSelfTestResult,
@@ -3663,6 +3664,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       <MermaidSettingsSection isZh={isZh} styles={styles} />
 
       <DocPreviewSettingsSection isZh={isZh} styles={styles} />
+
+      <RelaySettingsSection isZh={isZh} styles={styles} />
 
       <SettingsSection
         title={

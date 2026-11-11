@@ -673,19 +673,29 @@ export const manageAgentHistoryRpc = defineRpc({
   }),
 });
 
+export const PaseoRecoveryQuotaCooldownSchema = z.object({
+  waitSecs: z.number().nullable().optional(),
+  remainingSecs: z.number().nullable().optional(),
+  resumeAt: z.string().nullable().optional(),
+  deferred: z.boolean().optional(),
+});
+
 export const PaseoRecoveryAgentItemSchema = z.object({
   agentId: z.string(),
+  provider: z.string().optional(),
   workspaceId: z.string().nullable(),
   title: z.string(),
+  cwd: z.string().nullable().optional(),
   status: z.string(),
   persistedStatus: z.string().nullable().optional(),
   conversationId: z.string(),
-  epochs: z.number(),
-  totalSteps: z.number(),
-  lastStepIndex: z.number(),
-  lastStepType: z.string(),
-  shellCallsInTurn: z.number(),
-  otherToolCallsInTurn: z.number(),
+  turnState: z.string().nullable().optional(),
+  epochs: z.number().default(1),
+  totalSteps: z.number().default(0),
+  lastStepIndex: z.number().default(0),
+  lastStepType: z.string().default(""),
+  shellCallsInTurn: z.number().default(0),
+  otherToolCallsInTurn: z.number().default(0),
   toolSummary: z.string(),
   wasStartupRecoveryFailed: z.boolean(),
   lastErrorText: z.string().nullable(),
@@ -696,6 +706,7 @@ export const PaseoRecoveryAgentItemSchema = z.object({
   attemptsAtCurrentStep: z.number(),
   healed: z.boolean(),
   healError: z.string().nullable().optional(),
+  quotaCooldown: PaseoRecoveryQuotaCooldownSchema.nullable().optional(),
 });
 
 export type PaseoRecoveryAgentItem = z.infer<typeof PaseoRecoveryAgentItemSchema>;
@@ -1379,6 +1390,46 @@ export const inspectSystemPromptRpc = defineRpc({
         strippedPrefix: z.boolean(),
       })
       .optional(),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+
+export const BadTimelineEntrySchema = z.object({
+  id: z.string(),
+  status: z.string(),
+  provider: z.string(),
+  title: z.string(),
+  error: z.string(),
+});
+
+export type BadTimelineEntry = z.infer<typeof BadTimelineEntrySchema>;
+
+export const manageRelayHealthRpc = defineRpc({
+  name: "finder.manage_relay_health",
+  input: z.object({
+    action: z.enum(["status", "probe", "revive"]).default("status"),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.enum(["status", "probe", "revive"]),
+    relayOk: z.boolean(),
+    relayEnabled: z.boolean(),
+    controlState: z.string(),
+    clashRoute: z.string(),
+    lastMobileClientId: z.string().nullable().optional(),
+    lastMobileHelloAt: z.string().nullable().optional(),
+    recentRelayErrors15m: z.number(),
+    recentLeaseDrops15m: z.number(),
+    checkedTimelines: z.number(),
+    badTimelines: z.array(BadTimelineEntrySchema),
+    e2eeOk: z.boolean().nullable().optional(),
+    e2eeConnectMs: z.number().nullable().optional(),
+    e2eeStatusMs: z.number().nullable().optional(),
+    e2eeError: z.string().nullable().optional(),
+    actions: z.array(z.string()),
+    issues: z.array(z.string()),
+    details: z.string(),
     message: z.string(),
     durationMs: z.number(),
   }),

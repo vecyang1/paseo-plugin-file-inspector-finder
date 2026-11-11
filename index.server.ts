@@ -21,6 +21,7 @@ import {
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
   managePeerAgentsRpc,
+  manageRelayHealthRpc,
   manageSessionLineageRpc,
   manageSlashSkillsRpc,
   manageSubagentsRpc,
@@ -40,6 +41,7 @@ import {
   handleListWorkspaceMedia,
   handleManageAgentHistory,
   handleManagePeerAgents,
+  handleManageRelayHealth,
   handleManageSessionLineage,
   handleManageSlashSkills,
   handleManageSubagents,
@@ -120,6 +122,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(manageWritebackHookRpc, handleManageWritebackHook);
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
   server.handle(managePeerAgentsRpc, handleManagePeerAgents);
+  server.handle(manageRelayHealthRpc, handleManageRelayHealth);
   server.handle(forkSessionRpc, handleForkSession);
   server.handle(resolveCommitOriginRpc, (input) => handleResolveCommitOrigin(input));
   server.handle(inspectSystemPromptRpc, handleInspectSystemPrompt);

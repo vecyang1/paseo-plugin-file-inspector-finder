@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type {
   AgentHistoryTargetReceipt,
+  BadTimelineEntry,
   CustomizeItem,
   FlatSubagentNode,
   PaseoRecoveryAgentItem,
@@ -17,6 +18,7 @@ import type {
   WritebackReplayEvent,
   manageAgentHistoryRpc,
   managePeerAgentsRpc,
+  manageRelayHealthRpc,
   manageSessionLineageRpc,
   manageSlashSkillsRpc,
   manageSubagentsRpc,
@@ -581,6 +583,155 @@ export async function handleManageAgentHistory(
   };
 }
 
+function normalizePaseoRecoveryAgentItem(raw: unknown): PaseoRecoveryAgentItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const agentId = typeof r.agentId === "string" ? r.agentId : "";
+  if (!agentId) return null;
+  const qcRaw =
+    r.quotaCooldown && typeof r.quotaCooldown === "object"
+      ? (r.quotaCooldown as Record<string, unknown>)
+      : null;
+  return {
+    agentId,
+    provider: typeof r.provider === "string" ? r.provider : "antigravity",
+    workspaceId: typeof r.workspaceId === "string" ? r.workspaceId : null,
+    title: typeof r.title === "string" ? r.title : "(untitled)",
+    cwd: typeof r.cwd === "string" ? r.cwd : null,
+    status: typeof r.status === "string" ? r.status : "unknown",
+    persistedStatus: typeof r.persistedStatus === "string" ? r.persistedStatus : null,
+    conversationId: typeof r.conversationId === "string" ? r.conversationId : "",
+    turnState: typeof r.turnState === "string" ? r.turnState : null,
+    epochs: typeof r.epochs === "number" && Number.isFinite(r.epochs) ? r.epochs : 1,
+    totalSteps: typeof r.totalSteps === "number" && Number.isFinite(r.totalSteps) ? r.totalSteps : 0,
+    lastStepIndex:
+      typeof r.lastStepIndex === "number" && Number.isFinite(r.lastStepIndex) ? r.lastStepIndex : 0,
+    lastStepType: typeof r.lastStepType === "string" ? r.lastStepType : String(r.turnState ?? ""),
+    shellCallsInTurn:
+      typeof r.shellCallsInTurn === "number" && Number.isFinite(r.shellCallsInTurn)
+        ? r.shellCallsInTurn
+        : 0,
+    otherToolCallsInTurn:
+      typeof r.otherToolCallsInTurn === "number" && Number.isFinite(r.otherToolCallsInTurn)
+        ? r.otherToolCallsInTurn
+        : 0,
+    toolSummary: typeof r.toolSummary === "string" ? r.toolSummary : "",
+    wasStartupRecoveryFailed: Boolean(r.wasStartupRecoveryFailed),
+    lastErrorText: typeof r.lastErrorText === "string" ? r.lastErrorText : null,
+    ageHours: typeof r.ageHours === "number" && Number.isFinite(r.ageHours) ? r.ageHours : 0,
+    classification: typeof r.classification === "string" ? r.classification : "UNKNOWN",
+    needsPullUp: Boolean(r.needsPullUp),
+    reason: typeof r.reason === "string" ? r.reason : "",
+    attemptsAtCurrentStep:
+      typeof r.attemptsAtCurrentStep === "number" && Number.isFinite(r.attemptsAtCurrentStep)
+        ? r.attemptsAtCurrentStep
+        : 0,
+    healed: Boolean(r.healed),
+    healError: typeof r.healError === "string" ? r.healError : null,
+    quotaCooldown: qcRaw
+      ? {
+          waitSecs: typeof qcRaw.waitSecs === "number" && Number.isFinite(qcRaw.waitSecs) ? qcRaw.waitSecs : null,
+          remainingSecs:
+            typeof qcRaw.remainingSecs === "number" && Number.isFinite(qcRaw.remainingSecs)
+              ? qcRaw.remainingSecs
+              : null,
+          resumeAt: typeof qcRaw.resumeAt === "string" ? qcRaw.resumeAt : null,
+          deferred: Boolean(qcRaw.deferred),
+        }
+      : null,
+  };
+}
+
+export async function handleManageRelayHealth(
+  input: RpcInput<typeof manageRelayHealthRpc>,
+  _context: PluginHandlerContext,
+) {
+  const startMs = Date.now();
+  const action = input.action ?? "status";
+  const args = ["relay", action, "--json"];
+  try {
+    let stdoutText = "";
+    try {
+      const res = await execCommand(ANTIGRAVITY_OPS_BIN, args, {
+        timeout: action === "probe" ? 30_000 : 20_000,
+        env: { ...process.env, VEC_PASEO_NO_RESTART: "1" },
+      });
+      stdoutText = res.stdout || "";
+    } catch (execErr) {
+      const maybeStdout = (execErr as { stdout?: string })?.stdout ?? "";
+      if (maybeStdout.trim().startsWith("{")) {
+        stdoutText = maybeStdout;
+      } else {
+        throw execErr;
+      }
+    }
+    const parsed = JSON.parse(stdoutText || "{}") as Record<string, unknown>;
+    const durationMs = Date.now() - startMs;
+    const badTimelines: BadTimelineEntry[] = Array.isArray(parsed.badTimelines)
+      ? parsed.badTimelines
+          .filter((x): x is Record<string, unknown> => Boolean(x && typeof x === "object"))
+          .map((x) => ({
+            id: String(x.id ?? ""),
+            status: String(x.status ?? "unknown"),
+            provider: String(x.provider ?? "unknown"),
+            title: String(x.title ?? ""),
+            error: String(x.error ?? ""),
+          }))
+      : [];
+    return {
+      ok: Boolean(parsed.ok),
+      action,
+      relayOk: Boolean(parsed.relayOk ?? true),
+      relayEnabled: Boolean(parsed.relayEnabled ?? true),
+      controlState: String(parsed.controlState ?? "unknown"),
+      clashRoute: String(parsed.clashRoute ?? "unverified"),
+      lastMobileClientId:
+        typeof parsed.lastMobileClientId === "string" ? parsed.lastMobileClientId : null,
+      lastMobileHelloAt:
+        typeof parsed.lastMobileHelloAt === "string" ? parsed.lastMobileHelloAt : null,
+      recentRelayErrors15m: Number(parsed.recentRelayErrors15m ?? 0),
+      recentLeaseDrops15m: Number(parsed.recentLeaseDrops15m ?? 0),
+      checkedTimelines: Number(parsed.checkedTimelines ?? 0),
+      badTimelines,
+      e2eeOk: typeof parsed.e2eeOk === "boolean" ? parsed.e2eeOk : null,
+      e2eeConnectMs: typeof parsed.e2eeConnectMs === "number" ? parsed.e2eeConnectMs : null,
+      e2eeStatusMs: typeof parsed.e2eeStatusMs === "number" ? parsed.e2eeStatusMs : null,
+      e2eeError: typeof parsed.e2eeError === "string" ? parsed.e2eeError : null,
+      actions: Array.isArray(parsed.actions) ? parsed.actions.map(String) : [],
+      issues: Array.isArray(parsed.issues) ? parsed.issues.map(String) : [],
+      details: String(parsed.details ?? ""),
+      message: String(parsed.message ?? parsed.details ?? ""),
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      action,
+      relayOk: false,
+      relayEnabled: true,
+      controlState: "error",
+      clashRoute: "unverified",
+      lastMobileClientId: null,
+      lastMobileHelloAt: null,
+      recentRelayErrors15m: 0,
+      recentLeaseDrops15m: 0,
+      checkedTimelines: 0,
+      badTimelines: [] as BadTimelineEntry[],
+      e2eeOk: null,
+      e2eeConnectMs: null,
+      e2eeStatusMs: null,
+      e2eeError: errMsg,
+      actions: [] as string[],
+      issues: [errMsg],
+      details: errMsg,
+      message: errMsg,
+      durationMs,
+    };
+  }
+}
+
 export async function handleReconcilePaseoRecovery(
   input: RpcInput<typeof reconcilePaseoRecoveryRpc>,
   _context: PluginHandlerContext,
@@ -642,13 +793,20 @@ export async function handleReconcilePaseoRecovery(
       circuitBreakerCount: Number(parsed.circuitBreakerCount ?? 0),
       totalScanned,
       agents: Array.isArray(parsed.agents)
-        ? (parsed.agents.slice(0, 20) as PaseoRecoveryAgentItem[])
+        ? parsed.agents
+            .slice(0, 20)
+            .map(normalizePaseoRecoveryAgentItem)
+            .filter((x): x is PaseoRecoveryAgentItem => x !== null)
         : [],
       interruptedAgents: Array.isArray(parsed.interruptedAgents)
-        ? (parsed.interruptedAgents as PaseoRecoveryAgentItem[])
+        ? parsed.interruptedAgents
+            .map(normalizePaseoRecoveryAgentItem)
+            .filter((x): x is PaseoRecoveryAgentItem => x !== null)
         : [],
       healedAgents: Array.isArray(parsed.healedAgents)
-        ? (parsed.healedAgents as PaseoRecoveryAgentItem[])
+        ? parsed.healedAgents
+            .map(normalizePaseoRecoveryAgentItem)
+            .filter((x): x is PaseoRecoveryAgentItem => x !== null)
         : [],
       actions: Array.isArray(parsed.actions) ? (parsed.actions as string[]) : [],
       issues: Array.isArray(parsed.issues) ? (parsed.issues as string[]) : [],

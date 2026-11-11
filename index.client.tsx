@@ -33,6 +33,7 @@ import {
   focusWorkspaceInApp,
   getWebWindow,
   installDesktopRevealHelpers,
+  installTimelineWireSanitizer,
   locateProjectInSidebar,
   mountInlineTitleInput,
   openNewWorkspaceInApp,
@@ -100,6 +101,9 @@ import { installCompactionAndContextEnhancer } from "./client/compaction-context
 import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
 
 export default function contribute(client: PluginClientContext) {
+  // 0. Install in-flight timeline wire sanitizer so sessions with pre-patch `status:"failed", error:null` never freeze
+  installTimelineWireSanitizer(getWebWindow());
+
   // 1. Pre-associate image & document extensions with our file panels & materialize default inline rename prefs
   syncImagePanelAssociations("file-inspector-finder", "image-inspector", true);
   syncDocumentPanelAssociations("file-inspector-finder", "doc-inspector", true);

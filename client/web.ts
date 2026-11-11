@@ -8096,3 +8096,98 @@ export function installDesktopRevealHelpers(
     win.removeEventListener("blur", onWindowBlur, false);
   };
 }
+
+/**
+ * Normalizes in-memory Paseo timeline wire frames (`fetch_agent_timeline_response` and `agent_stream`)
+ * where a `tool_call` has `status: "failed"` alongside `error: null | undefined`, which would otherwise
+ * fail `ToolCallFailedPayloadSchema` (`NonNullUnknownSchema`) in `@getpaseo/client` and freeze the UI.
+ */
+export function sanitizeFailedToolCallWireObject(parsed: unknown): number {
+  if (!parsed || typeof parsed !== "object") return 0;
+  const root = parsed as Record<string, unknown>;
+  const msg =
+    root.type === "session_message" && root.message && typeof root.message === "object"
+      ? (root.message as Record<string, unknown>)
+      : root.type === "session" && root.message && typeof root.message === "object"
+        ? (root.message as Record<string, unknown>)
+        : root;
+  const msgType = msg.type;
+  if (msgType !== "fetch_agent_timeline_response" && msgType !== "agent_stream") {
+    return 0;
+  }
+  const payload =
+    msg.payload && typeof msg.payload === "object"
+      ? (msg.payload as Record<string, unknown>)
+      : null;
+  if (!payload) return 0;
+
+  let repaired = 0;
+  const fixItem = (item: unknown): void => {
+    if (!item || typeof item !== "object") return;
+    const rec = item as Record<string, unknown>;
+    if (rec.type === "tool_call" && rec.status === "failed") {
+      if (rec.error === null || rec.error === undefined) {
+        rec.error = { message: "Tool call failed" };
+        repaired += 1;
+      }
+    }
+  };
+
+  if (Array.isArray(payload.entries)) {
+    for (const entry of payload.entries) {
+      if (entry && typeof entry === "object") {
+        const eRec = entry as Record<string, unknown>;
+        fixItem(eRec.item);
+        if (Array.isArray(eRec.collapsed)) {
+          for (const c of eRec.collapsed) {
+            if (c && typeof c === "object") {
+              fixItem((c as Record<string, unknown>).item ?? c);
+            }
+          }
+        }
+      }
+    }
+  }
+  if (payload.item && typeof payload.item === "object") {
+    fixItem(payload.item);
+  }
+  return repaired;
+}
+
+export function installTimelineWireSanitizer(win?: unknown): {
+  installed: boolean;
+  getRepairedCount: () => number;
+} {
+  const target = (win ?? (typeof window !== "undefined" ? window : null)) as
+    | (Record<string, unknown> & { JSON?: typeof JSON })
+    | null;
+  if (!target || !target.JSON || typeof target.JSON.parse !== "function") {
+    return { installed: false, getRepairedCount: () => 0 };
+  }
+  const existing = target.__paseoFinderTimelineWireSanitizer as
+    | { installed: boolean; getRepairedCount: () => number }
+    | undefined;
+  if (existing?.installed) {
+    return existing;
+  }
+  const origParse = target.JSON.parse.bind(target.JSON);
+  let repairedTotal = 0;
+  target.JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    const res = origParse(text, reviver);
+    if (
+      typeof text === "string" &&
+      text.includes('"status":"failed"') &&
+      text.includes('"error":null') &&
+      (text.includes('"fetch_agent_timeline_response"') || text.includes('"agent_stream"'))
+    ) {
+      repairedTotal += sanitizeFailedToolCallWireObject(res);
+    }
+    return res;
+  }) as typeof JSON.parse;
+  const handle = {
+    installed: true,
+    getRepairedCount: () => repairedTotal,
+  };
+  target.__paseoFinderTimelineWireSanitizer = handle;
+  return handle;
+}
