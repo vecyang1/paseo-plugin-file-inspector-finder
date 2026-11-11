@@ -22,6 +22,8 @@ import {
 
 const STANDBY_MARKER_RE =
   /^\[ag-standby slug=(?<slug>[^\s\]]+)\s+sha=(?<sha>[0-9a-f]{12})\]/;
+const STANDBY_FALLBACK_SLUG_RE =
+  /\[ag-standby\s+slug=(?<slug>[^\s\]]+)/i;
 
 export interface DaemonScheduleBridge {
   fetchWorkspaces?(options?: { limit?: number }): Promise<{
@@ -254,44 +256,46 @@ async function readFallbackSidecarRuns(
     .filter((f) => f.endsWith(".json"))
     .sort()
     .slice(-maxEvents);
-  const runs: RawScheduleRunOnDisk[] = [];
-  for (const fileName of jsonFiles) {
-    try {
-      const raw = JSON.parse(
-        await fs.readFile(path.join(eventsDir, fileName), "utf-8"),
-      ) as {
-        timestampMs?: string | number;
-        commandInvocationTimestampMs?: string | number;
-        error?: string;
-        payload?: { newConversation?: { conversationId?: string } };
-      };
-      const endedAt = msToIsoUtc(raw.timestampMs);
-      const startedAt =
-        msToIsoUtc(raw.commandInvocationTimestampMs) ?? endedAt;
-      if (!startedAt) continue;
-      const errText = (raw.error ?? "").trim();
-      const convId = raw.payload?.newConversation?.conversationId;
-      const stem = path.basename(fileName, ".json");
-      runs.push({
-        id: `ag-sidecar-${stem}`,
-        scheduledFor: startedAt,
-        startedAt,
-        endedAt: endedAt && endedAt >= startedAt ? endedAt : startedAt,
-        status: errText ? "failed" : "succeeded",
-        agentId: null,
-        workspaceId: null,
-        output: errText
-          ? null
-          : `Antigravity Automations historical run (sidecar=${slug}${
-              convId ? `, conversationId=${convId}` : ""
-            })`,
-        error: errText || null,
-      });
-    } catch {
-      // Ignore corrupt event JSON
-    }
-  }
-  return runs;
+  const loaded = await Promise.all(
+    jsonFiles.map(async (fileName): Promise<RawScheduleRunOnDisk | null> => {
+      try {
+        const raw = JSON.parse(
+          await fs.readFile(path.join(eventsDir, fileName), "utf-8"),
+        ) as {
+          timestampMs?: string | number;
+          commandInvocationTimestampMs?: string | number;
+          error?: string;
+          payload?: { newConversation?: { conversationId?: string } };
+        };
+        const endedAt = msToIsoUtc(raw.timestampMs);
+        const startedAt =
+          msToIsoUtc(raw.commandInvocationTimestampMs) ?? endedAt;
+        if (!startedAt) return null;
+        const errText = (raw.error ?? "").trim();
+        const convId = raw.payload?.newConversation?.conversationId;
+        const stem = path.basename(fileName, ".json");
+        return {
+          id: `ag-sidecar-${stem}`,
+          scheduledFor: startedAt,
+          startedAt,
+          endedAt: endedAt && endedAt >= startedAt ? endedAt : startedAt,
+          status: errText ? "failed" : "succeeded",
+          agentId: null,
+          workspaceId: null,
+          output: errText
+            ? null
+            : `Antigravity Automations historical run (sidecar=${slug}${
+                convId ? `, conversationId=${convId}` : ""
+              })`,
+          error: errText || null,
+        };
+      } catch {
+        // Ignore corrupt event JSON
+        return null;
+      }
+    }),
+  );
+  return loaded.filter((r): r is RawScheduleRunOnDisk => r !== null);
 }
 
 async function resolveProjectLastActiveByKey(
@@ -395,66 +399,118 @@ interface ScannedScheduleAgent {
   isRunning: boolean;
   status: string;
   createdAt?: string;
+  startedAt?: string;
 }
 
 async function scanActiveScheduleAgents(
   paseoDir: string,
+  liveEntries?: Array<{
+    agent?: {
+      id?: string;
+      workspaceId?: string;
+      labels?: Record<string, string>;
+      archivedAt?: string | null;
+      status?: string;
+      createdAt?: string;
+      activeTurn?: { startedAt?: string | null } | null;
+    };
+  }>,
 ): Promise<ScannedScheduleAgent[]> {
+  const byAgentId = new Map<string, ScannedScheduleAgent>();
+  const cutoff = Date.now() - 48 * 3600 * 1000; // last 48 hours
   const agentsRoot = path.join(paseoDir, "agents");
-  const out: ScannedScheduleAgent[] = [];
+
   try {
     const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
-    const cutoff = Date.now() - 48 * 3600 * 1000; // last 48 hours
-    for (const b of buckets) {
-      if (!b.isDirectory()) continue;
-      const bPath = path.join(agentsRoot, b.name);
-      let files: string[] = [];
-      try {
-        files = await fs.readdir(bPath);
-      } catch {
-        continue;
-      }
-      for (const f of files) {
-        if (!f.endsWith(".json")) continue;
-        const fp = path.join(bPath, f);
-        try {
-          const st = await fs.stat(fp);
-          if (st.mtimeMs < cutoff) continue;
-          const content = await fs.readFile(fp, "utf8");
-          const rec = JSON.parse(content) as {
-            id?: string;
-            workspaceId?: string;
-            labels?: Record<string, string>;
-            archivedAt?: string | null;
-            lastStatus?: string;
-            createdAt?: string;
-          };
-          const schedId = rec.labels?.["paseo.schedule-id"];
-          if (schedId && rec.workspaceId) {
-            const isRunning =
-              !rec.archivedAt &&
-              (rec.lastStatus === "running" ||
-                rec.lastStatus === "busy" ||
-                rec.lastStatus === "open" ||
-                !rec.lastStatus);
-            out.push({
-              scheduleId: schedId,
-              agentId: rec.id ?? f.replace(/\.json$/, ""),
-              workspaceId: rec.workspaceId,
-              isRunning,
-              status: isRunning ? "running" : rec.lastStatus || "succeeded",
-              createdAt: rec.createdAt,
-            });
+    const filePaths: string[] = [];
+    await Promise.all(
+      buckets
+        .filter((b) => b.isDirectory())
+        .map(async (b) => {
+          const bPath = path.join(agentsRoot, b.name);
+          try {
+            const files = await fs.readdir(bPath);
+            for (const f of files) {
+              if (f.endsWith(".json")) {
+                filePaths.push(path.join(bPath, f));
+              }
+            }
+          } catch {
+            // ignore unreadable bucket
           }
-        } catch {
-          // ignore stat / read error
-        }
-      }
+        }),
+    );
+
+    const CHUNK_SIZE = 32;
+    for (let i = 0; i < filePaths.length; i += CHUNK_SIZE) {
+      const chunk = filePaths.slice(i, i + CHUNK_SIZE);
+      await Promise.all(
+        chunk.map(async (fp) => {
+          try {
+            const st = await fs.stat(fp);
+            if (st.mtimeMs < cutoff) return;
+            const content = await fs.readFile(fp, "utf8");
+            const rec = JSON.parse(content) as {
+              id?: string;
+              workspaceId?: string;
+              labels?: Record<string, string>;
+              archivedAt?: string | null;
+              lastStatus?: string;
+              createdAt?: string;
+            };
+            const schedId = rec.labels?.["paseo.schedule-id"];
+            if (schedId && rec.workspaceId) {
+              const agentId = rec.id ?? path.basename(fp, ".json");
+              const isRunning =
+                !rec.archivedAt &&
+                (rec.lastStatus === "running" ||
+                  rec.lastStatus === "busy" ||
+                  rec.lastStatus === "open" ||
+                  !rec.lastStatus);
+              byAgentId.set(agentId, {
+                scheduleId: schedId,
+                agentId,
+                workspaceId: rec.workspaceId,
+                isRunning,
+                status: isRunning ? "running" : rec.lastStatus || "succeeded",
+                createdAt: rec.createdAt,
+              });
+            }
+          } catch {
+            // ignore stat / read error
+          }
+        }),
+      );
     }
   } catch {
     // ignore missing agents dir
   }
-  return out;
+
+  // Overlay live in-memory daemon agent snapshots so turn.startedAt and live status win
+  if (Array.isArray(liveEntries)) {
+    for (const entry of liveEntries) {
+      const a = entry?.agent;
+      if (!a?.id || !a.workspaceId) continue;
+      const schedId = a.labels?.["paseo.schedule-id"];
+      if (!schedId) continue;
+      const isRunning =
+        !a.archivedAt &&
+        (a.status === "running" ||
+          a.status === "initializing" ||
+          Boolean(a.activeTurn));
+      byAgentId.set(a.id, {
+        scheduleId: schedId,
+        agentId: a.id,
+        workspaceId: a.workspaceId,
+        isRunning,
+        status: isRunning ? "running" : a.status || "succeeded",
+        createdAt: a.createdAt,
+        startedAt: a.activeTurn?.startedAt ?? undefined,
+      });
+    }
+  }
+
+  return Array.from(byAgentId.values());
 }
 
 export async function handleInspectScheduleRuns(
@@ -468,29 +524,42 @@ export async function handleInspectScheduleRuns(
   const startMs = Date.now();
   const schedulesDir =
     options?.schedulesDir ?? path.join(os.homedir(), ".paseo", "schedules");
+  const paseoDir = path.dirname(schedulesDir);
   const filterId = input.scheduleId?.trim() || undefined;
   const queryLower = (input.query ?? "").trim().toLowerCase();
   const maxRuns = input.maxRunsPerSchedule ?? 50;
+  const isCompact = Boolean(input.compactSummary) && !filterId;
+
+  const workspacesJsonPath = path.join(
+    paseoDir,
+    "projects",
+    "workspaces.json",
+  );
+
+  const [activeListRes, rawSchedules, liveAgentsRes, workspacesJsonRaw] =
+    await Promise.all([
+      context.paseo?.workspaces?.list?.().catch(() => null) ?? Promise.resolve(null),
+      readSchedulesFromDisk(schedulesDir, filterId),
+      context.paseo?.agents
+        ?.list?.({
+          includeBackground: true,
+          filter: { includeArchived: false, includeBackground: true },
+          page: { limit: 200 },
+        })
+        .catch(() => null) ?? Promise.resolve(null),
+      fs.readFile(workspacesJsonPath, "utf8").catch(() => null),
+    ]);
 
   const activeWorkspacesMap = new Map<string, string>();
-  try {
-    const activeList = await context.paseo.workspaces.list();
-    for (const w of activeList.entries) {
+  if (activeListRes?.entries) {
+    for (const w of activeListRes.entries) {
       activeWorkspacesMap.set(w.id, w.title || w.name || w.id);
     }
-  } catch {
-    // Ignore when running outside active daemon workspace context
   }
 
   try {
-    const workspacesJsonPath = path.join(
-      path.dirname(schedulesDir),
-      "projects",
-      "workspaces.json",
-    );
-    const content = await fs.readFile(workspacesJsonPath, "utf8").catch(() => null);
-    if (content) {
-      const parsedWorkspaces = JSON.parse(content) as Array<{
+    if (workspacesJsonRaw) {
+      const parsedWorkspaces = JSON.parse(workspacesJsonRaw) as Array<{
         workspaceId?: string;
         title?: string;
         name?: string;
@@ -506,10 +575,9 @@ export async function handleInspectScheduleRuns(
       }
     }
   } catch {
-    // Ignore workspaces.json read errors
+    // Ignore workspaces.json parse errors
   }
 
-  const rawSchedules = await readSchedulesFromDisk(schedulesDir, filterId);
   const recoveryNameMap = new Map<string, { name: string | null; archived: boolean }>();
 
   if (input.includeWorkspaceNames || filterId) {
@@ -545,6 +613,33 @@ export async function handleInspectScheduleRuns(
     }
   }
 
+  const sidecarDataDir = path.join(
+    os.homedir(),
+    ".gemini",
+    "antigravity",
+    "sidecar_data",
+  );
+  const slugsNeedingSidecar = new Set<string>();
+  for (const raw of rawSchedules) {
+    if (Array.isArray(raw.runs) && raw.runs.length > 0) continue;
+    const prompt = raw.prompt ?? "";
+    const m =
+      STANDBY_MARKER_RE.exec(prompt) ?? STANDBY_FALLBACK_SLUG_RE.exec(prompt);
+    const slug = m?.groups?.slug;
+    if (slug) slugsNeedingSidecar.add(slug);
+  }
+
+  const sidecarRunsBySlug = new Map<string, RawScheduleRunOnDisk[]>();
+  const [activeAgents] = await Promise.all([
+    scanActiveScheduleAgents(paseoDir, liveAgentsRes?.entries),
+    Promise.all(
+      Array.from(slugsNeedingSidecar).map(async (slug) => {
+        const runs = await readFallbackSidecarRuns(slug, sidecarDataDir, maxRuns);
+        sidecarRunsBySlug.set(slug, runs);
+      }),
+    ),
+  ]);
+
   const summaries: ScheduleRunsSummary[] = [];
   const allRecentRuns: ScheduleRunEntry[] = [];
   let totalRuns = 0;
@@ -552,24 +647,19 @@ export async function handleInspectScheduleRuns(
   let failedRuns = 0;
   let runningRuns = 0;
   let schedulesWithRuns = 0;
-  const sidecarDataDir = path.join(
-    os.homedir(),
-    ".gemini",
-    "antigravity",
-    "sidecar_data",
-  );
 
   for (const raw of rawSchedules) {
     const sid = raw.id ?? "unknown";
     const sname = (raw.name ?? "").trim() || sid;
     const prompt = raw.prompt ?? "";
-    const standbyMatch = STANDBY_MARKER_RE.exec(prompt);
+    const standbyMatch =
+      STANDBY_MARKER_RE.exec(prompt) ?? STANDBY_FALLBACK_SLUG_RE.exec(prompt);
     const isStandbyTwin = Boolean(standbyMatch || sname.startsWith("AG · "));
     const standbySlug = standbyMatch?.groups?.slug ?? null;
     const cfg = raw.target?.config ?? {};
     let rawRuns = Array.isArray(raw.runs) ? raw.runs : [];
     if (rawRuns.length === 0 && standbySlug) {
-      rawRuns = await readFallbackSidecarRuns(standbySlug, sidecarDataDir, maxRuns);
+      rawRuns = sidecarRunsBySlug.get(standbySlug) ?? [];
     }
 
     let schedSucceeded = 0;
@@ -621,7 +711,7 @@ export async function handleInspectScheduleRuns(
         workspaceId: wid,
         workspaceName,
         isArchived,
-        output,
+        output: isCompact ? "" : output,
         outputPreview: compactPreview(errText || output || `${sname} (${status})`),
         error: errText,
       };
@@ -676,9 +766,9 @@ export async function handleInspectScheduleRuns(
       modeId: cfg.modeId ?? "full-access",
       cwd: cfg.cwd ?? "",
       archiveOnFinish: cfg.archiveOnFinish !== false,
-      prompt,
+      prompt: isCompact ? "" : prompt,
       promptPreview: compactPreview(
-        prompt.replace(STANDBY_MARKER_RE, "").trim(),
+        prompt.replace(STANDBY_MARKER_RE, "").replace(STANDBY_FALLBACK_SLUG_RE, "").trim(),
         260,
       ),
       nextRunAt: raw.nextRunAt ?? null,
@@ -716,14 +806,11 @@ export async function handleInspectScheduleRuns(
     ),
   );
 
-  const paseoProjectsDir = path.join(path.dirname(schedulesDir), "projects");
+  const paseoProjectsDir = path.join(paseoDir, "projects");
   const projectLastActiveByKey = await resolveProjectLastActiveByKey(
     paseoProjectsDir,
     summaries,
   );
-
-  const paseoDir = path.dirname(schedulesDir);
-  const activeAgents = await scanActiveScheduleAgents(paseoDir);
 
   const workspaceScheduleMap: Record<
     string,
@@ -756,20 +843,31 @@ export async function handleInspectScheduleRuns(
             runStatus: "running",
           };
         }
-        if (!existingMatchingRun) {
+        const bestStartedAt = active.startedAt ?? active.createdAt ?? new Date().toISOString();
+        if (existingMatchingRun) {
+          existingMatchingRun.status = "running";
+          if (!existingMatchingRun.startedAt || active.startedAt) {
+            existingMatchingRun.startedAt = bestStartedAt;
+          }
+          existingMatchingRun.endedAt = null;
+          existingMatchingRun.durationFormatted = "running…";
+        } else {
           const inFlightRun: ScheduleRunEntry = {
             id: `in-flight-${active.agentId}`,
             scheduleId: s.id,
             scheduleName: s.name,
             status: "running",
-            scheduledFor: active.createdAt ?? new Date().toISOString(),
-            startedAt: active.createdAt ?? new Date().toISOString(),
+            scheduledFor: active.createdAt ?? bestStartedAt,
+            startedAt: bestStartedAt,
             endedAt: null,
             durationMs: null,
             durationFormatted: "running…",
             agentId: active.agentId,
             workspaceId: active.workspaceId,
-            workspaceName: activeWorkspacesMap.get(active.workspaceId) ?? null,
+            workspaceName:
+              activeWorkspacesMap.get(active.workspaceId) ??
+              activeWorkspacesMap.get(cleanWid) ??
+              null,
             isArchived: false,
             output: "",
             outputPreview: "Running…",
@@ -816,7 +914,7 @@ export async function handleInspectScheduleRuns(
     failedRuns,
     runningRuns,
     schedules: summaries,
-    recentRuns: allRecentRuns.slice(0, 50),
+    recentRuns: isCompact ? [] : allRecentRuns.slice(0, 50),
     workspaceScheduleMap,
     projectLastActiveByKey,
     durationMs,

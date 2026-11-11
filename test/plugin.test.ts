@@ -70,6 +70,7 @@ import {
   resolveBestPath,
   resolveDaemonClientModuleHref,
 } from "../server/handlers";
+import type { ScheduleRunsSummary } from "../shared/schedule-runs-contracts";
 import {
   type MinimalDocument,
   type MinimalDragEvent,
@@ -128,16 +129,24 @@ import {
   navigateSidebarThreadRelative,
   toggleActiveWorkspacePin,
   isEditableInput,
+  isSkippedRowElement,
+  findVisibleWorkspaceHeaderTitle,
+  resolveWorkspaceTitleFromRuntimeStore,
 } from "../client/web";
 import {
   type MinimalScheduleDomDocument,
   type MinimalScheduleDomElement,
   decorateSchedulesDomOnDocument,
   ensurePaseoSidebarTimestampSetting,
+  findRunningCadenceElapsedSec,
   formatAntigravityRunTimestamp,
   formatCompactSidebarAge,
+  formatRunningCadenceElapsed,
   findCadenceScheduleForWorkspace,
+  findVisibleHeaderTitleElement,
+  isHeaderElementVisible,
   matchScheduleTitleOrSlug,
+  matchesWorkspaceNameWithStem,
   showDefaultCadenceToast,
   isSelfInjectedMutationBatch,
   readScheduleRunsPreferences,
@@ -8790,6 +8799,724 @@ test("59. Pinned / Done Sidebar Row Project Icon Monogram Regression & Self-Heal
   assert.equal(repairedCount, 1);
   assert.equal(clobberedIcon.textContent, "A");
 });
+
+test("60. Paseo 0.15.4 Cadence Stopwatch Badge in Sidebar & Header: role='button' row immunity, visible header resolution in Expo Router, stem & slug matching, and elapsed time title", () => {
+  type CadenceTestNode = {
+    id?: string;
+    tagName: string;
+    title?: string;
+    style: Record<string, string>;
+    childrenList: CadenceTestNode[];
+    parentElement: CadenceTestNode | null;
+    listeners: Map<string, Array<(ev: unknown) => void>>;
+    textContent: string;
+    firstChild: CadenceTestNode | null;
+    children: CadenceTestNode[];
+    getAttribute: (k: string) => string | null;
+    setAttribute: (k: string, v: string) => void;
+    hasAttribute: (k: string) => boolean;
+    appendChild: (c: unknown) => void;
+    insertBefore: (newNode: unknown, refNode: unknown) => void;
+    remove: () => void;
+    addEventListener: (type: string, fn: (ev: unknown) => void) => void;
+    dispatchEvent: (ev: unknown) => boolean;
+    closest: (sel: string) => CadenceTestNode | null;
+    querySelector: (sel: string) => CadenceTestNode | null;
+    querySelectorAll: (sel: string) => CadenceTestNode[];
+  };
+
+  const makeCadenceTestNode = (
+    tag: string,
+    attrs: Record<string, string> = {},
+  ): CadenceTestNode => {
+    const map = new Map<string, string>(Object.entries(attrs));
+    const listeners = new Map<string, Array<(ev: unknown) => void>>();
+    let rawText = "";
+    const n: CadenceTestNode = {
+      id: attrs.id,
+      tagName: tag.toUpperCase(),
+      style: {},
+      childrenList: [],
+      parentElement: null,
+      listeners,
+      get children() {
+        return n.childrenList;
+      },
+      get textContent(): string {
+        if (n.childrenList.length > 0) {
+          return n.childrenList.map((c) => c.textContent ?? "").join("");
+        }
+        return rawText;
+      },
+      set textContent(v: string) {
+        rawText = v;
+        n.childrenList = [];
+      },
+      get firstChild() {
+        return n.childrenList[0] ?? null;
+      },
+      get title(): string {
+        return map.get("title") ?? "";
+      },
+      set title(v: string) {
+        map.set("title", v);
+      },
+      getAttribute: (k) => (k === "id" ? n.id ?? null : map.get(k) ?? null),
+      setAttribute: (k, v) => {
+        if (k === "id") n.id = v;
+        map.set(k, v);
+      },
+      hasAttribute: (k) => (k === "id" ? Boolean(n.id) : map.has(k)),
+      appendChild: (c) => {
+        const child = c as CadenceTestNode;
+        child.parentElement = n;
+        n.childrenList.push(child);
+      },
+      insertBefore: (newNode, refNode) => {
+        const child = newNode as CadenceTestNode;
+        child.parentElement = n;
+        const idx = refNode ? n.childrenList.indexOf(refNode as CadenceTestNode) : -1;
+        if (idx >= 0) n.childrenList.splice(idx, 0, child);
+        else n.childrenList.push(child);
+      },
+      remove: () => {
+        if (n.parentElement) {
+          const list = n.parentElement.childrenList;
+          const idx = list.indexOf(n);
+          if (idx >= 0) list.splice(idx, 1);
+          n.parentElement = null;
+        }
+      },
+      addEventListener: (type, fn) => {
+        const list = listeners.get(type) ?? [];
+        list.push(fn);
+        listeners.set(type, list);
+      },
+      dispatchEvent: (ev) => {
+        const type = (ev as { type?: string })?.type ?? "";
+        for (const fn of listeners.get(type) ?? []) fn(ev);
+        return true;
+      },
+      closest: (sel: string) => {
+        let cur: CadenceTestNode | null = n;
+        while (cur) {
+          const tid = cur.getAttribute("data-testid") ?? "";
+          if (sel.includes("working") && tid.includes("working")) return cur;
+          if (sel.includes("running") && tid.includes("running")) return cur;
+          cur = cur.parentElement;
+        }
+        return null;
+      },
+      querySelector: (sel) => n.querySelectorAll(sel)[0] ?? null,
+      querySelectorAll: (sel) => {
+        const matchesSubSel = (node: CadenceTestNode, subSel: string): boolean => {
+          const s = subSel.trim();
+          if (s.includes('[data-testid="project-status-badge"]') && s.includes("aria-label")) {
+            if (node.getAttribute("data-testid") !== "project-status-badge") return false;
+            const lbl = (node.getAttribute("aria-label") ?? "").toLowerCase();
+            if (s.includes("working") && lbl.includes("working")) return true;
+            if (s.includes("running") && lbl.includes("running")) return true;
+            if (s.includes("工作中") && lbl.includes("工作中")) return true;
+            if (s.includes("进行中") && lbl.includes("进行中")) return true;
+            return false;
+          }
+          if (s.startsWith("[data-testid=")) {
+            const val = s.slice(14, -2);
+            return node.getAttribute("data-testid") === val;
+          }
+          if (s.startsWith("[data-testid^=")) {
+            const prefix = s.slice(15, -2);
+            return (node.getAttribute("data-testid") ?? "").startsWith(prefix);
+          }
+          if (s.startsWith("[data-testid*=")) {
+            const sub = s.slice(15, -2);
+            return (node.getAttribute("data-testid") ?? "").includes(sub);
+          }
+          return false;
+        };
+        const subSels = sel.split(",");
+        const out: CadenceTestNode[] = [];
+        const scan = (node: CadenceTestNode) => {
+          for (const subSel of subSels) {
+            if (matchesSubSel(node, subSel)) {
+              out.push(node);
+              break;
+            }
+          }
+          for (const ch of node.childrenList) scan(ch);
+        };
+        scan(n);
+        return out;
+      },
+    };
+    return n;
+  };
+
+  // 1. isSkippedRowElement must NOT skip the row container itself even when it has role="button" (Paseo 0.15.4 RNW)
+  const paseoRowNode = makeCadenceTestNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_ff8bac535100eda7",
+    role: "button",
+    "aria-selected": "true",
+  });
+  assert.equal(
+    isSkippedRowElement(paseoRowNode as unknown as MinimalElement),
+    false,
+    "isSkippedRowElement must return false for the sidebar row container with role='button'",
+  );
+
+  const archiveBtnNode = makeCadenceTestNode("button", {
+    "data-testid": "sidebar-workspace-archive-local:wks_ff8bac535100eda7",
+    role: "button",
+  });
+  paseoRowNode.appendChild(archiveBtnNode);
+  assert.equal(
+    isSkippedRowElement(archiveBtnNode as unknown as MinimalElement),
+    true,
+    "isSkippedRowElement must return true for inner action buttons like archive button",
+  );
+  archiveBtnNode.remove();
+
+  // 2. matchScheduleTitleOrSlug correctly resolves truncated titles, standby slugs, and Antigravity joiners
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Run webhook hub sentinel ...",
+      "AG · Antigravity Webhook Hub — Sentinel",
+      "webhook-hub-sentinel",
+    ),
+    true,
+    "Truncated title must match schedule name and standbySlug",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Run webhook hub sentinel cadence check",
+      "AG · Antigravity Webhook Hub — Sentinel",
+      "webhook-hub-sentinel",
+    ),
+    true,
+    "Full cadence check title must match schedule name",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Run mac speed sentinel ...",
+      "AG · Mac Speed & Health Sentinel (Every 30 Minutes)",
+      "mac-morning-speed-watch",
+    ),
+    true,
+    "Mac speed sentinel truncated title must match standby twin",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug(
+      "Run GlintMuse speed media audit ...",
+      "AG · GlintMuse Speed & Media Audit Sentinel",
+      null,
+    ),
+    true,
+    "Normalize joiners (&, /, +) must allow matching between 'speed media audit' and 'Speed & Media Audit'",
+  );
+  assert.equal(
+    matchScheduleTitleOrSlug("intake · user question about code", "AG · Webhook Hub", null),
+    false,
+    "Intake sessions must not be matched as cadences",
+  );
+
+  // 3. matchesWorkspaceNameWithStem handles stem prefixing and ellipsis truncation
+  assert.equal(
+    matchesWorkspaceNameWithStem(
+      "Run webhook hub sentinel ...",
+      "Run webhook hub sentinel cadence check",
+    ),
+    true,
+  );
+  assert.equal(
+    matchesWorkspaceNameWithStem(
+      "Run mac speed sentinel …",
+      "Run mac speed sentinel",
+    ),
+    true,
+  );
+  assert.equal(
+    matchesWorkspaceNameWithStem("General discussion", "General discussion"),
+    false,
+    "Generic chat titles must be rejected",
+  );
+
+  // 4. Elapsed running duration formatting & calculation
+  assert.equal(formatRunningCadenceElapsed(45, false), "45s");
+  assert.equal(formatRunningCadenceElapsed(45, true), "45秒");
+  assert.equal(formatRunningCadenceElapsed(87, false), "1m 27s");
+  assert.equal(formatRunningCadenceElapsed(87, true), "1分27秒");
+  assert.equal(formatRunningCadenceElapsed(3660, false), "1h 1m");
+  assert.equal(formatRunningCadenceElapsed(3660, true), "1小时1分");
+
+  const elapsedSec = findRunningCadenceElapsedSec(
+    {
+      runs: [
+        {
+          status: "running",
+          workspaceId: "local:wks_ff8bac535100eda7",
+          startedAt: "2026-11-11T00:00:00.000Z",
+        },
+      ],
+    },
+    "wks_ff8bac535100eda7",
+    Date.parse("2026-11-11T00:01:27.000Z"),
+  );
+  assert.equal(elapsedSec, 87);
+
+  // 5. isHeaderElementVisible & findVisibleHeaderTitleElement
+  const offscreenHeaderTitle = makeCadenceTestNode("div", {
+    "data-testid": "workspace-header-title",
+  });
+  offscreenHeaderTitle.textContent = "Previous Offscreen Thread";
+  offscreenHeaderTitle.style.display = "none";
+
+  const visibleHeaderTitle = makeCadenceTestNode("div", {
+    "data-testid": "workspace-header-title",
+  });
+  visibleHeaderTitle.textContent = "Run webhook hub sentinel cadence check";
+  visibleHeaderTitle.style.display = "block";
+
+  assert.equal(
+    isHeaderElementVisible(offscreenHeaderTitle as unknown as MinimalScheduleDomElement),
+    false,
+  );
+  assert.equal(
+    isHeaderElementVisible(visibleHeaderTitle as unknown as MinimalScheduleDomElement),
+    true,
+  );
+
+  const mockMultiScreenDoc = {
+    createElement: (tag: string) => makeCadenceTestNode(tag),
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid="workspace-header-title"]') {
+        return [offscreenHeaderTitle, visibleHeaderTitle];
+      }
+      return [];
+    },
+  };
+  const resolvedVisibleHeader = findVisibleHeaderTitleElement(
+    mockMultiScreenDoc as unknown as MinimalScheduleDomDocument,
+  );
+  assert.equal(
+    resolvedVisibleHeader as unknown as CadenceTestNode,
+    visibleHeaderTitle,
+    "findVisibleHeaderTitleElement must return the visible header and ignore the hidden offscreen header",
+  );
+
+  // 6. Full DOM integration for Paseo 0.15.4 row with role='button' and active Working badge
+  const rowContent = makeCadenceTestNode("div");
+  const leadingIconBox = makeCadenceTestNode("div", {
+    "data-testid": "sidebar-row-project-icon-local:wks_ff8bac535100eda7",
+  });
+  leadingIconBox.textContent = "2";
+
+  const statusBadge = makeCadenceTestNode("div", {
+    "data-testid": "project-status-badge",
+    role: "status",
+    "aria-label": "Working",
+  });
+
+  const titleRow = makeCadenceTestNode("div");
+  const titleEl = makeCadenceTestNode("div", { dir: "auto" });
+  titleEl.textContent = "Run webhook hub sentinel ...";
+  const trailingDiff = makeCadenceTestNode("span");
+  trailingDiff.textContent = "+196 -22";
+  titleRow.appendChild(titleEl);
+  titleRow.appendChild(trailingDiff);
+
+  rowContent.appendChild(leadingIconBox);
+  rowContent.appendChild(statusBadge);
+  rowContent.appendChild(titleRow);
+  paseoRowNode.appendChild(rowContent);
+
+  // Verify findSidebarRowTitleElement correctly extracts titleEl despite role='button' on paseoRowNode
+  const resolvedTitle = findSidebarRowTitleElement(
+    paseoRowNode as unknown as MinimalElement,
+    "local:wks_ff8bac535100eda7",
+  );
+  assert.equal(
+    resolvedTitle as unknown as CadenceTestNode,
+    titleEl,
+    "findSidebarRowTitleElement must resolve titleEl inside role='button' row",
+  );
+
+  const headerContainer = makeCadenceTestNode("div");
+  headerContainer.appendChild(visibleHeaderTitle);
+
+  const fullDoc = {
+    body: makeCadenceTestNode("body"),
+    createElement: (tag: string) => makeCadenceTestNode(tag),
+    getElementById: () => null,
+    querySelector: (sel: string) => {
+      if (sel.includes("workspace-header-title")) return visibleHeaderTitle;
+      if (sel.includes('[aria-selected="true"]')) return paseoRowNode;
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("sidebar-workspace-row-")) return [paseoRowNode];
+      if (sel === '[data-testid="workspace-header-title"]') return [visibleHeaderTitle];
+      return [];
+    },
+  };
+
+  const scheduleMap = new Map<string, ScheduleRunsSummary>();
+  const testSched: ScheduleRunsSummary = {
+    id: "2a8a43f9",
+    name: "AG · Antigravity Webhook Hub — Sentinel",
+    status: "active",
+    isStandbyTwin: true,
+    standbySlug: "webhook-hub-sentinel",
+    cronExpression: "0 9 * * *",
+    timezone: "Asia/Shanghai",
+    provider: "antigravity",
+    model: "gemini-2.5-flash",
+    modeId: "code",
+    cwd: "/tmp/mock-workspace",
+    archiveOnFinish: false,
+    prompt: "Run webhook hub sentinel cadence check",
+    promptPreview: "Run webhook hub sentinel...",
+    nextRunAt: null,
+    lastRunAt: "2026-11-11T00:00:00.000Z",
+    totalRuns: 10,
+    succeededRuns: 9,
+    failedRuns: 0,
+    runningRuns: 1,
+    lastRunStatus: "running",
+    runs: [
+      {
+        id: "run_wh_1",
+        scheduleId: "2a8a43f9",
+        scheduleName: "AG · Antigravity Webhook Hub — Sentinel",
+        status: "running",
+        scheduledFor: "2026-11-11T00:00:00.000Z",
+        startedAt: "2026-11-11T00:00:00.000Z",
+        endedAt: null,
+        durationMs: null,
+        durationFormatted: "running",
+        agentId: "agt_1",
+        workspaceId: "local:wks_ff8bac535100eda7",
+        workspaceName: "Run webhook hub sentinel cadence check",
+        isArchived: false,
+        output: "",
+        outputPreview: "",
+        error: null,
+      },
+    ],
+  };
+  scheduleMap.set("2a8a43f9", testSched);
+
+  let runNowCalledId: string | null = null;
+  const fixedNowMs = Date.parse("2026-11-11T00:01:27.000Z");
+
+  const pass1 = decorateSchedulesDomOnDocument(fullDoc as unknown as MinimalScheduleDomDocument, {
+    schedulesById: scheduleMap,
+    totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 10 },
+    isZh: true,
+    nowMs: fixedNowMs,
+    onOpenDrawer: () => {},
+    onRunNow: (id) => {
+      runNowCalledId = id;
+    },
+  });
+
+  assert.ok(pass1.domWrites > 0, "Pass 1 must perform DOM writes");
+
+  const sidebarBadge = paseoRowNode.querySelector(
+    '[data-testid="sidebar-workspace-cadence-badge-wks_ff8bac535100eda7"]',
+  );
+  assert.ok(sidebarBadge, "Sidebar row must have cadence badge mounted");
+  assert.equal(sidebarBadge.getAttribute("data-running"), "true");
+  assert.ok(
+    sidebarBadge.title?.includes("运行中 · 已耗时 1分27秒"),
+    `Sidebar badge title must contain elapsed duration. Actual: ${sidebarBadge.title}`,
+  );
+
+  const headerBadge = headerContainer.querySelector(
+    '[data-testid="workspace-header-cadence-badge-2a8a43f9"]',
+  );
+  assert.ok(headerBadge, "Visible workspace header must have cadence badge mounted");
+  assert.equal(headerBadge.getAttribute("data-running"), "true");
+  assert.ok(
+    headerBadge.title?.includes("运行中 · 已耗时 1分27秒"),
+    `Header badge title must contain elapsed duration. Actual: ${headerBadge.title}`,
+  );
+
+  // Test Alt+Click triggers onRunNow
+  sidebarBadge.listeners.get("click")?.[0]?.({
+    altKey: true,
+    stopPropagation: () => {},
+    preventDefault: () => {},
+  });
+  assert.equal(runNowCalledId, "2a8a43f9", "Alt+Click on sidebar badge must call onRunNow");
+
+  // Pass 2 must be strictly idempotent with 0 DOM writes
+  const pass2 = decorateSchedulesDomOnDocument(fullDoc as unknown as MinimalScheduleDomDocument, {
+    schedulesById: scheduleMap,
+    totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 10 },
+    isZh: true,
+    nowMs: fixedNowMs,
+    onOpenDrawer: () => {},
+  });
+  assert.equal(pass2.domWrites, 0, "Pass 2 must produce 0 dom writes (MutationObserver idempotency)");
+});
+
+test("61. Option+D / Shift+Option+D Cross-Session Title Isolation: ignores hidden NativeScreen headers, stale aria-selected rows, and cross-workspace context menus", async () => {
+  resetExplicitTitleSyncForTesting();
+
+  // Vector 1: Hidden NativeScreen header wrapped 15 levels deep (activityState=0, display='none', hidden)
+  // ahead of the active visible screen when the active project folder is collapsed in the sidebar!
+  const inactiveNativeScreen = createInteractiveDomNode("div", { hidden: "" });
+  inactiveNativeScreen.style = { display: "none" };
+  let deepInactiveParent = inactiveNativeScreen;
+  for (let d = 0; d < 15; d += 1) {
+    const wrapper = createInteractiveDomNode("div");
+    deepInactiveParent.appendChild?.(wrapper);
+    deepInactiveParent = wrapper;
+  }
+  const hiddenAlphaHeader = createInteractiveDomNode(
+    "div",
+    { "data-testid": "workspace-header-title" },
+    "Look up order record alpha",
+  );
+  deepInactiveParent.appendChild?.(hiddenAlphaHeader);
+
+  const activeNativeScreen = createInteractiveDomNode("div");
+  activeNativeScreen.style = { display: "flex" };
+  const visibleBetaHeader = createInteractiveDomNode(
+    "div",
+    { "data-testid": "workspace-header-title" },
+    "Design auto scroll memory rule",
+  );
+  activeNativeScreen.appendChild?.(visibleBetaHeader);
+
+  // Stale `aria-selected="true"` row in sidebar belonging to DIFFERENT session `wks_alpha_001`
+  const staleAlphaRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_alpha_001",
+    "aria-selected": "true",
+  });
+  const staleAlphaTitleEl = createInteractiveDomNode(
+    "span",
+    { "data-testid": "sidebar-workspace-title-local:wks_alpha_001" },
+    "Look up order record alpha",
+  );
+  staleAlphaRow.appendChild?.(staleAlphaTitleEl);
+
+  const persistedCalls: Array<{ title: string | null; workspaceId?: string }> = [];
+  const multiScreenDoc: MinimalDocument = {
+    body: createInteractiveDomNode("body"),
+    querySelector: (sel: string) => {
+      // Bare querySelector('[data-testid="workspace-header-title"]') returns hiddenAlphaHeader (DOM order #0)!
+      if (sel === '[data-testid="workspace-header-title"]') return hiddenAlphaHeader;
+      if (sel.includes("aria-selected")) return staleAlphaRow;
+      if (sel.includes("wks_alpha_001")) return staleAlphaRow;
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid="workspace-header-title"]') {
+        return [hiddenAlphaHeader, visibleBetaHeader];
+      }
+      if (sel.includes("sidebar-workspace-row-")) {
+        // Note: wks_beta_002's project is collapsed, so ONLY staleAlphaRow is mounted in sidebar!
+        return [staleAlphaRow];
+      }
+      return [];
+    },
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const betaWin: MinimalWindow = {
+    document: multiScreenDoc,
+    location: { pathname: "/workspace/wks_beta_002" },
+    navigator: { language: "en-US" },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  // Verify findSidebarWorkspaceRow returns null for collapsed wks_beta_002 instead of returning staleAlphaRow!
+  assert.equal(
+    findSidebarWorkspaceRow(multiScreenDoc, "wks_beta_002"),
+    null,
+    "findSidebarWorkspaceRow MUST return null when requested workspace row is unmounted/collapsed, NEVER another session's aria-selected row",
+  );
+
+  // Verify findVisibleWorkspaceHeaderTitle skips 15-level-deep hidden NativeScreen header
+  assert.equal(
+    findVisibleWorkspaceHeaderTitle(multiScreenDoc, betaWin),
+    visibleBetaHeader,
+    "Must resolve visibleBetaHeader and skip 15-level-deep hiddenAlphaHeader",
+  );
+
+  // Verify findF2InlineRenameTarget rejects staleAlphaRow because activeWsId is wks_beta_002
+  const f2Resolved = findF2InlineRenameTarget(multiScreenDoc, betaWin);
+  assert.ok(f2Resolved);
+  assert.equal(f2Resolved?.workspaceId, "wks_beta_002");
+  assert.equal(
+    f2Resolved?.initialTitle,
+    "Design auto scroll memory rule",
+    "F2 target must NEVER read staleAlphaRow's title when URL route is wks_beta_002",
+  );
+
+  // Run Option+D (toggleCurrentSessionDone) on wks_beta_002 with collapsed sidebar project
+  const res1 = await toggleCurrentSessionDone({
+    doc: multiScreenDoc,
+    win: betaWin,
+    callbacks: {
+      onRenameThread: async (newTitle, opts) => {
+        persistedCalls.push({ title: newTitle, workspaceId: opts?.workspaceId });
+      },
+    },
+  });
+  assert.ok(res1);
+  assert.equal(res1.workspaceId, "wks_beta_002");
+  assert.equal(
+    res1.newTitle,
+    "d Design auto scroll memory rule",
+    "Must mark wks_beta_002's own title, NEVER wks_alpha_001's hidden header or stale row title!",
+  );
+  assert.equal(persistedCalls.length, 1);
+  assert.equal(persistedCalls[0]?.workspaceId, "wks_beta_002");
+  assert.equal(persistedCalls[0]?.title, "d Design auto scroll memory rule");
+  assert.equal(
+    hiddenAlphaHeader.textContent,
+    "Look up order record alpha",
+    "Hidden NativeScreen header for wks_alpha_001 must NEVER be mutated",
+  );
+  assert.equal(
+    staleAlphaTitleEl.textContent,
+    "Look up order record alpha",
+    "Stale sidebar row for wks_alpha_001 must NEVER be mutated",
+  );
+  assert.equal(
+    visibleBetaHeader.textContent,
+    "d Design auto scroll memory rule",
+    "Visible active header for wks_beta_002 must be updated synchronously",
+  );
+
+  // Vector 2: Keyed `useSessionStore` SSOT lookup when BOTH sidebar is collapsed AND active header is a loading skeleton
+  resetExplicitTitleSyncForTesting();
+  const skeletonScreenDoc: MinimalDocument = {
+    ...multiScreenDoc,
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid="workspace-header-title"]') {
+        // Active screen is rendering headerTitleSkeleton, so only hiddenAlphaHeader exists in DOM!
+        return [hiddenAlphaHeader];
+      }
+      if (sel.includes("sidebar-workspace-row-")) return [staleAlphaRow];
+      return [];
+    },
+  };
+  const metroModules = new Map([
+    [
+      1,
+      {
+        isInitialized: true,
+        publicModule: {
+          exports: {
+            useSessionStore: {
+              getState: () => ({
+                sessions: {
+                  local: {
+                    workspaces: new Map([
+                      ["wks_alpha_001", { id: "wks_alpha_001", title: "Look up order record alpha" }],
+                      ["wks_gamma_003", { id: "wks_gamma_003", title: "Keyed store title for gamma" }],
+                    ]),
+                    agents: new Map(),
+                  },
+                },
+              }),
+            },
+          },
+        },
+      },
+    ],
+  ]);
+  const gammaWin = {
+    document: skeletonScreenDoc,
+    location: { pathname: "/workspace/wks_gamma_003" },
+    navigator: { language: "en-US" },
+    __c: metroModules,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as MinimalWindow;
+
+  assert.equal(
+    resolveWorkspaceTitleFromRuntimeStore("local:wks_gamma_003", gammaWin),
+    "Keyed store title for gamma",
+  );
+
+  const res2 = await toggleCurrentSessionDone({
+    doc: skeletonScreenDoc,
+    win: gammaWin,
+  });
+  assert.ok(res2);
+  assert.equal(res2.workspaceId, "wks_gamma_003");
+  assert.equal(
+    res2.newTitle,
+    "d Keyed store title for gamma",
+    "Must resolve wks_gamma_003 title from keyed useSessionStore even when header is skeleton and sidebar is collapsed",
+  );
+
+  // Vector 3: Sidebar context menu open on wks_delta_004 while main pane displays wks_beta_002
+  resetExplicitTitleSyncForTesting();
+  visibleBetaHeader.textContent = "Design auto scroll memory rule";
+  const deltaMenuItem = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-menu-rename-local:wks_delta_004",
+  });
+  const deltaRow = createInteractiveDomNode("div", {
+    "data-testid": "sidebar-workspace-row-local:wks_delta_004",
+  });
+  const deltaTitleEl = createInteractiveDomNode(
+    "span",
+    { "data-testid": "sidebar-workspace-title-local:wks_delta_004" },
+    "Delta context menu session",
+  );
+  deltaRow.appendChild?.(deltaTitleEl);
+
+  const contextMenuDoc: MinimalDocument = {
+    body: createInteractiveDomNode("body"),
+    querySelector: (sel: string) => {
+      if (sel.includes("sidebar-workspace-menu-")) return deltaMenuItem;
+      if (sel.includes("wks_delta_004")) return deltaRow;
+      if (sel === '[data-testid="workspace-header-title"]') return visibleBetaHeader;
+      return null;
+    },
+    querySelectorAll: (sel: string) => {
+      if (sel === '[data-testid="workspace-header-title"]') return [visibleBetaHeader];
+      if (sel.includes("sidebar-workspace-row-")) return [deltaRow];
+      return [];
+    },
+    createElement: (tag: string) => createInteractiveDomNode(tag),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  const contextMenuWin: MinimalWindow = {
+    document: contextMenuDoc,
+    location: { pathname: "/workspace/wks_beta_002" },
+    navigator: { language: "en-US" },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  const res3 = await toggleCurrentSessionDone({
+    doc: contextMenuDoc,
+    win: contextMenuWin,
+  });
+  assert.ok(res3);
+  assert.equal(res3.workspaceId, "wks_delta_004");
+  assert.equal(res3.newTitle, "d Delta context menu session");
+  assert.equal(deltaTitleEl.textContent, "d Delta context menu session");
+  assert.equal(
+    visibleBetaHeader.textContent,
+    "Design auto scroll memory rule",
+    "Main pane header for wks_beta_002 must NEVER be overwritten when toggling Done via context menu on wks_delta_004",
+  );
+  resetExplicitTitleSyncForTesting();
+});
+
 
 
 

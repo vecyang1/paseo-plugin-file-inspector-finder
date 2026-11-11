@@ -249,6 +249,19 @@ export default function contribute(client: PluginClientContext) {
           doc,
           win,
           callbacks: {
+            onFetchThreadMetadata: async (explicitWorkspaceId) => {
+              const res = await rpc(manageWorkspaceLabelsRpc, {
+                action: "inspect",
+                workspaceId: explicitWorkspaceId ?? workspace.id,
+              });
+              if (!res.ok) return null;
+              return {
+                workspaceId: res.workspaceId,
+                workspaceTitle: res.workspaceTitle,
+                assignedLabels: res.assignedLabels,
+                catalog: res.catalog,
+              };
+            },
             onRenameThread: async (newTitle, options) => {
               const targetWsId = options?.workspaceId ?? workspace.id;
               if (newTitle) {
@@ -1020,6 +1033,19 @@ export default function contribute(client: PluginClientContext) {
             doc,
             win,
             callbacks: {
+              onFetchThreadMetadata: async (explicitWorkspaceId) => {
+                const res = await rpc(manageWorkspaceLabelsRpc, {
+                  action: "inspect",
+                  workspaceId: explicitWorkspaceId ?? workspace.id,
+                });
+                if (!res.ok) return null;
+                return {
+                  workspaceId: res.workspaceId,
+                  workspaceTitle: res.workspaceTitle,
+                  assignedLabels: res.assignedLabels,
+                  catalog: res.catalog,
+                };
+              },
               onRenameThread: async (newTitle, options) => {
                 const targetWsId = options?.workspaceId ?? workspace.id;
                 if (newTitle) {

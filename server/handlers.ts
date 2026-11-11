@@ -693,7 +693,10 @@ export interface DaemonLabelBridge {
   listWorkspaceLabels(): Promise<{
     labels: Array<{ name: string; color: WorkspaceLabelColor }>;
   }>;
-  fetchWorkspaces(options?: { limit?: number }): Promise<{
+  fetchWorkspaces(options?: {
+    limit?: number;
+    page?: { limit?: number; cursor?: string };
+  }): Promise<{
     entries: Array<{
       id: string;
       name: string;
@@ -701,6 +704,10 @@ export interface DaemonLabelBridge {
       labels?: string[];
       workspaceDirectory?: string | null;
     }>;
+    pageInfo?: {
+      nextCursor?: string | null;
+      hasMore?: boolean;
+    };
   }>;
   setWorkspaceLabel(options: {
     workspaceId: string;
@@ -833,17 +840,26 @@ async function withLocalDaemonBridge<T>(
   }
 }
 
+function stripWorkspaceServerPrefix(raw?: string | null): string {
+  return (raw ?? "")
+    .trim()
+    .replace(/^sidebar-workspace-row-/, "")
+    .replace(/^(?:local|srv_[^:]+):/, "")
+    .trim();
+}
+
 async function resolveActiveWorkspaceId(
   context: PluginHandlerContext,
   explicitWorkspaceId?: string,
 ): Promise<string> {
-  if (explicitWorkspaceId && explicitWorkspaceId.trim()) {
-    return explicitWorkspaceId.trim();
+  const cleanedExplicit = stripWorkspaceServerPrefix(explicitWorkspaceId);
+  if (cleanedExplicit) {
+    return cleanedExplicit;
   }
   try {
     const list = await context.paseo.workspaces.list();
     if (list.entries[0]?.id) {
-      return list.entries[0].id;
+      return stripWorkspaceServerPrefix(list.entries[0].id);
     }
   } catch {
     // Fallback
@@ -1148,24 +1164,49 @@ export async function handleManageWorkspaceLabels(
   try {
     return await withLocalDaemonBridge(async (bridge) => {
       const readState = async () => {
-        const [labelList, wsList, sdkList] = await Promise.all([
+        const [labelList, firstWsPage, sdkList] = await Promise.all([
           bridge.listWorkspaceLabels(),
-          bridge.fetchWorkspaces({ limit: 1000 }),
+          bridge.fetchWorkspaces({ limit: 200, page: { limit: 200 } }),
           context.paseo.workspaces.list().catch(() => ({ entries: [] })),
         ]);
         const catalog: WorkspaceLabelEntry[] = (labelList.labels ?? []).map((item) => ({
           name: item.name,
           color: normalizeLabelColor(item.color),
         }));
-        const matchedWs =
-          wsList.entries.find((w) => w.id === workspaceId) ?? wsList.entries[0];
-        const resolvedWsId = matchedWs?.id ?? workspaceId;
-        const matchedSdkWs = sdkList.entries.find((w) => w.id === resolvedWsId);
+        const explicitClean = stripWorkspaceServerPrefix(input.workspaceId);
+        const searchTarget = explicitClean || stripWorkspaceServerPrefix(workspaceId);
+        let matchedWs = searchTarget
+          ? firstWsPage.entries.find((w) => stripWorkspaceServerPrefix(w.id) === searchTarget)
+          : firstWsPage.entries[0];
+
+        // Paseo daemon paginates fetchWorkspaces at 200 entries per page (`page.cursor` / `pageInfo.nextCursor`).
+        // Walk remaining pages when looking up a specific workspaceId beyond the first 200 workspaces!
+        let nextCursor = firstWsPage.pageInfo?.nextCursor ?? null;
+        let pageGuard = 0;
+        while (!matchedWs && searchTarget && nextCursor && pageGuard < 25) {
+          pageGuard += 1;
+          const nextPage = await bridge.fetchWorkspaces({
+            page: { limit: 200, cursor: nextCursor },
+          });
+          matchedWs = nextPage.entries.find(
+            (w) => stripWorkspaceServerPrefix(w.id) === searchTarget,
+          );
+          nextCursor = nextPage.pageInfo?.nextCursor ?? null;
+        }
+
+        // Never fall back to `firstWsPage.entries[0]` (another session!) when an explicit workspaceId was requested
+        if (!matchedWs && !explicitClean) {
+          matchedWs = firstWsPage.entries[0];
+        }
+        const resolvedWsId = matchedWs?.id ?? (explicitClean || workspaceId);
+        const matchedSdkWs = sdkList.entries.find(
+          (w) => stripWorkspaceServerPrefix(w.id) === stripWorkspaceServerPrefix(resolvedWsId),
+        );
         const workspaceTitle =
           matchedWs?.title ??
           (matchedSdkWs as { title?: string | null } | undefined)?.title ??
-          matchedWs?.name ??
-          matchedSdkWs?.name ??
+          (matchedWs?.name && matchedWs.name !== "main" ? matchedWs.name : undefined) ??
+          (matchedSdkWs?.name && matchedSdkWs.name !== "main" ? matchedSdkWs.name : undefined) ??
           resolvedWsId;
         const assignedLabels = Array.isArray(matchedWs?.labels)
           ? [...matchedWs.labels]

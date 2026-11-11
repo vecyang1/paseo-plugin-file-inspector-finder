@@ -78,6 +78,7 @@ export const inspectScheduleRunsRpc = defineRpc({
     onlyWithRuns: z.boolean().default(false),
     includeWorkspaceNames: z.boolean().default(false),
     maxRunsPerSchedule: z.number().int().min(1).max(200).default(50),
+    compactSummary: z.boolean().optional(),
   }),
   output: z.object({
     ok: z.boolean(),

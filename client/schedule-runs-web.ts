@@ -341,6 +341,73 @@ export function formatCompactSidebarAge(
   return `${Math.floor(diffDays / 7)}w`;
 }
 
+export function findRunningCadenceElapsedSec(
+  sched:
+    | {
+        runs?: Array<{
+          status?: string | null;
+          workspaceId?: string | null;
+          startedAt?: string | null;
+        } | null> | null;
+      }
+    | null
+    | undefined,
+  cleanWorkspaceId?: string | null,
+  nowMs?: number,
+): number | null {
+  if (!sched || !Array.isArray(sched.runs)) return null;
+  const currentMs = nowMs ?? Date.now();
+  if (cleanWorkspaceId) {
+    for (let i = 0; i < sched.runs.length; i += 1) {
+      const r = sched.runs[i];
+      if (!r) continue;
+      const rWsId = r.workspaceId
+        ? r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim()
+        : "";
+      if (r.status === "running" && rWsId === cleanWorkspaceId && r.startedAt) {
+        const ts = Date.parse(r.startedAt);
+        if (Number.isFinite(ts) && ts <= currentMs) {
+          return Math.max(0, Math.floor((currentMs - ts) / 1000));
+        }
+      }
+    }
+  }
+  for (let i = 0; i < sched.runs.length; i += 1) {
+    const r = sched.runs[i];
+    if (r && r.status === "running" && r.startedAt) {
+      const ts = Date.parse(r.startedAt);
+      if (Number.isFinite(ts) && ts <= currentMs) {
+        return Math.max(0, Math.floor((currentMs - ts) / 1000));
+      }
+    }
+  }
+  return null;
+}
+
+export function formatRunningCadenceElapsed(
+  sec: number | null | undefined,
+  isZh: boolean = false,
+): string {
+  if (sec == null || sec < 0) return "";
+  if (sec < 60) {
+    return isZh ? `${sec}秒` : `${sec}s`;
+  }
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  if (min < 60) {
+    if (remSec === 0) {
+      return isZh ? `${min}分钟` : `${min}m`;
+    }
+    return isZh ? `${min}分${remSec}秒` : `${min}m ${remSec}s`;
+  }
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  if (remMin === 0) {
+    return isZh ? `${hr}小时` : `${hr}h`;
+  }
+  return isZh ? `${hr}小时${remMin}分` : `${hr}h ${remMin}m`;
+}
+
 const SCHEDULE_RUNS_STORAGE_KEY = "paseo:finder-plugin:schedule-runs-config";
 const CIRCUIT_BREAKER_WINDOW_MS = 1000;
 const CIRCUIT_BREAKER_MAX_WRITE_PASSES = 25;
@@ -412,6 +479,8 @@ export const GENERIC_CHAT_TITLES = new Set([
   "untitled",
   "new workspace",
   "new session",
+  "new chat",
+  "general discussion",
   "chat",
   "conversation",
   "main",
@@ -454,7 +523,7 @@ export function matchScheduleTitleOrSlug(
   // e.g. "d ", "done: ", "✓ ", "Run ", "Running ", "Execute ", "AG · ", "AG: "
   const t = rawT
     .replace(/^(?:d|done:?|✓)\s+/i, "")
-    .replace(/^[\s★⭐️✨⚡️🔥📌🏷️✓•·]+\s*/i, "")
+    .replace(/^[\s★⭐️✨⚡️🔥📌🏷️✓•·-]+\s*/i, "")
     .replace(/^(?:run(?:ning)?|execute)\s+/i, "")
     .replace(/^ag\s*[·•:-]\s*/i, "")
     .trim();
@@ -464,29 +533,47 @@ export function matchScheduleTitleOrSlug(
     return false;
   }
 
+  const tClean = t.replace(/\.{3}$|…$/, "").trim();
+  const promptSlugMatch =
+    !standbySlug && prompt ? /\[ag-standby\s+slug=([^\s\]]+)/i.exec(prompt) : null;
+  const effectiveStandbySlug = standbySlug || promptSlugMatch?.[1] || null;
+
   // 2. Extract Cadence Card ID if present (e.g. "CAD-20260925-mac-morning-speed-watch" or "CAD-20260925")
   const cadIdMatch = /(?:CAD-\d{8}-[a-z0-9-]+|CAD-\d{8})/i.exec(cleanTitle);
-  if (cadIdMatch && (standbySlug || scheduleName)) {
+  if (cadIdMatch && (effectiveStandbySlug || scheduleName)) {
     const cadId = cadIdMatch[0].toLowerCase();
     if (
-      (standbySlug &&
-        (cadId.includes(standbySlug.toLowerCase()) ||
-          standbySlug.toLowerCase().includes(cadId))) ||
+      (effectiveStandbySlug &&
+        (cadId.includes(effectiveStandbySlug.toLowerCase()) ||
+          effectiveStandbySlug.toLowerCase().includes(cadId))) ||
       (scheduleName && scheduleName.toLowerCase().includes(cadId))
     ) {
       return true;
     }
   }
 
-  // 3. Standby slug explicit in title: [ag-standby slug=xxx]
-  if (standbySlug) {
-    const slug = standbySlug.trim().toLowerCase();
+  // 3. Standby slug explicit in title: [ag-standby slug=xxx] or space-normalized slug
+  if (effectiveStandbySlug) {
+    const slug = effectiveStandbySlug.trim().toLowerCase();
     const explicitStandbyMatch = /\[ag-standby\s+slug=([^\s\]]+)/i.exec(cleanTitle);
     if (explicitStandbyMatch && explicitStandbyMatch[1]?.toLowerCase() === slug) {
       return true;
     }
-    if (t === slug || rawT === slug) {
+    if (t === slug || rawT === slug || tClean === slug) {
       return true;
+    }
+    const slugWords = slug.replace(/[-_]+/g, " ").trim();
+    if (slugWords.length >= 4) {
+      if (
+        tClean === slugWords ||
+        tClean.startsWith(`${slugWords} `) ||
+        tClean.startsWith(`${slugWords}…`) ||
+        ((t.endsWith("…") || t.endsWith("...")) &&
+          slugWords.startsWith(tClean) &&
+          tClean.length >= 8)
+      ) {
+        return true;
+      }
     }
   }
 
@@ -495,54 +582,70 @@ export function matchScheduleTitleOrSlug(
     const rawS = scheduleName.trim().toLowerCase();
     const s = rawS
       .replace(/^(?:d|done:?|✓)\s+/i, "")
-      .replace(/^(?:run(?:ning)?|execute)\s+/i, "")
+      .replace(/^[\s★⭐️✨⚡️🔥📌🏷️✓•·-]+\s*/i, "")
       .replace(/^ag\s*[·•:-]\s*/i, "")
+      .replace(/^[\s★⭐️✨⚡️🔥📌🏷️✓•·-]+\s*/i, "")
+      .replace(/^(?:run(?:ning)?|execute)\s+/i, "")
+      .replace(/^(?:antigravity|agy)\s+/i, "")
       .trim();
 
     // Exact matches
-    if (t === s || rawT === rawS) return true;
+    if (t === s || rawT === rawS || tClean === s) return true;
 
     // Strip trailing parentheticals: e.g. "(Every 30 Minutes)", "(CAD-...)", "(Asia/Shanghai)"
     const sBeforeParen = s.replace(/\s*\([^)]*\)\s*$/, "").trim();
     const tBeforeParen = t.replace(/\s*\([^)]*\)\s*$/, "").trim();
+    const tCleanBeforeParen = tClean.replace(/\s*\([^)]*\)\s*$/, "").trim();
 
     if (
       sBeforeParen.length >= 5 &&
-      (t === sBeforeParen || tBeforeParen === sBeforeParen || tBeforeParen === s)
+      (t === sBeforeParen ||
+        rawT === sBeforeParen ||
+        tBeforeParen === sBeforeParen ||
+        tCleanBeforeParen === sBeforeParen ||
+        tBeforeParen === s)
     ) {
       return true;
     }
 
     // Stem matching with ellipsis
     if (t.endsWith("…") || t.endsWith("...")) {
-      const stem = t.replace(/\.{3}$|…$/, "").trim();
-      if (stem.length >= 10 && (s.startsWith(stem) || sBeforeParen.startsWith(stem))) {
+      const stem = tCleanBeforeParen;
+      if (stem.length >= 8 && (s.startsWith(stem) || sBeforeParen.startsWith(stem))) {
         return true;
       }
     }
 
     // Explicit "Run <ScheduleName> [scheduled|cadence|health] check"
     if (rawT.startsWith("run ") || rawT.startsWith("running ") || rawT.startsWith("execute ")) {
-      const tCheck = tBeforeParen
-        .replace(/\s+mac-speed$/, "")
-        .replace(
-          /\s+(?:scheduled\s+check|cadence\s+check|health\s+check|standby\s+check|scheduled\s+health\s+check|diagnosis(?:\s+and\s+(?:clean(?:up)?|self-heal))?|check)\b.*$/i,
+      const normalizeJoiners = (val: string) =>
+        val
+          .replace(/[&/+—–-]+/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      const tCheck = normalizeJoiners(
+        tBeforeParen
+          .replace(/\s+mac-speed$/, "")
+          .replace(
+            /[\s—–-]+(?:scheduled\s+check|cadence\s+check|health\s+check|standby\s+check|scheduled\s+health\s+check|diagnosis(?:\s+and\s+(?:clean(?:up)?|self-heal))?|check)\b.*$/i,
+            "",
+          )
+          .replace(/\s+mac-speed$/, ""),
+      );
+      const tCore = normalizeJoiners(
+        tCheck
+          .replace(/\.{3}$|…$/, "")
+          .replace(
+            /[\s—–-]+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
+            "",
+          ),
+      );
+      const sCheck = normalizeJoiners(
+        sBeforeParen.replace(
+          /[\s—–-]+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
           "",
-        )
-        .replace(/\s+mac-speed$/, "")
-        .trim();
-      const tCore = tCheck
-        .replace(
-          /\s+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
-          "",
-        )
-        .trim();
-      const sCheck = sBeforeParen
-        .replace(
-          /\s+(?:sentinel|monitor|watch|audit|cadence|sync|scanner|digest)\b.*$/i,
-          "",
-        )
-        .trim();
+        ),
+      );
       if (tCore.length >= 6 && sCheck.length >= 6) {
         if (
           tCheck === sCheck ||
@@ -559,6 +662,199 @@ export function matchScheduleTitleOrSlug(
   return false;
 }
 
+export function matchesWorkspaceNameWithStem(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const normA = a.trim().toLowerCase();
+  const normB = b.trim().toLowerCase();
+  if (GENERIC_CHAT_TITLES.has(normA) || GENERIC_CHAT_TITLES.has(normB)) return false;
+
+  const hasEllipsisA = /[. …]{2,}$|[…]/.test(normA);
+  const hasEllipsisB = /[. …]{2,}$|[…]/.test(normB);
+  const stemA = normA.replace(/[. …]+$/, "").trim();
+  const stemB = normB.replace(/[. …]+$/, "").trim();
+  if (GENERIC_CHAT_TITLES.has(stemA) || GENERIC_CHAT_TITLES.has(stemB)) return false;
+  if (normA === normB) return true;
+
+  if (hasEllipsisA && stemA.length >= 6) {
+    if (normB.startsWith(stemA) || stemB.startsWith(stemA)) return true;
+  }
+  if (hasEllipsisB && stemB.length >= 6) {
+    if (normA.startsWith(stemB) || stemA.startsWith(stemB)) return true;
+  }
+
+  if (stemA.length >= 10 && stemA.includes(" ") && normB.startsWith(stemA + " ")) {
+    return true;
+  }
+  if (stemB.length >= 10 && stemB.includes(" ") && normA.startsWith(stemB + " ")) {
+    return true;
+  }
+
+  return false;
+}
+
+interface StoreAgentMeta {
+  scheduleId: string | null;
+  scheduleNameLabel: string | null;
+  standbySlug: string | null;
+  agentId: string | null;
+  isRunning: boolean;
+  agentStartedAt: string | null;
+  explicitStatus: string | null;
+  isExplicitNonCadence: boolean;
+}
+
+function findStoreAgentMeta(
+  win: Window | null,
+  cleanId: string,
+): StoreAgentMeta | null {
+  if (!cleanId) return null;
+  const sessionStore = findSessionStore(win);
+  if (!sessionStore || typeof sessionStore.getState !== "function") return null;
+  try {
+    const sessions = sessionStore.getState()?.sessions ?? {};
+    let scheduleId: string | null = null;
+    let scheduleNameLabel: string | null = null;
+    let standbySlug: string | null = null;
+    let agentId: string | null = null;
+    let isRunning = false;
+    let turnStartedAt: string | null = null;
+    let createdAt: string | null = null;
+    let explicitStatus: string | null = null;
+    let sawMatchingAgent = false;
+    let sawExplicitNonCadence = false;
+
+    for (const session of Object.values(sessions)) {
+      const rawAgents = (session as Record<string, unknown> | undefined)?.agents;
+      const rawDetails = (session as Record<string, unknown> | undefined)?.agentDetails;
+      const agents: Array<Record<string, unknown>> = [];
+      if (rawAgents) {
+        if (rawAgents instanceof Map) {
+          agents.push(...(rawAgents.values() as Iterable<Record<string, unknown>>));
+        } else if (typeof rawAgents === "object") {
+          agents.push(...(Object.values(rawAgents) as Array<Record<string, unknown>>));
+        }
+      }
+      if (rawDetails) {
+        if (rawDetails instanceof Map) {
+          agents.push(...(rawDetails.values() as Iterable<Record<string, unknown>>));
+        } else if (typeof rawDetails === "object") {
+          agents.push(...(Object.values(rawDetails) as Array<Record<string, unknown>>));
+        }
+      }
+      for (const a of agents) {
+        if (!a) continue;
+        const aWid = String(a.workspaceId ?? "")
+          .replace(/^(?:local|srv_[^:]+):/, "")
+          .trim();
+        if (aWid !== cleanId) continue;
+        sawMatchingAgent = true;
+        if (!agentId && typeof a.id === "string" && a.id.trim()) {
+          agentId = a.id.trim();
+        }
+        const labels = a.labels as Record<string, string> | undefined;
+        const sid = labels?.["paseo.schedule-id"]?.trim();
+        if (sid && !scheduleId) {
+          scheduleId = sid;
+        }
+        const sName = labels?.["paseo.schedule-name"]?.trim();
+        if (sName && !scheduleNameLabel) {
+          scheduleNameLabel = sName;
+        }
+        const aTitle = String(a.title ?? "");
+        const sm = /\[ag-standby\s+slug=(?<slug>[^\s\]]+)/i.exec(aTitle);
+        if (sm?.groups?.slug && !standbySlug) {
+          standbySlug = sm.groups.slug;
+        }
+        const turnObj = (a.turn ?? a.activeTurn) as
+          | { phase?: unknown; startedAt?: unknown }
+          | undefined;
+        const statusStr = typeof a.status === "string" ? a.status.trim() : "";
+        if (statusStr) explicitStatus = statusStr;
+        const agentRunning =
+          turnObj?.phase === "open" ||
+          statusStr === "running" ||
+          statusStr === "busy" ||
+          statusStr === "initializing";
+        if (agentRunning) {
+          isRunning = true;
+          if (typeof turnObj?.startedAt === "string" && turnObj.startedAt.trim()) {
+            turnStartedAt = turnObj.startedAt.trim();
+          }
+        }
+        if (!createdAt && typeof a.createdAt === "string" && a.createdAt.trim()) {
+          createdAt = a.createdAt.trim();
+        }
+        if (labels?.["relation-kind"] === "intake-routed" || (!sid && !sm)) {
+          sawExplicitNonCadence = true;
+        }
+      }
+    }
+
+    if (!sawMatchingAgent) return null;
+    const isCadence = Boolean(scheduleId || standbySlug);
+    return {
+      scheduleId,
+      scheduleNameLabel,
+      standbySlug,
+      agentId,
+      isRunning,
+      agentStartedAt: isRunning ? (turnStartedAt ?? createdAt) : null,
+      explicitStatus,
+      isExplicitNonCadence: !isCadence && sawExplicitNonCadence,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function enrichScheduleWithRunningState<T extends ResolvedCadenceSchedule>(
+  sched: T,
+  cleanId: string,
+  forceRunning: boolean,
+  storeMeta: StoreAgentMeta | null,
+): T {
+  const isRunning = forceRunning || Boolean(storeMeta?.isRunning);
+  if (!isRunning) return sched;
+  const existingRuns = Array.isArray(sched.runs) ? sched.runs : [];
+  const hasRunningWithStartedAt = existingRuns.some(
+    (r) =>
+      r &&
+      r.status === "running" &&
+      Boolean(r.startedAt) &&
+      (!cleanId ||
+        !r.workspaceId ||
+        r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanId),
+  );
+  let nextRuns = existingRuns;
+  if (!hasRunningWithStartedAt && storeMeta?.agentStartedAt) {
+    const syntheticRun: ScheduleRunEntry = {
+      id: `store-${storeMeta.agentId ?? sched.id}`,
+      scheduleId: sched.id,
+      scheduleName: sched.name || sched.id,
+      status: "running",
+      scheduledFor: storeMeta.agentStartedAt,
+      startedAt: storeMeta.agentStartedAt,
+      endedAt: null,
+      durationMs: null,
+      durationFormatted: "running…",
+      agentId: storeMeta.agentId ?? null,
+      workspaceId: cleanId || null,
+      workspaceName: null,
+      isArchived: false,
+      output: "",
+      outputPreview: "",
+      error: null,
+    };
+    nextRuns = [syntheticRun, ...existingRuns];
+  }
+  return {
+    ...sched,
+    runningRuns: Math.max(1, sched.runningRuns ?? 0),
+    lastRunStatus: "running",
+    runs: nextRuns,
+  };
+}
+
 export function findCadenceScheduleForWorkspace(
   workspaceId?: string | null,
   workspaceTitle?: string | null,
@@ -567,6 +863,8 @@ export function findCadenceScheduleForWorkspace(
   if (!workspaceId && !workspaceTitle) return null;
   const cleanId = (workspaceId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
   const cleanTitle = (workspaceTitle ?? "").trim().toLowerCase();
+  const win = winOverride ?? (typeof window !== "undefined" ? window : null);
+  const storeMeta = cleanId ? findStoreAgentMeta(win, cleanId) : null;
 
   // 1. Direct O(1) workspaceScheduleMap lookup (cached from server RPC)
   const meta =
@@ -576,108 +874,60 @@ export function findCadenceScheduleForWorkspace(
   if (meta) {
     const full = cachedSchedulesById.get(meta.scheduleId);
     if (full) {
-      if (meta.isRunning) {
-        return {
-          ...full,
-          runningRuns: Math.max(1, full.runningRuns ?? 0),
-          lastRunStatus: "running",
-        };
-      }
-      return full;
+      return enrichScheduleWithRunningState(full, cleanId, meta.isRunning, storeMeta);
     }
-    return {
+    const baseMeta = {
       id: meta.scheduleId,
       name: meta.scheduleName,
       status: "active",
       runningRuns: meta.isRunning ? 1 : 0,
       lastRunStatus: meta.isRunning ? "running" : meta.runStatus,
-    } as ScheduleRunsSummary;
+      runs: [],
+    } as unknown as ScheduleRunsSummary;
+    return enrichScheduleWithRunningState(baseMeta, cleanId, meta.isRunning, storeMeta);
   }
 
   // 2. Real-time in-memory store lookup via useSessionStore (Paseo Metro store)
-  const win = winOverride ?? (typeof window !== "undefined" ? window : null);
-  const sessionStore = findSessionStore(win);
-  if (sessionStore && typeof sessionStore.getState === "function") {
-    try {
-      let foundNonCadenceAgentInStore = false;
-      const sessions = sessionStore.getState()?.sessions ?? {};
-      for (const session of Object.values(sessions)) {
-        const rawAgents = (session as Record<string, unknown> | undefined)?.agents;
-        const rawDetails = (session as Record<string, unknown> | undefined)?.agentDetails;
-        const agents: Array<Record<string, unknown>> = [];
-        if (rawAgents) {
-          if (rawAgents instanceof Map) {
-            agents.push(...(rawAgents.values() as Iterable<Record<string, unknown>>));
-          } else if (typeof rawAgents === "object") {
-            agents.push(...(Object.values(rawAgents) as Array<Record<string, unknown>>));
-          }
-        }
-        if (rawDetails) {
-          if (rawDetails instanceof Map) {
-            agents.push(...(rawDetails.values() as Iterable<Record<string, unknown>>));
-          } else if (typeof rawDetails === "object") {
-            agents.push(...(Object.values(rawDetails) as Array<Record<string, unknown>>));
-          }
-        }
-        for (const a of agents as Array<Record<string, unknown>>) {
-          if (!a) continue;
-          const aWid = String(a.workspaceId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim();
-          if (cleanId && aWid === cleanId) {
-            const labels = a.labels as Record<string, string> | undefined;
-            const schedId = labels?.["paseo.schedule-id"];
-            const isAgentRunning =
-              (a.turn as { phase?: string })?.phase === "open" ||
-              a.status === "running" ||
-              a.status === "busy";
-            if (schedId) {
-              const full = cachedSchedulesById.get(schedId);
-              if (full) {
-                return isAgentRunning
-                  ? {
-                      ...full,
-                      runningRuns: Math.max(1, full.runningRuns ?? 0),
-                      lastRunStatus: "running",
-                    }
-                  : full;
-              }
-              return {
-                id: schedId,
-                name: schedId,
-                status: "active",
-                runningRuns: isAgentRunning ? 1 : 0,
-                lastRunStatus: isAgentRunning ? "running" : "succeeded",
-              } as ScheduleRunsSummary;
-            }
-            // Check standby slug in agent title
-            const aTitle = String(a.title ?? "");
-            const standbyMatch = /\[ag-standby\s+slug=(?<slug>[^\s\]]+)/.exec(aTitle);
-            if (standbyMatch?.groups?.slug) {
-              const slug = standbyMatch.groups.slug;
-              for (const s of cachedSchedulesById.values()) {
-                if (s.standbySlug === slug || s.prompt?.includes(`slug=${slug}`)) {
-                  return isAgentRunning
-                    ? {
-                        ...s,
-                        runningRuns: Math.max(1, s.runningRuns ?? 0),
-                        lastRunStatus: "running",
-                      }
-                    : s;
-                }
-              }
-            }
-            // If this agent exists in sessionStore and has no schedule id and no standby slug,
-            // or is an intake-routed session: mark as non-cadence session.
-            if (labels?.["relation-kind"] === "intake-routed" || (!schedId && !standbyMatch)) {
-              foundNonCadenceAgentInStore = true;
-            }
-          }
+  if (storeMeta) {
+    if (storeMeta.scheduleId) {
+      const full = cachedSchedulesById.get(storeMeta.scheduleId);
+      if (full) {
+        return enrichScheduleWithRunningState(full, cleanId, false, storeMeta);
+      }
+      const provisionalName =
+        storeMeta.scheduleNameLabel ||
+        (storeMeta.standbySlug ? `AG · ${storeMeta.standbySlug}` : storeMeta.scheduleId);
+      const provisional = {
+        id: storeMeta.scheduleId,
+        name: provisionalName,
+        standbySlug: storeMeta.standbySlug,
+        status: "active",
+        runningRuns: storeMeta.isRunning ? 1 : 0,
+        lastRunStatus: storeMeta.isRunning ? "running" : "succeeded",
+        runs: [],
+      } as unknown as ScheduleRunsSummary;
+      return enrichScheduleWithRunningState(provisional, cleanId, false, storeMeta);
+    }
+    if (storeMeta.standbySlug) {
+      const slug = storeMeta.standbySlug;
+      for (const s of cachedSchedulesById.values()) {
+        if (s.standbySlug === slug || s.prompt?.includes(`slug=${slug}`)) {
+          return enrichScheduleWithRunningState(s, cleanId, false, storeMeta);
         }
       }
-      if (foundNonCadenceAgentInStore) {
-        return null;
-      }
-    } catch {
-      // Ignore store read error
+      const provisional = {
+        id: slug,
+        name: storeMeta.scheduleNameLabel || `AG · ${slug}`,
+        standbySlug: slug,
+        status: "active",
+        runningRuns: storeMeta.isRunning ? 1 : 0,
+        lastRunStatus: storeMeta.isRunning ? "running" : "succeeded",
+        runs: [],
+      } as unknown as ScheduleRunsSummary;
+      return enrichScheduleWithRunningState(provisional, cleanId, false, storeMeta);
+    }
+    if (storeMeta.isExplicitNonCadence) {
+      return null;
     }
   }
 
@@ -697,7 +947,7 @@ export function findCadenceScheduleForWorkspace(
           cleanTitle.length >= 6 &&
           !GENERIC_CHAT_TITLES.has(cleanTitle) &&
           r?.workspaceName &&
-          r.workspaceName.trim().toLowerCase() === cleanTitle
+          matchesWorkspaceNameWithStem(cleanTitle, r.workspaceName)
         ) {
           return sched;
         }
@@ -1037,6 +1287,96 @@ export interface MinimalScheduleDomDocument {
   ): ArrayLike<T>;
 }
 
+export function isHeaderElementVisible(
+  el: MinimalScheduleDomElement | null | undefined,
+  win?: Window | null,
+): boolean {
+  if (!el) return false;
+  const rectFn = (el as unknown as {
+    getBoundingClientRect?: () => { width: number; height: number } | null;
+  }).getBoundingClientRect;
+  if (typeof rectFn === "function") {
+    try {
+      const rect = rectFn.call(el);
+      if (rect && rect.width === 0 && rect.height === 0) {
+        return false;
+      }
+    } catch {
+      // Ignore in synthetic test DOMs
+    }
+  }
+  let cur: MinimalScheduleDomElement | null | undefined = el;
+  let depth = 0;
+  // Walk up to 28 levels because Expo Router / React Navigation NativeScreen wraps
+  // CompactHeader -> ScreenTitle 12-18 levels deep inside `<div hidden style="display: none">`.
+  while (cur && depth < 28) {
+    depth += 1;
+    const style = cur.style;
+    if (
+      style &&
+      (style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0")
+    ) {
+      return false;
+    }
+    const ariaHidden = cur.getAttribute?.("aria-hidden");
+    if (ariaHidden === "true") return false;
+    if (cur.hasAttribute?.("hidden")) return false;
+    if (typeof cur.getAttribute === "function" && cur.getAttribute("hidden") !== null) {
+      return false;
+    }
+    if ((cur as unknown as { hidden?: boolean }).hidden === true) return false;
+
+    const htmlEl = cur as unknown as HTMLElement;
+    if (
+      typeof win?.getComputedStyle === "function" &&
+      htmlEl &&
+      (htmlEl as unknown as { nodeType?: number }).nodeType === 1
+    ) {
+      try {
+        const cs = win.getComputedStyle(htmlEl);
+        if (cs && (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0")) {
+          return false;
+        }
+      } catch {
+        // Ignore in synthetic test DOMs
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return true;
+}
+
+export function findVisibleHeaderTitleElement(
+  doc: MinimalScheduleDomDocument,
+  win?: Window | null,
+): MinimalScheduleDomElement | null {
+  if (typeof doc.querySelectorAll === "function") {
+    const all = doc.querySelectorAll<MinimalScheduleDomElement>(
+      '[data-testid="workspace-header-title"]',
+    );
+    if (all && all.length > 0) {
+      // Iterate from last to first so in React Navigation stack transitions,
+      // the newly pushed active screen (last in DOM order) wins over outgoing kept-alive screens.
+      for (let i = all.length - 1; i >= 0; i -= 1) {
+        const el = all[i];
+        if (el && isHeaderElementVisible(el, win)) {
+          return el;
+        }
+      }
+      return null;
+    }
+  }
+  const fallback = doc.querySelector<MinimalScheduleDomElement>(
+    '[data-testid="workspace-header-title"]',
+  );
+  if (fallback && isHeaderElementVisible(fallback, win)) {
+    return fallback;
+  }
+  return null;
+}
+
 export type ScheduleRowSummarySlice = Pick<
   ScheduleRunsSummary,
   "id" | "name" | "totalRuns" | "lastRunStatus"
@@ -1087,7 +1427,41 @@ function resolveCadenceSchedule(
     if (custom) return custom;
   }
   const fromCacheOrStore = findCadenceScheduleForWorkspace(normWsId, rowTitle);
-  if (fromCacheOrStore) return fromCacheOrStore;
+  if (fromCacheOrStore) {
+    const richer = options.schedulesById.get(fromCacheOrStore.id);
+    if (richer) {
+      const storeMeta = normWsId
+        ? findStoreAgentMeta(typeof window !== "undefined" ? window : null, normWsId)
+        : null;
+      const hasRunningStart = (runs?: Array<Partial<ScheduleRunEntry>>) =>
+        Boolean(runs?.some((r) => r?.status === "running" && Boolean(r?.startedAt)));
+      const mergedRuns = hasRunningStart(richer.runs)
+        ? richer.runs
+        : hasRunningStart(fromCacheOrStore.runs)
+          ? [...(fromCacheOrStore.runs ?? []), ...(richer.runs ?? [])]
+          : Array.isArray(richer.runs) && richer.runs.length > 0
+            ? richer.runs
+            : fromCacheOrStore.runs;
+      const mergedBase: ResolvedCadenceSchedule = {
+        id: richer.id ?? fromCacheOrStore.id,
+        name: richer.name || fromCacheOrStore.name,
+        status: richer.status ?? fromCacheOrStore.status,
+        lastRunStatus: fromCacheOrStore.lastRunStatus ?? richer.lastRunStatus,
+        runningRuns: Math.max(
+          fromCacheOrStore.runningRuns ?? 0,
+          richer.runningRuns ?? 0,
+        ),
+        runs: mergedRuns,
+      };
+      const isRunningNow =
+        Boolean(mergedBase.runningRuns && mergedBase.runningRuns > 0) ||
+        mergedBase.lastRunStatus === "running";
+      return isRunningNow
+        ? enrichScheduleWithRunningState(mergedBase, normWsId, isRunningNow, storeMeta)
+        : mergedBase;
+    }
+    return fromCacheOrStore;
+  }
 
   const cleanTitle = rowTitle.trim().toLowerCase();
   for (const [id, sched] of options.schedulesById.entries()) {
@@ -1111,7 +1485,7 @@ function resolveCadenceSchedule(
           cleanTitle.length >= 6 &&
           !GENERIC_CHAT_TITLES.has(cleanTitle) &&
           r?.workspaceName &&
-          r.workspaceName.trim().toLowerCase() === cleanTitle
+          matchesWorkspaceNameWithStem(cleanTitle, r.workspaceName)
         ) {
           return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
         }
@@ -1227,6 +1601,7 @@ export function decorateSchedulesDomOnDocument(
   const themeKey = theme?.name ?? "default";
   const nowMs = options.nowMs ?? Date.now();
   const minuteBucket = Math.floor(nowMs / 60_000);
+  const elapsedBucket = Math.floor(nowMs / 15_000);
   let domWrites = 0;
 
   if (ensurePaseoCadenceStyles(doc)) {
@@ -1310,11 +1685,11 @@ export function decorateSchedulesDomOnDocument(
         rowEl as unknown as MinimalElement,
         parsed.workspaceKey,
       ) as MinimalScheduleDomElement | null;
-      if (!titleEl || !titleEl.parentElement) continue;
+      const rowTitleText = (titleEl?.textContent ?? "").trim();
 
       const sched = resolveCadenceSchedule(
         cleanWorkspaceId,
-        (titleEl.textContent ?? "").trim(),
+        rowTitleText,
         options,
       );
 
@@ -1340,9 +1715,13 @@ export function decorateSchedulesDomOnDocument(
            (rowEl.parentElement.getAttribute("data-testid") ?? "").includes("running"))) ||
         rowEl.querySelector?.('[data-testid*="status-indicator-running"]') ||
         rowEl.querySelector?.('[data-testid="project-status-badge"][aria-label*="Working" i]') ||
+        rowEl.querySelector?.('[data-testid="project-status-badge"][aria-label*="Running" i]') ||
         rowEl.querySelector?.('[data-testid="project-status-badge"][aria-label*="工作中"]') ||
+        rowEl.querySelector?.('[data-testid="project-status-badge"][aria-label*="进行中"]') ||
         rowEl.querySelector?.('[role="status"][aria-label*="Working" i]') ||
-        rowEl.querySelector?.('[role="status"][aria-label*="工作中"]'),
+        rowEl.querySelector?.('[role="status"][aria-label*="Running" i]') ||
+        rowEl.querySelector?.('[role="status"][aria-label*="工作中"]') ||
+        rowEl.querySelector?.('[role="status"][aria-label*="进行中"]'),
       );
 
       const metaForWs =
@@ -1364,9 +1743,17 @@ export function decorateSchedulesDomOnDocument(
             (sched.runningRuns && sched.runningRuns > 0) ||
             sched.lastRunStatus === "running",
           );
+      const runningElapsedSec = isRunning
+        ? findRunningCadenceElapsedSec(sched, cleanWorkspaceId, nowMs)
+        : null;
+      const runningElapsedText = formatRunningCadenceElapsed(
+        runningElapsedSec,
+        options.isZh,
+      );
       const schedStatus = sched.status ?? "active";
       const lastStatus = sched.lastRunStatus ?? "none";
-      const cadenceSig = `${cleanWorkspaceId}:${sched.id}:${themeKey}:${schedStatus}:${lastStatus}:${isRunning ? 1 : 0}:${options.isZh ? "zh" : "en"}`;
+      const schedDisplayName = (sched.name ?? "").trim();
+      const cadenceSig = `${cleanWorkspaceId}:${sched.id}:${schedDisplayName}:${themeKey}:${schedStatus}:${lastStatus}:${isRunning ? 1 : 0}:${options.isZh ? "zh" : "en"}:${runningElapsedText ? `${elapsedBucket}:${runningElapsedText}` : "no-elapsed"}`;
 
       let badge = existingBadge;
       if (!badge) {
@@ -1378,20 +1765,27 @@ export function decorateSchedulesDomOnDocument(
         badge.setAttribute("data-finder-runs-injected", "true");
         badge.setAttribute("role", "button");
         badge.setAttribute("tabindex", "0");
-        titleEl.parentElement.insertBefore(badge, titleEl);
+        if (titleEl && titleEl.parentElement) {
+          titleEl.parentElement.insertBefore(badge, titleEl);
+        } else {
+          rowEl.appendChild(badge);
+        }
         domWrites += 1;
       }
 
       if (badge.getAttribute("data-finder-cadence-sig") !== cadenceSig) {
         badge.setAttribute("data-finder-cadence-sig", cadenceSig);
-        badge.innerHTML = CADENCE_TIMER_SVG;
-        const schedName = sched.name || sched.id || "Cadence";
+        if (!badge.hasAttribute("data-finder-svg-mounted")) {
+          badge.innerHTML = CADENCE_TIMER_SVG;
+          badge.setAttribute("data-finder-svg-mounted", "1");
+        }
+        const schedName = schedDisplayName || sched.id || "Cadence";
         badge.title = options.isZh
           ? (isRunning
-              ? `定时任务节奏: ${schedName} (运行中) · 单击查看运行记录，Alt+单击立即运行`
+              ? `定时任务节奏: ${schedName} (运行中${runningElapsedText ? ` · 已耗时 ${runningElapsedText}` : ""}) · 单击查看运行记录，Alt+单击立即运行`
               : `定时任务节奏: ${schedName} · 单击查看运行记录，Alt+单击立即运行`)
           : (isRunning
-              ? `Cadence: ${schedName} (Running) · Click to view history, Alt+Click to run now`
+              ? `Cadence: ${schedName} (Running${runningElapsedText ? ` · ${runningElapsedText} elapsed` : ""}) · Click to view history, Alt+Click to run now`
               : `Cadence: ${schedName} · Click to view history, Alt+Click to run now`);
         badge.setAttribute("data-running", isRunning ? "true" : "false");
         Object.assign(badge.style, {
@@ -1479,9 +1873,7 @@ export function decorateSchedulesDomOnDocument(
   }
 
   // Also decorate top active workspace header title (`workspace-header-title`) with cadence badge
-  const headerTitleEl = doc.querySelector<MinimalScheduleDomElement>(
-    '[data-testid="workspace-header-title"]',
-  );
+  const headerTitleEl = findVisibleHeaderTitleElement(doc);
   if (headerTitleEl && headerTitleEl.parentElement) {
     const rawHeaderTitle = (headerTitleEl.textContent ?? "").trim();
     let activeWsId = "";
@@ -1528,7 +1920,11 @@ export function decorateSchedulesDomOnDocument(
         doc.querySelector?.('[data-testid="turn-status-running"]') ||
         (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.closest?.('[data-testid*="working"]')) ||
         (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.closest?.('[data-testid*="running"]')) ||
-        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid*="status-indicator-running"]')),
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid*="status-indicator-running"]')) ||
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid="project-status-badge"][aria-label*="Working" i]')) ||
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid="project-status-badge"][aria-label*="Running" i]')) ||
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid="project-status-badge"][aria-label*="工作中"]')) ||
+        (doc.querySelector?.('[data-testid^="sidebar-workspace-row-"][aria-selected="true"]')?.querySelector?.('[data-testid="project-status-badge"][aria-label*="进行中"]')),
       );
 
       const metaForHeaderWs =
@@ -1548,10 +1944,18 @@ export function decorateSchedulesDomOnDocument(
             (sched.runningRuns && sched.runningRuns > 0) ||
             sched.lastRunStatus === "running",
           );
+      const headerRunningElapsedSec = isRunning
+        ? findRunningCadenceElapsedSec(sched, activeWsId, nowMs)
+        : null;
+      const headerRunningElapsedText = formatRunningCadenceElapsed(
+        headerRunningElapsedSec,
+        options.isZh,
+      );
       const schedStatus = sched.status ?? "active";
       const lastStatus = sched.lastRunStatus ?? "none";
+      const schedDisplayName = (sched.name ?? "").trim();
       const badgeTestId = `workspace-header-cadence-badge-${sched.id}`;
-      const headerCadenceSig = `${sched.id}:${themeKey}:${schedStatus}:${lastStatus}:${isRunning ? 1 : 0}:${options.isZh ? "zh" : "en"}`;
+      const headerCadenceSig = `${sched.id}:${schedDisplayName}:${themeKey}:${schedStatus}:${lastStatus}:${isRunning ? 1 : 0}:${options.isZh ? "zh" : "en"}:${headerRunningElapsedText ? `${elapsedBucket}:${headerRunningElapsedText}` : "no-elapsed"}`;
 
       let badge = existingHeaderBadge;
       if (!badge || badge.getAttribute("data-testid") !== badgeTestId) {
@@ -1570,14 +1974,17 @@ export function decorateSchedulesDomOnDocument(
 
       if (badge.getAttribute("data-finder-header-cadence-sig") !== headerCadenceSig) {
         badge.setAttribute("data-finder-header-cadence-sig", headerCadenceSig);
-        badge.innerHTML = CADENCE_TIMER_SVG;
-        const schedName = sched.name || sched.id || "Cadence";
+        if (!badge.hasAttribute("data-finder-svg-mounted")) {
+          badge.innerHTML = CADENCE_TIMER_SVG;
+          badge.setAttribute("data-finder-svg-mounted", "1");
+        }
+        const schedName = schedDisplayName || sched.id || "Cadence";
         badge.title = options.isZh
           ? (isRunning
-              ? `定时任务节奏: ${schedName} (运行中) · 单击查看运行记录，Alt+单击立即运行`
+              ? `定时任务节奏: ${schedName} (运行中${headerRunningElapsedText ? ` · 已耗时 ${headerRunningElapsedText}` : ""}) · 单击查看运行记录，Alt+单击立即运行`
               : `定时任务节奏: ${schedName} · 单击查看运行记录，Alt+单击立即运行`)
           : (isRunning
-              ? `Cadence: ${schedName} (Running) · Click to view history, Alt+Click to run now`
+              ? `Cadence: ${schedName} (Running${headerRunningElapsedText ? ` · ${headerRunningElapsedText} elapsed` : ""}) · Click to view history, Alt+Click to run now`
               : `Cadence: ${schedName} · Click to view history, Alt+Click to run now`);
         badge.setAttribute("data-running", isRunning ? "true" : "false");
         Object.assign(badge.style, {
@@ -2451,7 +2858,8 @@ async function refreshScheduleCache(
       const res = await client.call(inspectScheduleRunsRpc, {
         onlyWithRuns: false,
         includeWorkspaceNames: false,
-        maxRunsPerSchedule: 30,
+        maxRunsPerSchedule: 12,
+        compactSummary: true,
       });
       if (res.ok) {
         const nextMap = new Map<string, ScheduleRunsSummary>();
@@ -3371,6 +3779,7 @@ export function installDesktopScheduleRunsEnhancer(
   window.addEventListener("keydown", onGlobalShortcut, true);
 
   connectObserverIfEnabled();
+  scheduleDecoratePass();
   const interval = window.setInterval(() => {
     if (readScheduleRunsPreferences().enabled && !domHealthState.circuitBreakerTripped) {
       decorateSchedulesDom();

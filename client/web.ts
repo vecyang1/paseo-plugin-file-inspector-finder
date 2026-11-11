@@ -20,6 +20,7 @@ import {
 } from "./theme-web";
 import {
   findCadenceScheduleForWorkspace,
+  findVisibleHeaderTitleElement,
   triggerRunScheduleNow,
   CADENCE_TIMER_SVG,
 } from "./schedule-runs-web";
@@ -687,6 +688,123 @@ export function parseSidebarWorkspaceRowTestId(testId: string): {
   return { workspaceKey, serverId: "local", workspaceId: workspaceKey };
 }
 
+export function normalizeWorkspaceIdClean(raw?: string | null): string {
+  return (raw ?? "")
+    .trim()
+    .replace(/^sidebar-workspace-row-/, "")
+    .replace(/^(?:local|srv_[^:]+):/, "")
+    .trim();
+}
+
+export function resolveMainPaneRouteWorkspaceId(
+  win?: MinimalWindow | null,
+): string | undefined {
+  const pathname = win?.location?.pathname ?? "";
+  const routeMatch = pathname.match(/\/workspace\/([^/?#]+)/);
+  if (routeMatch?.[1]) {
+    try {
+      return decodeURIComponent(routeMatch[1]);
+    } catch {
+      return routeMatch[1];
+    }
+  }
+  return undefined;
+}
+
+export function findVisibleWorkspaceHeaderTitle(
+  doc: MinimalDocument | null | undefined,
+  win?: MinimalWindow | null,
+): MinimalElement | null {
+  if (!doc) return null;
+  return findVisibleHeaderTitleElement(
+    doc as unknown as Parameters<typeof findVisibleHeaderTitleElement>[0],
+    (win ?? null) as unknown as Window | null,
+  ) as unknown as MinimalElement | null;
+}
+
+export function resolveWorkspaceTitleFromRuntimeStore(
+  workspaceId: string | null | undefined,
+  win?: MinimalWindow | null,
+): string | null {
+  const cleanId = normalizeWorkspaceIdClean(workspaceId);
+  if (!cleanId) return null;
+  const targetWin = (win ?? getWebWindow()) as unknown as MetroWindow | null;
+  if (!targetWin) return null;
+
+  let sessionStore: { getState?: () => { sessions?: Record<string, unknown> } } | null = null;
+  try {
+    const metroMap = getMetroModuleMap(targetWin);
+    if (metroMap && typeof metroMap.values === "function") {
+      for (const m of metroMap.values()) {
+        const candidate = m?.isInitialized ? m.publicModule?.exports?.useSessionStore : null;
+        if (candidate && typeof (candidate as { getState?: unknown }).getState === "function") {
+          sessionStore = candidate as { getState: () => { sessions?: Record<string, unknown> } };
+          break;
+        }
+      }
+    }
+    if (!sessionStore) {
+      const hit = requireMetroExport("useSessionStore", targetWin);
+      const candidate = hit?.exports?.useSessionStore;
+      if (candidate && typeof (candidate as { getState?: unknown }).getState === "function") {
+        sessionStore = candidate as { getState: () => { sessions?: Record<string, unknown> } };
+      }
+    }
+  } catch {
+    // Ignore Metro inspection errors
+  }
+
+  if (!sessionStore?.getState) return null;
+
+  try {
+    const sessions = sessionStore.getState()?.sessions ?? {};
+    for (const rawSess of Object.values(sessions)) {
+      if (!rawSess || typeof rawSess !== "object") continue;
+      const sess = rawSess as {
+        workspaces?: Map<string, Record<string, unknown>> | Record<string, Record<string, unknown>>;
+        agents?: Map<string, Record<string, unknown>> | Record<string, Record<string, unknown>>;
+      };
+      let wsRecord: Record<string, unknown> | undefined;
+      if (sess.workspaces instanceof Map) {
+        wsRecord = sess.workspaces.get(cleanId);
+      } else if (sess.workspaces && typeof sess.workspaces === "object") {
+        wsRecord = (sess.workspaces as Record<string, Record<string, unknown>>)[cleanId];
+      }
+      if (wsRecord) {
+        const wsTitle = typeof wsRecord.title === "string" ? wsRecord.title.trim() : "";
+        if (wsTitle) return wsTitle;
+      }
+
+      // Fallback to primary (non-subagent) agent title belonging to this exact workspaceId
+      const agentsIter: Iterable<Record<string, unknown>> =
+        sess.agents instanceof Map
+          ? sess.agents.values()
+          : sess.agents && typeof sess.agents === "object"
+            ? Object.values(sess.agents)
+            : [];
+      let fallbackAgentTitle = "";
+      for (const ag of agentsIter) {
+        if (!ag || normalizeWorkspaceIdClean(String(ag.workspaceId ?? "")) !== cleanId) continue;
+        const agTitle = typeof ag.title === "string" ? ag.title.trim() : "";
+        if (!agTitle) continue;
+        if (!ag.parentAgentId) {
+          return agTitle;
+        }
+        if (!fallbackAgentTitle) {
+          fallbackAgentTitle = agTitle;
+        }
+      }
+      if (fallbackAgentTitle) return fallbackAgentTitle;
+      if (wsRecord && typeof wsRecord.name === "string" && wsRecord.name.trim() && wsRecord.name !== "main") {
+        return wsRecord.name.trim();
+      }
+    }
+  } catch {
+    // Ignore store state errors
+  }
+  return null;
+}
+
 export function resolveCurrentActiveWorkspaceId(
   doc: MinimalDocument,
   win?: MinimalWindow | null,
@@ -704,14 +822,9 @@ export function resolveCurrentActiveWorkspaceId(
     }
   }
 
-  const pathname = win?.location?.pathname ?? "";
-  const routeMatch = pathname.match(/\/workspace\/([^/?#]+)/);
-  if (routeMatch?.[1]) {
-    try {
-      return decodeURIComponent(routeMatch[1]);
-    } catch {
-      return routeMatch[1];
-    }
+  const routeWsId = resolveMainPaneRouteWorkspaceId(win);
+  if (routeWsId) {
+    return routeWsId;
   }
   const selectedRow = doc.querySelector(
     '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
@@ -820,14 +933,15 @@ function isSingleNodeSkippedInRow(el: MinimalElement): boolean {
   return false;
 }
 
-function isSkippedRowElement(el: MinimalElement): boolean {
+export function isSkippedRowElement(el: MinimalElement): boolean {
   let curr: MinimalElement | null = el;
-  for (let depth = 0; curr && depth < 7; depth += 1) {
+  for (let depth = 0; curr && depth < 10; depth += 1) {
     const tid = curr.getAttribute?.("data-testid") ?? "";
     if (
-      depth > 0 &&
-      (tid.startsWith("sidebar-workspace-row-") || tid.startsWith("workspace-tab-agent_"))
+      tid.startsWith("sidebar-workspace-row-") ||
+      tid.startsWith("workspace-tab-agent_")
     ) {
+      // Stop at the row/tab container boundary so React Native Web's role="button" on the row itself is never skipped.
       break;
     }
     if (isSingleNodeSkippedInRow(curr)) {
@@ -1057,9 +1171,10 @@ export function synchronizeWorkspaceTitleDom(
   if (!doc) return result;
 
   const targetWs = (workspaceId ?? "").trim();
-  const cleanWsId = targetWs.replace(/^(?:local|srv_[^:]+):/, "").trim();
-  const activeWsRaw = resolveCurrentActiveWorkspaceId(doc, win) ?? "";
-  const cleanActiveWs = activeWsRaw.replace(/^(?:local|srv_[^:]+):/, "").trim();
+  const cleanWsId = normalizeWorkspaceIdClean(targetWs);
+  const routeWsRaw = resolveMainPaneRouteWorkspaceId(win);
+  const activeWsRaw = routeWsRaw ?? resolveCurrentActiveWorkspaceId(doc, win) ?? "";
+  const cleanActiveWs = normalizeWorkspaceIdClean(activeWsRaw);
 
   // Record this explicit synchronization to prevent MutationObserver / React hydration from reverting it
   const recordKey = cleanWsId || cleanActiveWs;
@@ -1067,9 +1182,9 @@ export function synchronizeWorkspaceTitleDom(
     recordExplicitTitleSync(recordKey, newTitle);
   }
 
-  // 1. Update top workspace header title if this workspace is active
+  // 1. Update top VISIBLE workspace header title ONLY if this workspace is open in the main pane
   if (!cleanWsId || !cleanActiveWs || cleanWsId === cleanActiveWs) {
-    const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
+    const headerTitleEl = findVisibleWorkspaceHeaderTitle(doc, win);
     if (headerTitleEl) {
       headerTitleEl.textContent = newTitle;
       result.headerUpdated = true;
@@ -1133,15 +1248,19 @@ export function resolveInlineRenameTarget(
     // 2. Top Workspace Header Title (`workspace-header-title`)
     if (testId === "workspace-header-title") {
       if (!curr.parentElement) return null;
-      const workspaceId = resolveCurrentActiveWorkspaceId(doc, win, fallbackWorkspaceId);
+      const workspaceId =
+        resolveMainPaneRouteWorkspaceId(win) ??
+        resolveCurrentActiveWorkspaceId(doc, win, fallbackWorkspaceId);
       if (!workspaceId) return null;
+      const storeTitle = resolveWorkspaceTitleFromRuntimeStore(workspaceId, win);
+      const domTitle = (curr.textContent ?? "").trim();
       return {
         targetKey: `header-title:${workspaceId}`,
         surface: "header-title",
         source: "inline-header",
         workspaceId,
         titleEl: curr,
-        initialTitle: (curr.textContent ?? "").trim(),
+        initialTitle: storeTitle || domTitle,
       };
     }
 
@@ -1188,7 +1307,7 @@ export function resolveLiveInlineRenameTargetByKey(
     return resolveInlineRenameTarget(rowEl, doc, win, fallbackWorkspaceId);
   }
   if (targetKey.startsWith("header-title:")) {
-    const headerEl = doc.querySelector('[data-testid="workspace-header-title"]');
+    const headerEl = findVisibleWorkspaceHeaderTitle(doc, win);
     return resolveInlineRenameTarget(headerEl, doc, win, fallbackWorkspaceId);
   }
   if (targetKey.startsWith("agent-tab:")) {
@@ -1204,7 +1323,7 @@ export function findF2InlineRenameTarget(
   win?: MinimalWindow | null,
   fallbackWorkspaceId?: string,
 ): InlineRenameTarget | null {
-  // If a context menu is open for a workspace, that workspace takes precedence over selectedRow!
+  // 1. If a context menu is open for a workspace, that workspace takes precedence over selectedRow!
   const menuLabelEl = doc.querySelector?.(
     '[data-testid^="sidebar-workspace-menu-labels-"], [data-testid^="sidebar-workspace-menu-rename-"]',
   );
@@ -1226,28 +1345,18 @@ export function findF2InlineRenameTarget(
     }
   }
 
-  const selectedRow = doc.querySelector(
-    '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
-  );
-  if (selectedRow) {
-    const rect = selectedRow.getBoundingClientRect?.();
-    if (!rect || (rect.width > 20 && rect.height > 10)) {
-      const resolved = resolveInlineRenameTarget(selectedRow, doc, win, fallbackWorkspaceId);
-      if (resolved) {
-        return { ...resolved, source: "f2-inline" };
-      }
-    }
-  }
-
+  // 2. Match the active workspace row FIRST before any generic `[aria-selected="true"]` row,
+  // preventing a stale `aria-selected="true"` row from another session from hijacking F2 / Option+D!
   const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, fallbackWorkspaceId);
-  if (activeWsId) {
+  const cleanActiveWsId = normalizeWorkspaceIdClean(activeWsId);
+  if (cleanActiveWsId) {
     const rows = doc.querySelectorAll('[data-testid^="sidebar-workspace-row-"]');
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i];
       if (!row) continue;
       const tid = row.getAttribute?.("data-testid") ?? "";
       const parsed = parseSidebarWorkspaceRowTestId(tid);
-      if (parsed?.workspaceId === activeWsId) {
+      if (normalizeWorkspaceIdClean(parsed?.workspaceId) === cleanActiveWsId) {
         const rect = row.getBoundingClientRect?.();
         if (!rect || (rect.width > 20 && rect.height > 10)) {
           const resolved = resolveInlineRenameTarget(row, doc, win, fallbackWorkspaceId);
@@ -1259,13 +1368,37 @@ export function findF2InlineRenameTarget(
     }
   }
 
-  const headerTitle = doc.querySelector('[data-testid="workspace-header-title"]');
-  if (headerTitle) {
-    const rect = headerTitle.getBoundingClientRect?.();
-    if (!rect || (rect.width > 20 && rect.height > 10)) {
-      const resolved = resolveInlineRenameTarget(headerTitle, doc, win, fallbackWorkspaceId);
-      if (resolved) {
-        return { ...resolved, source: "f2-inline" };
+  // 3. Fallback to `aria-selected="true"` row ONLY when no conflicting activeWsId is present
+  const selectedRow = doc.querySelector(
+    '[data-testid^="sidebar-workspace-row-"][aria-selected="true"]',
+  );
+  if (selectedRow) {
+    const selectedTid = selectedRow.getAttribute?.("data-testid") ?? "";
+    const selectedParsed = parseSidebarWorkspaceRowTestId(selectedTid);
+    const cleanSelectedWsId = normalizeWorkspaceIdClean(selectedParsed?.workspaceId);
+    if (!cleanActiveWsId || !cleanSelectedWsId || cleanSelectedWsId === cleanActiveWsId) {
+      const rect = selectedRow.getBoundingClientRect?.();
+      if (!rect || (rect.width > 20 && rect.height > 10)) {
+        const resolved = resolveInlineRenameTarget(selectedRow, doc, win, fallbackWorkspaceId);
+        if (resolved) {
+          return { ...resolved, source: "f2-inline" };
+        }
+      }
+    }
+  }
+
+  // 4. Visible active header title (skipping kept-alive hidden NativeScreen headers!)
+  const routeWsId = resolveMainPaneRouteWorkspaceId(win);
+  const cleanRouteWsId = normalizeWorkspaceIdClean(routeWsId);
+  if (!cleanActiveWsId || !cleanRouteWsId || cleanActiveWsId === cleanRouteWsId) {
+    const headerTitle = findVisibleWorkspaceHeaderTitle(doc, win);
+    if (headerTitle) {
+      const rect = headerTitle.getBoundingClientRect?.();
+      if (!rect || (rect.width > 20 && rect.height > 10)) {
+        const resolved = resolveInlineRenameTarget(headerTitle, doc, win, fallbackWorkspaceId);
+        if (resolved) {
+          return { ...resolved, source: "f2-inline" };
+        }
       }
     }
   }
@@ -2130,8 +2263,9 @@ export function locateProjectInSidebar(
 
 export function extractActiveWorkspaceHeaderProjectName(
   doc: MinimalDocument,
+  win?: MinimalWindow | null,
 ): string | null {
-  const headerTitle = doc.querySelector('[data-testid="workspace-header-title"]');
+  const headerTitle = findVisibleWorkspaceHeaderTitle(doc, win);
   if (!headerTitle) return null;
   const sibling = headerTitle.nextSibling ?? null;
   const siblingText = (sibling?.textContent ?? "").trim();
@@ -2250,11 +2384,29 @@ export function findSidebarWorkspaceRow(
         return row;
       }
     }
+    const cleanTarget = normalizeWorkspaceIdClean(target);
+    const directCandidates = [
+      doc.querySelector?.(`[data-testid="sidebar-workspace-row-${target}"]`) ?? null,
+      cleanTarget
+        ? (doc.querySelector?.(`[data-testid="sidebar-workspace-row-local:${cleanTarget}"]`) ?? null)
+        : null,
+    ];
+    for (const candidate of directCandidates) {
+      if (!candidate) continue;
+      const tid = candidate.getAttribute?.("data-testid") ?? "";
+      if (matchesWorkspaceRowTestId(tid, target)) {
+        return candidate;
+      }
+    }
+    // CRITICAL INVARIANT: When an explicit workspaceId is requested and its row is not mounted
+    // (e.g. collapsed project folder or hidden behind "Show more"), MUST return null — NEVER
+    // fall back to `[aria-selected="true"]` of a different workspace!
+    return null;
   }
 
-  // Fallback: active workspace resolved from document route / state
+  // Fallback ONLY when no explicit workspaceId was requested
   const activeWs = resolveCurrentActiveWorkspaceId(doc);
-  if (activeWs && activeWs !== target) {
+  if (activeWs) {
     const rows = doc.querySelectorAll?.('[data-testid^="sidebar-workspace-row-"]') ?? [];
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i];
@@ -3794,6 +3946,17 @@ export async function toggleCurrentSessionDone(
     return null;
   }
 
+  const cleanEffectiveWsId = normalizeWorkspaceIdClean(effectiveWsId);
+
+  // Strict workspace identity guard: NEVER read or mutate an f2Target belonging to another workspace!
+  const matchingF2Target =
+    f2Target &&
+    (!cleanEffectiveWsId ||
+      !f2Target.workspaceId ||
+      normalizeWorkspaceIdClean(f2Target.workspaceId) === cleanEffectiveWsId)
+      ? f2Target
+      : null;
+
   const sidebarRow = effectiveWsId ? findSidebarWorkspaceRow(doc, effectiveWsId) : null;
   const sidebarRowTid = sidebarRow?.getAttribute?.("data-testid") ?? "";
   const sidebarParsed = parseSidebarWorkspaceRowTestId(sidebarRowTid);
@@ -3801,52 +3964,94 @@ export async function toggleCurrentSessionDone(
   const sidebarTitleEl = sidebarRow
     ? findSidebarRowTitleElement(sidebarRow, rowWorkspaceKey)
     : null;
-  const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]') ?? null;
 
-  let currentTitle = (
-    f2Target?.initialTitle ||
-    sidebarTitleEl?.textContent ||
-    headerTitleEl?.textContent ||
-    ""
-  ).trim();
+  // Only read or mutate the visible header title when the main pane is actually showing effectiveWsId
+  // (never read hidden kept-alive NativeScreen headers or another session's header!)
+  const routeWsId = resolveMainPaneRouteWorkspaceId(win);
+  const cleanRouteWsId = normalizeWorkspaceIdClean(routeWsId);
+  const isMainPaneForEffectiveWs =
+    !cleanEffectiveWsId || !cleanRouteWsId || cleanRouteWsId === cleanEffectiveWsId;
+  const headerTitleEl = isMainPaneForEffectiveWs
+    ? findVisibleWorkspaceHeaderTitle(doc, win)
+    : null;
 
-  // Guard against a 1-char project monogram ("A", "2") or corrupted monogram ("d A", "d 2")
-  // being mistaken for the session title when a real title is available in header or metadata
-  const looksLikeCorruptedMonogram = /^(?:d\s+)*[A-Za-z0-9]$/.test(currentTitle);
-  if (looksLikeCorruptedMonogram) {
-    const headerTxt = (headerTitleEl?.textContent ?? "").trim();
-    if (headerTxt.length > 3 && !/^(?:d\s+)*[A-Za-z0-9]$/.test(headerTxt)) {
-      currentTitle = headerTxt;
-    }
+  const isMonogramLike = (val: string): boolean => /^(?:d\s+)*[A-Za-z0-9]$/.test(val.trim());
+
+  // Keyed-first authoritative title resolution for effectiveWsId:
+  // 1. Agent-tab surface (when explicitly renaming an agent tab)
+  // 2. Keyed sidebar row (`sidebar-workspace-row-*:${effectiveWsId}`)
+  // 3. Keyed matching sidebar f2Target
+  // 4. Keyed Paseo live `useSessionStore` (`workspaces.get(cleanEffectiveWsId)`)
+  // 5. Keyed server metadata RPC (`onFetchThreadMetadata(cleanEffectiveWsId)`)
+  // 6. Visible active screen header (`headerTitleEl`), ONLY when main pane matches effectiveWsId
+  let currentTitle = "";
+
+  if (matchingF2Target?.surface === "agent-tab" && matchingF2Target.initialTitle.trim()) {
+    currentTitle = matchingF2Target.initialTitle.trim();
   }
 
-  if ((!currentTitle || looksLikeCorruptedMonogram) && callbacks?.onFetchThreadMetadata && effectiveWsId) {
+  const sidebarTxt = (sidebarTitleEl?.textContent ?? "").trim();
+  if (!currentTitle && sidebarTxt && !isMonogramLike(sidebarTxt)) {
+    currentTitle = sidebarTxt;
+  }
+
+  const matchingF2SidebarTxt =
+    matchingF2Target?.surface === "sidebar-row" ? matchingF2Target.initialTitle.trim() : "";
+  if (!currentTitle && matchingF2SidebarTxt && !isMonogramLike(matchingF2SidebarTxt)) {
+    currentTitle = matchingF2SidebarTxt;
+  }
+
+  const storeTitle = cleanEffectiveWsId
+    ? (resolveWorkspaceTitleFromRuntimeStore(cleanEffectiveWsId, win) ?? "").trim()
+    : "";
+  if (!currentTitle && storeTitle && !isMonogramLike(storeTitle)) {
+    currentTitle = storeTitle;
+  }
+
+  if (!currentTitle && callbacks?.onFetchThreadMetadata && effectiveWsId) {
     try {
       const snap = await callbacks.onFetchThreadMetadata(effectiveWsId);
+      const snapWsClean = normalizeWorkspaceIdClean(snap?.workspaceId);
       const snapTitle = (snap?.workspaceTitle ?? "").trim();
-      if (snapTitle && (!looksLikeCorruptedMonogram || snapTitle.length > currentTitle.length)) {
+      if (
+        snapTitle &&
+        (!cleanEffectiveWsId || !snapWsClean || snapWsClean === cleanEffectiveWsId) &&
+        !isMonogramLike(snapTitle)
+      ) {
         currentTitle = snapTitle;
       }
     } catch {
-      // Fallback to existing currentTitle
+      // Fallback to visible header / monogram recovery below
     }
   }
 
-  if (!currentTitle && effectiveWsId) {
-    currentTitle = effectiveWsId;
+  const headerTxt = (headerTitleEl?.textContent ?? "").trim();
+  if (!currentTitle && headerTxt && !isMonogramLike(headerTxt)) {
+    currentTitle = headerTxt;
+  }
+
+  // Fallback for legitimate 1-char session titles ("A") when all authoritative sources agree or are absent
+  if (!currentTitle) {
+    currentTitle =
+      storeTitle ||
+      sidebarTxt ||
+      matchingF2SidebarTxt ||
+      headerTxt ||
+      effectiveWsId;
   }
 
   const prefix = options?.prefix ?? "d ";
   const { newTitle, action } = computeDoneToggledTitle(currentTitle, prefix);
 
-  // Immediate optimistic DOM updates — synchronized across BOTH header and sidebar simultaneously
+  // Immediate optimistic DOM updates — synchronized across BOTH header (if active) and sidebar simultaneously
   synchronizeWorkspaceTitleDom(doc, win, effectiveWsId, newTitle);
   if (
-    f2Target?.titleEl &&
-    !isSkippedRowElement(f2Target.titleEl) &&
-    (!f2Target.titleEl.children || f2Target.titleEl.children.length === 0)
+    matchingF2Target?.titleEl &&
+    (matchingF2Target.surface !== "header-title" || isMainPaneForEffectiveWs) &&
+    !isSkippedRowElement(matchingF2Target.titleEl) &&
+    (!matchingF2Target.titleEl.children || matchingF2Target.titleEl.children.length === 0)
   ) {
-    f2Target.titleEl.textContent = newTitle;
+    matchingF2Target.titleEl.textContent = newTitle;
   }
   if (
     sidebarTitleEl &&
@@ -3856,7 +4061,7 @@ export async function toggleCurrentSessionDone(
   ) {
     sidebarTitleEl.textContent = newTitle;
   }
-  if (headerTitleEl && headerTitleEl.textContent !== newTitle) {
+  if (isMainPaneForEffectiveWs && headerTitleEl && headerTitleEl.textContent !== newTitle) {
     headerTitleEl.textContent = newTitle;
   }
 
@@ -3870,7 +4075,7 @@ export async function toggleCurrentSessionDone(
     try {
       await callbacks.onRenameThread(newTitle, {
         workspaceId: effectiveWsId,
-        agentId: f2Target?.surface === "agent-tab" ? f2Target.agentId : undefined,
+        agentId: matchingF2Target?.surface === "agent-tab" ? matchingF2Target.agentId : undefined,
         source: "mark-done-shortcut",
       });
     } catch {
@@ -6882,13 +7087,17 @@ export function installDesktopRevealHelpers(
     if (!activeInlineSession) {
       const pendingSync = getActiveExplicitTitleSync();
       if (pendingSync) {
+        const routeWsId = resolveMainPaneRouteWorkspaceId(win);
         const activeWsId = resolveCurrentActiveWorkspaceId(doc, win, callbacks.getFallbackWorkspaceId?.());
-        const cleanActive = (activeWsId ?? "").replace(/^(?:local|srv_[^:]+):/, "").trim().toLowerCase();
+        const cleanRoute = normalizeWorkspaceIdClean(routeWsId).toLowerCase();
+        const cleanActive = normalizeWorkspaceIdClean(activeWsId).toLowerCase();
         if (cleanActive && cleanActive === pendingSync.workspaceKey) {
           const syncTitle = pendingSync.title;
-          const headerTitleEl = doc.querySelector?.('[data-testid="workspace-header-title"]');
-          if (headerTitleEl && headerTitleEl.textContent !== syncTitle) {
-            headerTitleEl.textContent = syncTitle;
+          if (!cleanRoute || cleanRoute === pendingSync.workspaceKey) {
+            const headerTitleEl = findVisibleWorkspaceHeaderTitle(doc, win);
+            if (headerTitleEl && headerTitleEl.textContent !== syncTitle) {
+              headerTitleEl.textContent = syncTitle;
+            }
           }
           const row = findSidebarWorkspaceRow(doc, activeWsId);
           if (row) {
@@ -7411,17 +7620,38 @@ export function installDesktopRevealHelpers(
     if (
       prefs.enableMarkDoneShortcut &&
       isMarkDoneKeyboardEvent(ke) &&
-      !activeInlineSession
+      !activeInlineSession &&
+      !doc.querySelector?.(
+        '[data-testid="command-center-panel"], [data-testid="command-center-input"], [role="dialog"][aria-modal="true"]',
+      )
     ) {
-      ke.preventDefault();
-      ke.stopPropagation?.();
-      void toggleCurrentSessionDone({
-        doc,
-        win,
-        callbacks,
-        prefix: prefs.markDonePrefix ?? "d ",
-      });
-      return;
+      const keyTarget = (ke.target ?? doc.activeElement ?? null) as MinimalElement | null;
+      const inNonComposerSingleLineInput = Boolean(
+        keyTarget?.closest?.("input") && !isInsideSidebarOrWorkspaceRow(keyTarget, doc),
+      );
+      const inCodeEditor = Boolean(
+        keyTarget?.closest?.(
+          '.cm-editor, .cm-content, .cm-line, .monaco-editor, [contenteditable="true"], [contenteditable="plaintext-only"]',
+        ),
+      );
+      if (!inNonComposerSingleLineInput && !inCodeEditor) {
+        ke.preventDefault();
+        ke.stopPropagation?.();
+        const recentSidebarClickWsId =
+          !hasOpenWorkspaceContextMenu(doc) &&
+          lastSidebarDirectClickWsId &&
+          Date.now() - lastSidebarDirectClickAtMs < 1500
+            ? lastSidebarDirectClickWsId
+            : undefined;
+        void toggleCurrentSessionDone({
+          workspaceId: recentSidebarClickWsId,
+          doc,
+          win,
+          callbacks,
+          prefix: prefs.markDonePrefix ?? "d ",
+        });
+        return;
+      }
     }
     // Delete or Backspace press once archives clicked/selected sidebar session (same as ⌘+⇧+del)
     if (
