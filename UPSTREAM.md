@@ -40,6 +40,7 @@ What [@vecyang1](https://github.com/vecyang1) has sent upstream to [getpaseo/pas
 |---|---|---|---|---|
 | [#6292](https://github.com/getpaseo/paseo/discussions/6292) | Workflow: more local speech models (including Chinese) and migration to new OpenAI audio APIs | 1 | 3 | 2026-10-07 |
 | [#6123](https://github.com/getpaseo/paseo/discussions/6123) | File preview tab: open with default app / reveal in file manager | 2 | 1 | 2026-10-05 |
+| [#5896](https://github.com/getpaseo/paseo/discussions/5896#discussioncomment-19539271) | Add pdf preview? (`doc-inspector` multi-document scroll, drag & side-by-side compare) | 12 | 4 | 2026-10-01 |
 | [#4636](https://github.com/getpaseo/paseo/discussions/4636) | [FR] Support setting hotkey for "Rename workspace" | 1 | 1 | 2026-09-10 |
 
 ## Running locally until upstream lands
