@@ -1703,46 +1703,64 @@ async function loadQuickJumpAgentsByWorkspace(): Promise<Map<string, QuickJumpAg
   try {
     const agentsRoot = path.join(os.homedir(), ".paseo", "agents");
     const buckets = await fs.readdir(agentsRoot, { withFileTypes: true });
+    const filePaths: string[] = [];
     for (const bucket of buckets) {
       if (!bucket.isDirectory()) continue;
       const bPath = path.join(agentsRoot, bucket.name);
-      const files = await fs.readdir(bPath);
-      for (const f of files) {
-        if (!f.endsWith(".json")) continue;
-        try {
-          const rec = JSON.parse(await fs.readFile(path.join(bPath, f), "utf8")) as {
-            id?: string;
-            workspaceId?: string;
-            title?: string | null;
-            archivedAt?: string | null;
-            labels?: Record<string, string>;
-            persistence?: {
-              sessionId?: string | null;
-              metadata?: {
-                pluginProviderPersistence?: {
-                  data?: { conversationId?: string | null };
+      try {
+        const files = await fs.readdir(bPath);
+        for (const f of files) {
+          if (f.endsWith(".json")) {
+            filePaths.push(path.join(bPath, f));
+          }
+        }
+      } catch {
+        // Skip unreadable bucket
+      }
+    }
+    const CHUNK_SIZE = 32;
+    for (let i = 0; i < filePaths.length; i += CHUNK_SIZE) {
+      const slice = filePaths.slice(i, i + CHUNK_SIZE);
+      const records = await Promise.all(
+        slice.map(async (filePath) => {
+          try {
+            const content = await fs.readFile(filePath, "utf8");
+            return JSON.parse(content) as {
+              id?: string;
+              workspaceId?: string;
+              title?: string | null;
+              archivedAt?: string | null;
+              labels?: Record<string, string>;
+              persistence?: {
+                sessionId?: string | null;
+                metadata?: {
+                  pluginProviderPersistence?: {
+                    data?: { conversationId?: string | null };
+                  };
                 };
               };
             };
-          };
-          if (!rec.id || !rec.workspaceId || rec.archivedAt) continue;
-          if (rec.labels?.["paseo.internal"] === "true") continue;
-          const aid = rec.id.trim();
-          const wsId = rec.workspaceId.trim();
-          const convId =
-            rec.persistence?.metadata?.pluginProviderPersistence?.data?.conversationId ?? null;
-          const list = byWorkspaceId.get(wsId) ?? [];
-          list.push({
-            agentId: aid,
-            shortId: aid.slice(0, 8),
-            workspaceId: wsId,
-            title: String(rec.title ?? "").trim() || aid.slice(0, 8),
-            providerSessionId: typeof convId === "string" && convId.trim() ? convId.trim() : null,
-          });
-          byWorkspaceId.set(wsId, list);
-        } catch {
-          // Ignore malformed agent file
-        }
+          } catch {
+            return null;
+          }
+        }),
+      );
+      for (const rec of records) {
+        if (!rec || !rec.id || !rec.workspaceId || rec.archivedAt) continue;
+        if (rec.labels?.["paseo.internal"] === "true") continue;
+        const aid = rec.id.trim();
+        const wsId = rec.workspaceId.trim();
+        const convId =
+          rec.persistence?.metadata?.pluginProviderPersistence?.data?.conversationId ?? null;
+        const list = byWorkspaceId.get(wsId) ?? [];
+        list.push({
+          agentId: aid,
+          shortId: aid.slice(0, 8),
+          workspaceId: wsId,
+          title: String(rec.title ?? "").trim() || aid.slice(0, 8),
+          providerSessionId: typeof convId === "string" && convId.trim() ? convId.trim() : null,
+        });
+        byWorkspaceId.set(wsId, list);
       }
     }
   } catch {

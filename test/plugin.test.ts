@@ -2507,6 +2507,92 @@ test("18. Schedule Runs Inspector & 1-click session unarchive/open (handleInspec
       assert.equal(evolvedDry.action, "auto-evolve");
       assert.ok(evolvedDry.message.includes("[dry-run]"));
     }
+
+    // 6) compactSummary strips prompt/output/recentRuns while keeping previews, fallback standbySlug, & live activeTurn.startedAt overlay
+    const fallbackSlugSched = {
+      id: "fb990011",
+      name: "AG · Fallback Standby Twin",
+      prompt: "Intro line\n[ag-standby slug=fallback-no-caret] without caret or sha.",
+      cadence: { type: "cron", expression: "0 10 * * *", timezone: "Asia/Shanghai" },
+      target: {
+        type: "new-agent",
+        config: { provider: "antigravity", cwd: "/Users/test/fb", modeId: "full-access", model: "gemini-3.8-flash-high" },
+      },
+      status: "active",
+      runs: [
+        {
+          id: "fb-run-1",
+          scheduledFor: "2026-11-11T04:00:00.000Z",
+          startedAt: "2026-11-11T04:00:01.000Z",
+          endedAt: "2026-11-11T04:01:00.000Z",
+          status: "succeeded",
+          agentId: "agent-fb-1",
+          workspaceId: "wks_fb_old",
+          output: "Long verbose markdown output ".repeat(30),
+          error: null,
+        },
+      ],
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "fb990011.json"),
+      JSON.stringify(fallbackSlugSched, null, 2),
+      "utf-8",
+    );
+
+    const liveAgentStartedAt = "2026-11-11T05:00:17.744Z";
+    const liveMockContext = {
+      paseo: {
+        workspaces: {
+          async list() {
+            return { entries: [{ id: "wks_live_run", title: "Live Running Standby" }] };
+          },
+        },
+        agents: {
+          async list() {
+            return {
+              entries: [
+                {
+                  agent: {
+                    id: "agt_live_turn",
+                    workspaceId: "wks_live_run",
+                    labels: { "paseo.schedule-id": "fb990011" },
+                    status: "running",
+                    createdAt: "2026-11-11T05:00:10.000Z",
+                    activeTurn: { turnId: "trn_1", startedAt: liveAgentStartedAt },
+                    archivedAt: null,
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    } as never;
+
+    const compactInspected = await handleInspectScheduleRuns(
+      {
+        onlyWithRuns: false,
+        includeWorkspaceNames: false,
+        maxRunsPerSchedule: 2,
+        compactSummary: true,
+      },
+      liveMockContext,
+      { schedulesDir: tmpDir, bridge: mockBridge },
+    );
+    assert.equal(compactInspected.ok, true);
+    assert.deepEqual(compactInspected.recentRuns, [], "compactSummary must omit global recentRuns");
+    const fbSummary = compactInspected.schedules.find((s) => s.id === "fb990011");
+    assert.ok(fbSummary, "Fallback slug schedule must be present");
+    assert.equal(fbSummary.standbySlug, "fallback-no-caret", "STANDBY_FALLBACK_SLUG_RE must match [ag-standby slug=...] without ^ or sha");
+    assert.equal(fbSummary.prompt, "", "compactSummary must strip full prompt");
+    assert.ok(fbSummary.promptPreview.length > 0, "compactSummary must keep promptPreview");
+    assert.equal(fbSummary.lastRunStatus, "running", "Live activeTurn overlay must mark schedule running");
+    assert.equal(fbSummary.runs[0]?.status, "running");
+    assert.equal(fbSummary.runs[0]?.startedAt, liveAgentStartedAt, "Live activeTurn.startedAt must populate running entry startedAt");
+    assert.equal(fbSummary.runs[1]?.output, "", "compactSummary must strip historical run output");
+    assert.ok(fbSummary.runs[1]?.outputPreview.includes("Long verbose"), "compactSummary must retain outputPreview");
+    assert.equal(compactInspected.workspaceScheduleMap.wks_live_run?.isRunning, true);
+    assert.equal(compactInspected.workspaceScheduleMap.wks_live_run?.scheduleId, "fb990011");
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
@@ -9260,6 +9346,270 @@ test("60. Paseo 0.15.4 Cadence Stopwatch Badge in Sidebar & Header: role='button
     onOpenDrawer: () => {},
   });
   assert.equal(pass2.domWrites, 0, "Pass 2 must produce 0 dom writes (MutationObserver idempotency)");
+
+  // 7. 15s elapsedBucket updates tooltip text when time advances by 15s without re-injecting SVG
+  const pass15sLater = decorateSchedulesDomOnDocument(fullDoc as unknown as MinimalScheduleDomDocument, {
+    schedulesById: scheduleMap,
+    totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 10 },
+    isZh: true,
+    nowMs: fixedNowMs + 15_000,
+    onOpenDrawer: () => {},
+  });
+  assert.ok(pass15sLater.domWrites > 0, "Advancing across a 15s bucket must refresh running elapsed title");
+  assert.ok(
+    sidebarBadge.title?.includes("已耗时 1分42秒"),
+    `Updated 15s bucket title must show 1m42s elapsed. Actual: ${sidebarBadge.title}`,
+  );
+
+  // 8. Before server RPC arrives (t=0ms), useSessionStore turn.startedAt immediately resolves schedule & elapsed time,
+  // and later cadenceSig + headerCadenceSig upgrade provisional name to full server schedule name even when runningElapsedText is empty.
+  resetScheduleRunsCacheForTesting();
+  try {
+    const storeWin = {
+      __metroModules: {
+        sessionMod: {
+          isInitialized: true,
+          publicModule: {
+            exports: {
+              useSessionStore: {
+                getState: () => ({
+                  sessions: {
+                    sess1: {
+                      agents: new Map([
+                        [
+                          "agt_live",
+                          {
+                            id: "agt_live",
+                            workspaceId: "local:wks_t0_test",
+                            status: "running",
+                            createdAt: "2026-11-11T00:00:00.000Z",
+                            turn: { phase: "open", turnId: "t1", startedAt: "2026-11-11T00:00:10.000Z" },
+                            labels: { "paseo.schedule-id": "0ebbb1c9" },
+                            title: "[ag-standby slug=early-store-watch sha=abcdef123456]",
+                          },
+                        ],
+                      ]),
+                    },
+                  },
+                }),
+              },
+            },
+          },
+        },
+      },
+    } as unknown as Window;
+
+    const earlyResolved = findCadenceScheduleForWorkspace("local:wks_t0_test", "Run early check", storeWin);
+    assert.ok(earlyResolved, "Must resolve schedule from useSessionStore at t=0ms before RPC loads");
+    assert.equal(earlyResolved.id, "0ebbb1c9");
+    assert.equal(earlyResolved.name, "AG · early-store-watch", "Must extract standbySlug for human-readable name before RPC loads");
+    const earlyElapsed = findRunningCadenceElapsedSec(
+      earlyResolved,
+      "wks_t0_test",
+      Date.parse("2026-11-11T00:01:00.000Z"),
+    );
+    assert.equal(earlyElapsed, 50, "Must extract turn.startedAt at t=0ms so elapsed duration renders immediately");
+
+    // Verify provisional -> hydrated schedule name upgrade even when runningElapsedText is empty (e.g. finished/missing startedAt)
+    const upgradeRow = makeCadenceTestNode("div", {
+      "data-testid": "sidebar-workspace-row-local:wks_upgrade_name",
+      role: "button",
+    });
+    const upgradeTitle = makeCadenceTestNode("div", { dir: "auto" });
+    upgradeTitle.textContent = "Untitled";
+    upgradeRow.appendChild(upgradeTitle);
+    const upgradeHeader = makeCadenceTestNode("div", { "data-testid": "workspace-header-title" });
+    upgradeHeader.textContent = "Run upgrade test";
+    upgradeHeader.style.display = "block";
+    const upgradeHeaderWrap = makeCadenceTestNode("div");
+    upgradeHeaderWrap.appendChild(upgradeHeader);
+    const upgradeDoc = {
+      body: makeCadenceTestNode("body"),
+      createElement: (tag: string) => makeCadenceTestNode(tag),
+      getElementById: () => null,
+      querySelector: (sel: string) => {
+        if (sel.includes("workspace-header-title")) return upgradeHeader;
+        if (sel.includes('[aria-selected="true"]')) return upgradeRow;
+        return null;
+      },
+      querySelectorAll: (sel: string) => {
+        if (sel.includes("sidebar-workspace-row-")) return [upgradeRow];
+        if (sel === '[data-testid="workspace-header-title"]') return [upgradeHeader];
+        return [];
+      },
+    };
+
+    const provisionalSched = {
+      id: "0ebbb1c9",
+      name: "0ebbb1c9",
+      status: "active",
+      lastRunStatus: "succeeded",
+      runningRuns: 0,
+      runs: [],
+    } as unknown as ScheduleRunsSummary;
+
+    decorateSchedulesDomOnDocument(upgradeDoc as unknown as MinimalScheduleDomDocument, {
+      schedulesById: new Map(),
+      totals: { totalSchedules: 0, schedulesWithRuns: 0, totalRuns: 0 },
+      isZh: false,
+      nowMs: fixedNowMs,
+      onOpenDrawer: () => {},
+      findCadenceForWorkspace: () => provisionalSched,
+    });
+    const initialBadge = upgradeRow.querySelector('[data-testid="sidebar-workspace-cadence-badge-wks_upgrade_name"]');
+    const initialHeaderBadge = upgradeHeaderWrap.querySelector('[data-testid="workspace-header-cadence-badge-0ebbb1c9"]');
+    assert.ok(initialBadge?.title?.includes("Cadence: 0ebbb1c9 "));
+    assert.ok(initialHeaderBadge?.title?.includes("Cadence: 0ebbb1c9 "));
+
+    const hydratedSched = {
+      ...provisionalSched,
+      name: "AG · Antigravity Webhook Hub — Sentinel",
+    };
+    const hydratedPass = decorateSchedulesDomOnDocument(upgradeDoc as unknown as MinimalScheduleDomDocument, {
+      schedulesById: new Map([["0ebbb1c9", hydratedSched]]),
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 5 },
+      isZh: false,
+      nowMs: fixedNowMs,
+      onOpenDrawer: () => {},
+      findCadenceForWorkspace: () => hydratedSched,
+    });
+    assert.ok(hydratedPass.domWrites > 0, "Hydrating real schedule name must update cadenceSig & headerCadenceSig even when elapsed is empty");
+    assert.ok(
+      initialBadge?.title?.includes("Cadence: AG · Antigravity Webhook Hub — Sentinel"),
+      `Sidebar badge title must upgrade to full name. Actual: ${initialBadge?.title}`,
+    );
+    assert.ok(
+      initialHeaderBadge?.title?.includes("Cadence: AG · Antigravity Webhook Hub — Sentinel"),
+      `Header badge title must upgrade to full name. Actual: ${initialHeaderBadge?.title}`,
+    );
+
+    const hydratedIdempotent = decorateSchedulesDomOnDocument(upgradeDoc as unknown as MinimalScheduleDomDocument, {
+      schedulesById: new Map([["0ebbb1c9", hydratedSched]]),
+      totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 5 },
+      isZh: false,
+      nowMs: fixedNowMs,
+      onOpenDrawer: () => {},
+      findCadenceForWorkspace: () => hydratedSched,
+    });
+    assert.equal(hydratedIdempotent.domWrites, 0, "Post-upgrade Pass 2 must have 0 writes");
+
+    // 9. Real useSessionStore stores timestamps as JS Date instances (not ISO strings):
+    // verify findCadenceScheduleForWorkspace and findRunningCadenceElapsedSec handle Date objects & numeric timestamps seamlessly
+    const dateStoreWin = {
+      __metroModules: {
+        sessionMod: {
+          isInitialized: true,
+          publicModule: {
+            exports: {
+              useSessionStore: {
+                getState: () => ({
+                  sessions: {
+                    sess1: {
+                      agents: new Map([
+                        [
+                          "agt_date_obj",
+                          {
+                            id: "agt_date_obj",
+                            workspaceId: "local:wks_date_test",
+                            status: "running",
+                            createdAt: new Date("2026-11-11T00:00:00.000Z"),
+                            turn: { phase: "open", turnId: "t2", startedAt: new Date("2026-11-11T00:00:20.000Z") },
+                            labels: { "paseo.schedule-id": "sched_date_1" },
+                            title: "[ag-standby slug=date-obj-standby sha=1234567890ab]",
+                          },
+                        ],
+                      ]),
+                    },
+                  },
+                }),
+              },
+            },
+          },
+        },
+      },
+    } as unknown as Window;
+
+    const dateResolved = findCadenceScheduleForWorkspace("local:wks_date_test", "Run date check", dateStoreWin);
+    assert.ok(dateResolved, "Must resolve schedule from Date-typed useSessionStore at t=0ms");
+    assert.equal(dateResolved.id, "sched_date_1");
+    assert.equal(dateResolved.name, "AG · date-obj-standby");
+    const dateElapsed = findRunningCadenceElapsedSec(
+      dateResolved,
+      "wks_date_test",
+      Date.parse("2026-11-11T00:01:00.000Z"),
+    );
+    assert.equal(dateElapsed, 40, "Must calculate elapsed seconds from Date-typed turn.startedAt (40s)");
+
+    // 10. Live running turn from useSessionStore must NOT be clobbered by stale cachedWorkspaceScheduleMap
+    // even on project-grouped sidebar rows (where isInWorkingGroup is false)
+    const staleMapRow = makeCadenceTestNode("div", {
+      "data-testid": "sidebar-workspace-row-local:wks_date_test",
+      role: "button",
+    });
+    const staleMapTitle = makeCadenceTestNode("div", { dir: "auto" });
+    staleMapTitle.textContent = "Run date check";
+    staleMapRow.appendChild(staleMapTitle);
+    const staleMapHeader = makeCadenceTestNode("div", { "data-testid": "workspace-header-title" });
+    staleMapHeader.textContent = "Run date check";
+    staleMapHeader.style.display = "block";
+    const staleMapHeaderWrap = makeCadenceTestNode("div");
+    staleMapHeaderWrap.appendChild(staleMapHeader);
+    const staleMapDoc = {
+      body: makeCadenceTestNode("body"),
+      createElement: (tag: string) => makeCadenceTestNode(tag),
+      getElementById: () => null,
+      querySelector: (sel: string) => {
+        if (sel.includes("workspace-header-title")) return staleMapHeader;
+        if (sel.includes('[aria-selected="true"]')) return staleMapRow;
+        return null;
+      },
+      querySelectorAll: (sel: string) => {
+        if (sel.includes("sidebar-workspace-row-")) return [staleMapRow];
+        if (sel === '[data-testid="workspace-header-title"]') return [staleMapHeader];
+        return [];
+      },
+    };
+
+    // Stale server cache indicates previously succeeded / not running
+    setCachedSchedulesForTesting(
+      new Map([["sched_date_1", dateResolved]]),
+      {
+        wks_date_test: {
+          scheduleId: "sched_date_1",
+          scheduleName: "AG · date-obj-standby",
+          runStatus: "succeeded",
+          isRunning: false,
+        },
+      },
+    );
+
+    const prevWindow = (globalThis as any).window;
+    (globalThis as any).window = dateStoreWin;
+    try {
+      decorateSchedulesDomOnDocument(staleMapDoc as unknown as MinimalScheduleDomDocument, {
+        schedulesById: new Map([["sched_date_1", dateResolved]]),
+        totals: { totalSchedules: 1, schedulesWithRuns: 1, totalRuns: 1 },
+        isZh: false,
+        nowMs: Date.parse("2026-11-11T00:01:00.000Z"),
+        onOpenDrawer: () => {},
+        findCadenceForWorkspace: () => dateResolved,
+      });
+    } finally {
+      (globalThis as any).window = prevWindow;
+    }
+
+    const liveBadge = staleMapRow.querySelector('[data-testid="sidebar-workspace-cadence-badge-wks_date_test"]');
+    assert.ok(liveBadge, "Sidebar badge must be rendered");
+    assert.equal(liveBadge.getAttribute("data-running"), "true", "Live store turn must keep badge running even with stale cache");
+    assert.ok(liveBadge.title?.includes("40s"), `Badge tooltip must include live elapsed duration (40s). Actual: ${liveBadge.title}`);
+
+    const liveHeaderBadge = staleMapHeaderWrap.querySelector('[data-testid="workspace-header-cadence-badge-sched_date_1"]');
+    assert.ok(liveHeaderBadge, "Header badge must be rendered");
+    assert.equal(liveHeaderBadge.getAttribute("data-running"), "true", "Live store turn must keep header badge running even with stale cache");
+    assert.ok(liveHeaderBadge.title?.includes("40s"), `Header tooltip must include live elapsed duration (40s). Actual: ${liveHeaderBadge.title}`);
+  } finally {
+    resetScheduleRunsCacheForTesting();
+  }
 });
 
 test("61. Option+D / Shift+Option+D Cross-Session Title Isolation: ignores hidden NativeScreen headers, stale aria-selected rows, and cross-workspace context menus", async () => {

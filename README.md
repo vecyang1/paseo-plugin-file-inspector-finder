@@ -95,6 +95,12 @@ node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs sc
   --agent <agentId> --sha <hash> [--expect <origin id prefix>] [--own <hash>] [--text-ref <session id>]
 ```
 
+Sidebar and Header Cadence Stopwatch Badges (read-only against the running Paseo app; asserts role="button" sidebar rows, header badges, real schedule names, and live running elapsed timers in tooltips):
+
+```bash
+node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/cadence-badge-e2e.mts [--workspace <wks_...>]
+```
+
 ## License
 
 MIT

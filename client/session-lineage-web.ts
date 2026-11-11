@@ -11,6 +11,8 @@ import { syncPaseoThemeCssVariables, resolveActivePaseoTheme } from "./theme-web
 import { focusWorkspaceInApp } from "./web";
 import {
   findCadenceScheduleForWorkspace,
+  findRunningCadenceElapsedSec,
+  formatRunningCadenceElapsed,
   triggerRunScheduleNow,
   CADENCE_TIMER_SVG,
 } from "./schedule-runs-web";
@@ -2625,12 +2627,16 @@ export function installDesktopSessionLineageEnhancer(
       const isRunning =
         Boolean(cadenceSched.runningRuns && cadenceSched.runningRuns > 0) ||
         cadenceSched.lastRunStatus === "running";
+      const elapsedSec = isRunning
+        ? findRunningCadenceElapsedSec(cadenceSched, effectiveWsId)
+        : null;
+      const elapsedText = formatRunningCadenceElapsed(elapsedSec, zh);
       const cadenceBtn = document.createElement("button");
       cadenceBtn.type = "button";
       cadenceBtn.setAttribute("data-testid", "session-cadence-run-pill");
       cadenceBtn.title = zh
-        ? `定时任务节奏: ${cadenceSched.name} · 单击立即运行 · ⌘⇧H 查看全部记录`
-        : `Cadence: ${cadenceSched.name} · Click to run now · ⌘⇧H for runs history`;
+        ? `定时任务节奏: ${cadenceSched.name}${elapsedText ? ` · 已耗时 ${elapsedText}` : ""} · 单击立即运行 · ⌘⇧H 查看全部记录`
+        : `Cadence: ${cadenceSched.name}${elapsedText ? ` · Running for ${elapsedText}` : ""} · Click to run now · ⌘⇧H for runs history`;
 
       const iconWrap = document.createElement("span");
       iconWrap.innerHTML = CADENCE_TIMER_SVG;

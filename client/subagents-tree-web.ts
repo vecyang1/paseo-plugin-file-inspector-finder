@@ -4198,11 +4198,22 @@ export function installDesktopSubagentsTreeEnhancer(
     });
   };
 
+  let initialPrefetchScheduled = false;
   const syncCurrentAgentSubagents = () => {
-    void prefetchAllWorkspaceSubagentTrees(false).then(() => {
-      const latestScope = resolveActiveScope();
-      decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
-    });
+    if (!initialPrefetchScheduled) {
+      initialPrefetchScheduled = true;
+      setTimeout(() => {
+        void prefetchAllWorkspaceSubagentTrees(false).then(() => {
+          const latestScope = resolveActiveScope();
+          decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
+        });
+      }, 800);
+    } else {
+      void prefetchAllWorkspaceSubagentTrees(false).then(() => {
+        const latestScope = resolveActiveScope();
+        decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
+      });
+    }
     const scope = resolveActiveScope();
     if (!scope.scopeKey) {
       lastScopeKey = null;

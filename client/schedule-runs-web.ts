@@ -341,13 +341,61 @@ export function formatCompactSidebarAge(
   return `${Math.floor(diffDays / 7)}w`;
 }
 
+export function parseTimestampMs(val: unknown): number | null {
+  if (val == null) return null;
+  if (val instanceof Date) {
+    const t = val.getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  if (typeof val === "number") {
+    if (!Number.isFinite(val) || val <= 0) return null;
+    return val < 1e11 ? Math.floor(val * 1000) : Math.floor(val);
+  }
+  if (typeof val === "string") {
+    const s = val.trim();
+    if (!s) return null;
+    const num = Number(s);
+    if (Number.isFinite(num) && /^\d{10,13}$/.test(s)) {
+      return num < 1e11 ? num * 1000 : num;
+    }
+    const parsed = Date.parse(s);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export function normalizeStoreTimestamp(val: unknown): string | null {
+  if (val == null) return null;
+  if (val instanceof Date) {
+    const t = val.getTime();
+    return Number.isFinite(t) ? val.toISOString() : null;
+  }
+  if (typeof val === "number") {
+    if (!Number.isFinite(val) || val <= 0) return null;
+    const epochMs = val < 1e11 ? Math.floor(val * 1000) : Math.floor(val);
+    return new Date(epochMs).toISOString();
+  }
+  if (typeof val === "string") {
+    const s = val.trim();
+    if (!s) return null;
+    const num = Number(s);
+    if (Number.isFinite(num) && /^\d{10,13}$/.test(s)) {
+      const epochMs = num < 1e11 ? num * 1000 : num;
+      return new Date(epochMs).toISOString();
+    }
+    const parsed = Date.parse(s);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : s;
+  }
+  return null;
+}
+
 export function findRunningCadenceElapsedSec(
   sched:
     | {
         runs?: Array<{
           status?: string | null;
           workspaceId?: string | null;
-          startedAt?: string | null;
+          startedAt?: unknown;
         } | null> | null;
       }
     | null
@@ -364,9 +412,9 @@ export function findRunningCadenceElapsedSec(
       const rWsId = r.workspaceId
         ? r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim()
         : "";
-      if (r.status === "running" && rWsId === cleanWorkspaceId && r.startedAt) {
-        const ts = Date.parse(r.startedAt);
-        if (Number.isFinite(ts) && ts <= currentMs) {
+      if (r.status === "running" && rWsId === cleanWorkspaceId && r.startedAt != null) {
+        const ts = parseTimestampMs(r.startedAt);
+        if (ts != null && ts <= currentMs) {
           return Math.max(0, Math.floor((currentMs - ts) / 1000));
         }
       }
@@ -374,9 +422,9 @@ export function findRunningCadenceElapsedSec(
   }
   for (let i = 0; i < sched.runs.length; i += 1) {
     const r = sched.runs[i];
-    if (r && r.status === "running" && r.startedAt) {
-      const ts = Date.parse(r.startedAt);
-      if (Number.isFinite(ts) && ts <= currentMs) {
+    if (r && r.status === "running" && r.startedAt != null) {
+      const ts = parseTimestampMs(r.startedAt);
+      if (ts != null && ts <= currentMs) {
         return Math.max(0, Math.floor((currentMs - ts) / 1000));
       }
     }
@@ -765,24 +813,36 @@ function findStoreAgentMeta(
         if (sm?.groups?.slug && !standbySlug) {
           standbySlug = sm.groups.slug;
         }
+        const isArchived = Boolean(
+          a.archivedAt ||
+            (typeof a.status === "string" && a.status.toLowerCase() === "archived"),
+        );
         const turnObj = (a.turn ?? a.activeTurn) as
           | { phase?: unknown; startedAt?: unknown }
           | undefined;
         const statusStr = typeof a.status === "string" ? a.status.trim() : "";
         if (statusStr) explicitStatus = statusStr;
         const agentRunning =
-          turnObj?.phase === "open" ||
-          statusStr === "running" ||
-          statusStr === "busy" ||
-          statusStr === "initializing";
+          !isArchived &&
+          (turnObj?.phase === "open" ||
+            statusStr === "running" ||
+            statusStr === "busy" ||
+            statusStr === "initializing");
         if (agentRunning) {
           isRunning = true;
-          if (typeof turnObj?.startedAt === "string" && turnObj.startedAt.trim()) {
-            turnStartedAt = turnObj.startedAt.trim();
+          const rawTurnStart =
+            turnObj?.startedAt ??
+            (a.activeTurn as Record<string, unknown> | undefined)?.startedAt;
+          const normalizedTurnStart = normalizeStoreTimestamp(rawTurnStart);
+          if (normalizedTurnStart) {
+            turnStartedAt = normalizedTurnStart;
           }
         }
-        if (!createdAt && typeof a.createdAt === "string" && a.createdAt.trim()) {
-          createdAt = a.createdAt.trim();
+        if (!createdAt) {
+          const normalizedCreated = normalizeStoreTimestamp(a.createdAt ?? a.startedAt);
+          if (normalizedCreated) {
+            createdAt = normalizedCreated;
+          }
         }
         if (labels?.["relation-kind"] === "intake-routed" || (!sid && !sm)) {
           sawExplicitNonCadence = true;
@@ -826,26 +886,42 @@ function enrichScheduleWithRunningState<T extends ResolvedCadenceSchedule>(
         r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanId),
   );
   let nextRuns = existingRuns;
-  if (!hasRunningWithStartedAt && storeMeta?.agentStartedAt) {
-    const syntheticRun: ScheduleRunEntry = {
-      id: `store-${storeMeta.agentId ?? sched.id}`,
-      scheduleId: sched.id,
-      scheduleName: sched.name || sched.id,
-      status: "running",
-      scheduledFor: storeMeta.agentStartedAt,
-      startedAt: storeMeta.agentStartedAt,
-      endedAt: null,
-      durationMs: null,
-      durationFormatted: "running…",
-      agentId: storeMeta.agentId ?? null,
-      workspaceId: cleanId || null,
-      workspaceName: null,
-      isArchived: false,
-      output: "",
-      outputPreview: "",
-      error: null,
-    };
-    nextRuns = [syntheticRun, ...existingRuns];
+  if (storeMeta?.agentStartedAt) {
+    if (!hasRunningWithStartedAt) {
+      const syntheticRun: ScheduleRunEntry = {
+        id: `store-${storeMeta.agentId ?? sched.id}`,
+        scheduleId: sched.id,
+        scheduleName: sched.name || sched.id,
+        status: "running",
+        scheduledFor: storeMeta.agentStartedAt,
+        startedAt: storeMeta.agentStartedAt,
+        endedAt: null,
+        durationMs: null,
+        durationFormatted: "running…",
+        agentId: storeMeta.agentId ?? null,
+        workspaceId: cleanId || null,
+        workspaceName: null,
+        isArchived: false,
+        output: "",
+        outputPreview: "",
+        error: null,
+      };
+      nextRuns = [syntheticRun, ...existingRuns];
+    } else {
+      nextRuns = existingRuns.map((r) => {
+        if (
+          r &&
+          r.status === "running" &&
+          !r.startedAt &&
+          (!cleanId ||
+            !r.workspaceId ||
+            r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim() === cleanId)
+        ) {
+          return { ...r, startedAt: storeMeta.agentStartedAt };
+        }
+        return r;
+      });
+    }
   }
   return {
     ...sched,
@@ -1464,6 +1540,9 @@ function resolveCadenceSchedule(
   }
 
   const cleanTitle = rowTitle.trim().toLowerCase();
+  const storeMeta = normWsId
+    ? findStoreAgentMeta(typeof window !== "undefined" ? window : null, normWsId)
+    : null;
   for (const [id, sched] of options.schedulesById.entries()) {
     const fullSched = sched as Partial<ScheduleRunsSummary>;
     if (
@@ -1472,13 +1551,15 @@ function resolveCadenceSchedule(
         fullSched.id === normWsId ||
         id.replace(/^sched_/, "") === normWsId)
     ) {
-      return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+      const base = { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+      return enrichScheduleWithRunningState(base, normWsId, false, storeMeta);
     }
     if (Array.isArray(fullSched.runs)) {
       for (let i = 0; i < fullSched.runs.length; i += 1) {
         const r = fullSched.runs[i];
         if (normWsId && r?.workspaceId && r.workspaceId.replace(/^(?:local|srv_[^:]+):/, "").trim() === normWsId) {
-          return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+          const base = { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+          return enrichScheduleWithRunningState(base, normWsId, false, storeMeta);
         }
         if (
           cleanTitle &&
@@ -1487,12 +1568,14 @@ function resolveCadenceSchedule(
           r?.workspaceName &&
           matchesWorkspaceNameWithStem(cleanTitle, r.workspaceName)
         ) {
-          return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+          const base = { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+          return enrichScheduleWithRunningState(base, normWsId, false, storeMeta);
         }
       }
     }
     if (cleanTitle && matchScheduleTitleOrSlug(cleanTitle, fullSched.name, fullSched.standbySlug, fullSched.prompt)) {
-      return { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+      const base = { id: fullSched.id ?? id, name: fullSched.name ?? id, ...fullSched };
+      return enrichScheduleWithRunningState(base, normWsId, false, storeMeta);
     }
   }
   return null;
@@ -1728,20 +1811,26 @@ export function decorateSchedulesDomOnDocument(
         (cleanWorkspaceId && cachedWorkspaceScheduleMap[cleanWorkspaceId]) ||
         (testId && cachedWorkspaceScheduleMap[testId]) ||
         null;
+      const rowStoreMeta = cleanWorkspaceId
+        ? findStoreAgentMeta(typeof window !== "undefined" ? window : null, cleanWorkspaceId)
+        : null;
       const isWorkspaceExplicitlyFinished =
         metaForWs &&
         !metaForWs.isRunning &&
         metaForWs.runStatus &&
         metaForWs.runStatus !== "running" &&
-        !isInWorkingGroup;
+        !isInWorkingGroup &&
+        !rowStoreMeta?.isRunning;
 
       const isRunning = isWorkspaceExplicitlyFinished
         ? false
         : Boolean(
             isInWorkingGroup ||
+            rowStoreMeta?.isRunning ||
             (metaForWs && metaForWs.isRunning) ||
-            (sched.runningRuns && sched.runningRuns > 0) ||
-            sched.lastRunStatus === "running",
+            (!metaForWs &&
+              ((sched.runningRuns && sched.runningRuns > 0) ||
+                sched.lastRunStatus === "running")),
           );
       const runningElapsedSec = isRunning
         ? findRunningCadenceElapsedSec(sched, cleanWorkspaceId, nowMs)
@@ -1929,20 +2018,26 @@ export function decorateSchedulesDomOnDocument(
 
       const metaForHeaderWs =
         (activeWsId && cachedWorkspaceScheduleMap[activeWsId]) || null;
+      const headerStoreMeta = activeWsId
+        ? findStoreAgentMeta(typeof window !== "undefined" ? window : null, activeWsId)
+        : null;
       const isHeaderWsExplicitlyFinished =
         metaForHeaderWs &&
         !metaForHeaderWs.isRunning &&
         metaForHeaderWs.runStatus &&
         metaForHeaderWs.runStatus !== "running" &&
-        !isHeaderActiveTurnRunning;
+        !isHeaderActiveTurnRunning &&
+        !headerStoreMeta?.isRunning;
 
       const isRunning = isHeaderWsExplicitlyFinished
         ? false
         : Boolean(
             isHeaderActiveTurnRunning ||
+            headerStoreMeta?.isRunning ||
             (metaForHeaderWs && metaForHeaderWs.isRunning) ||
-            (sched.runningRuns && sched.runningRuns > 0) ||
-            sched.lastRunStatus === "running",
+            (!metaForHeaderWs &&
+              ((sched.runningRuns && sched.runningRuns > 0) ||
+                sched.lastRunStatus === "running")),
           );
       const headerRunningElapsedSec = isRunning
         ? findRunningCadenceElapsedSec(sched, activeWsId, nowMs)
@@ -2858,7 +2953,7 @@ async function refreshScheduleCache(
       const res = await client.call(inspectScheduleRunsRpc, {
         onlyWithRuns: false,
         includeWorkspaceNames: false,
-        maxRunsPerSchedule: 12,
+        maxRunsPerSchedule: 2,
         compactSummary: true,
       });
       if (res.ok) {

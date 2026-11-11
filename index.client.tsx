@@ -1377,17 +1377,37 @@ export default function contribute(client: PluginClientContext) {
     }
   };
 
+  let syncProjectsInProgress = false;
+  let syncProjectsPending = false;
+
+  const runSyncCommandCenterProjectItems = async () => {
+    if (syncProjectsInProgress) {
+      syncProjectsPending = true;
+      return;
+    }
+    syncProjectsInProgress = true;
+    try {
+      await syncCommandCenterProjectItems();
+    } finally {
+      syncProjectsInProgress = false;
+      if (syncProjectsPending && !lifetime.signal.aborted) {
+        syncProjectsPending = false;
+        void runSyncCommandCenterProjectItems();
+      }
+    }
+  };
+
   const scheduleCommandCenterProjectsSync = () => {
     if (lifetime.signal.aborted) return;
     if (syncProjectsTimer) {
       clearTimeout(syncProjectsTimer);
     }
     syncProjectsTimer = setTimeout(() => {
-      void syncCommandCenterProjectItems();
-    }, 120);
+      void runSyncCommandCenterProjectItems();
+    }, 300);
   };
 
-  void syncCommandCenterProjectItems();
+  void runSyncCommandCenterProjectItems();
 
   const registerWorkspaceHeader = (workspace: { id: string }) => {
     if (lifetime.signal.aborted) return;
