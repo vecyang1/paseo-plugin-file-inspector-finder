@@ -117,6 +117,12 @@ Multi-Document Preview, Grab-to-Pan Drag, and Side-by-Side Compare against the r
 node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/doc-preview-e2e.mts --workspace <wks_...> --doc1 <path.pdf> [--doc2 <path.docx>]
 ```
 
+Option+D leaves the sidebar still (parks a real session row near the bottom edge, presses Option+D twice and once as a quick double press, grades the row's screen position and the daemon store after late writes settle; renames one session and restores it with `paseo workspace rename` if a step fails):
+
+```bash
+node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/mark-done-no-scroll-e2e.mts [--port 6811]
+```
+
 ## Agent 接入与分布式共建
 
 Agent接入后可自行推理, 也可以完善和提交回改进。
