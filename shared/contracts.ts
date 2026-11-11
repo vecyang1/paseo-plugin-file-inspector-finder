@@ -111,6 +111,17 @@ export const LabelShortcutComboSchema = z.enum([
 ]);
 export type LabelShortcutCombo = z.infer<typeof LabelShortcutComboSchema>;
 
+export const ProjectPickerShortcutPresetSchema = z.enum([
+  "alt_p",
+  "cmd_shift_j",
+  "cmd_alt_o",
+  "cmd_p",
+  "custom",
+]);
+export type ProjectPickerShortcutPreset = z.infer<
+  typeof ProjectPickerShortcutPresetSchema
+>;
+
 export const SmartCopyBulletMarkerSchema = z.enum(["bullet", "dash"]);
 export type SmartCopyBulletMarker = z.infer<typeof SmartCopyBulletMarkerSchema>;
 
@@ -165,6 +176,9 @@ export const pluginSettings = defineSettings({
     dictationSendBehavior: z.enum(["insert-only", "native"]).default("insert-only"),
     enableModelQuickSwitch: z.boolean().default(true),
     modelQuickSwitchDigits: z.enum(["empty-search", "modifier-only"]).default("empty-search"),
+    enableProjectPickerShortcut: z.boolean().default(true),
+    projectPickerShortcutPreset: ProjectPickerShortcutPresetSchema.default("alt_p"),
+    projectPickerCustomShortcut: z.string().default("Alt+P"),
     enableAgentHistoryAutoHeal: z.boolean().default(true),
     showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),

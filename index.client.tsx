@@ -1,3 +1,4 @@
+import { settingsRpc } from "@getpaseo/plugin";
 import type {
   PluginButtonRegistration,
   PluginClientContext,
@@ -5,6 +6,7 @@ import type {
 import { copyText } from "@getpaseo/plugin/client/ui";
 import {
   type OpenerTarget,
+  type ProjectPickerShortcutPreset,
   type QuickJumpAction,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
@@ -20,6 +22,7 @@ import {
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
   openFileTargetRpc,
+  pluginSettings,
   quickJumpWorkspaceRpc,
   reconcilePaseoRecoveryRpc,
   renameWorkspaceOrAgentRpc,
@@ -57,6 +60,11 @@ import {
   findCadenceScheduleForWorkspace,
 } from "./client/schedule-runs-web";
 import { installModelQuickSwitch, openModelQuickSwitch } from "./client/model-quick-switch-web";
+import {
+  installProjectPickerShortcut,
+  openProjectPickerFromShortcut,
+  syncProjectPickerShortcutPrefs,
+} from "./client/project-picker-shortcut-web";
 import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
 import { installSidebarChildSessions } from "./client/sidebar-child-sessions-web";
 import { installSettingsSearch, openSettingsSearch } from "./client/settings-search-web";
@@ -335,6 +343,26 @@ export default function contribute(client: PluginClientContext) {
     onSelect() {
       // Let the Command Center close and hand focus back to the composer first.
       setTimeout(() => openModelQuickSwitch(), 160);
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "choose-project",
+    title: pluginTranslations.message("commands.chooseProject"),
+    icon: "Folder",
+    keywords: [
+      "project",
+      "choose project",
+      "select project",
+      "new workspace",
+      "pick project",
+      "选择项目",
+      "项目",
+    ],
+    context: "global",
+    onSelect() {
+      // Let the Command Center close and hand focus back to the composer first.
+      setTimeout(() => openProjectPickerFromShortcut(), 160);
     },
   });
 
@@ -1766,6 +1794,27 @@ export default function contribute(client: PluginClientContext) {
 
   const cleanupModelQuickSwitch = installModelQuickSwitch();
 
+  const cleanupProjectPickerShortcut = installProjectPickerShortcut();
+  void client
+    .rpc(settingsRpc(pluginSettings.id).read, {})
+    .then((res) => {
+      if (res.status === "ready" && !lifetime.signal.aborted) {
+        const v = res.values as Record<string, unknown>;
+        syncProjectPickerShortcutPrefs({
+          enabled: typeof v.enableProjectPickerShortcut === "boolean" ? v.enableProjectPickerShortcut : undefined,
+          preset:
+            typeof v.projectPickerShortcutPreset === "string"
+              ? (v.projectPickerShortcutPreset as ProjectPickerShortcutPreset)
+              : undefined,
+          customShortcut:
+            typeof v.projectPickerCustomShortcut === "string"
+              ? v.projectPickerCustomShortcut
+              : undefined,
+        });
+      }
+    })
+    .catch(() => {});
+
   const cleanupSidebarDefaultCollapse = installSidebarDefaultCollapse();
 
   const cleanupSidebarChildSessions = installSidebarChildSessions();
@@ -1900,6 +1949,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupScheduleRunsEnhancer();
     cleanupVoiceSttEnhancer();
     cleanupModelQuickSwitch();
+    cleanupProjectPickerShortcut();
     cleanupSidebarDefaultCollapse();
     cleanupSidebarChildSessions();
     cleanupSettingsSearch();
