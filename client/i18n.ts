@@ -3,6 +3,7 @@ import { defineTranslations } from "@getpaseo/plugin/client";
 export const enMessages = {
   plugin: {
     filePanelTitle: "Image Inspector",
+    docPanelTitle: "Document Preview",
     workspacePanelTitle: "Finder & Media",
     settingsTitle: "File Inspector & Finder",
     headerButtonTitle: "Reveal files & images in Finder",
@@ -394,6 +395,7 @@ export type PluginMessageCatalog = StringifyLeaves<typeof enMessages>;
 export const zhMessages: PluginMessageCatalog = {
   plugin: {
     filePanelTitle: "图片检查器",
+    docPanelTitle: "多格式文档预览",
     workspacePanelTitle: "Finder 与媒体",
     settingsTitle: "文件检查与 Finder",
     headerButtonTitle: "在 Finder 中显示文件与图片",

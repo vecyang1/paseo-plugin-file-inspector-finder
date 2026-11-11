@@ -573,7 +573,7 @@ export function syncImagePanelAssociations(
 }
 
 export const FILE_PATH_TOKEN_REGEX =
-  /(?:\/(?:Users|home|var|tmp|opt|etc)\/[^\s"'`<>()]+|[A-Za-z]:\\[^\s"'`<>()]+|~\/[^\s"'`<>()]+|(?:\.?\.)?\/[^\s"'`<>()]+|[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+(?:\.[A-Za-z0-9]{1,8}|\/)?|[A-Za-z0-9_-]{2,}\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico|avif|heic|tif|tiff|pdf|md|json|ts|tsx|py|html|css|mp4|mov|jsx|mjs|cjs|sh|zsh|yaml|yml|toml|sql))/i;
+  /(?:\/(?:Users|home|var|tmp|opt|etc)\/[^\s"'`<>()]+|[A-Za-z]:\\[^\s"'`<>()]+|~\/[^\s"'`<>()]+|(?:\.?\.)?\/[^\s"'`<>()]+|[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+(?:\.[A-Za-z0-9]{1,8}|\/)?|[A-Za-z0-9_-]{2,}\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico|avif|heic|tif|tiff|pdf|docx|doc|xlsx|xls|pptx|ppt|rtf|odt|ods|odp|epub|pages|numbers|key|csv|tsv|md|json|ts|tsx|py|html|css|mp4|mov|jsx|mjs|cjs|sh|zsh|yaml|yml|toml|sql))/i;
 
 export function cleanExtractedFilePath(raw: string): string {
   let val = raw.trim();

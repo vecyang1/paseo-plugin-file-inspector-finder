@@ -86,10 +86,21 @@ import {
 } from "./client/session-lineage-web";
 import { ForkSessionPopover } from "./client/fork-session";
 import { forkSessionRpc } from "./shared/contracts";
+import {
+  SUPPORTED_DOCUMENT_EXTENSIONS,
+  listSiblingDocumentsRpc,
+} from "./shared/doc-preview-contracts";
+import { DocumentInspectorFilePanel } from "./client/doc-panel";
+import {
+  installDesktopDocPreviewEnhancer,
+  openWorkspaceFileTabsInSidePane,
+  syncDocumentPanelAssociations,
+} from "./client/doc-preview-web";
 
 export default function contribute(client: PluginClientContext) {
-  // 1. Pre-associate image extensions with our Image Inspector file panel & materialize default inline rename prefs
+  // 1. Pre-associate image & document extensions with our file panels & materialize default inline rename prefs
   syncImagePanelAssociations("file-inspector-finder", "image-inspector", true);
+  syncDocumentPanelAssociations("file-inspector-finder", "doc-inspector", true);
   syncInlineRenamePreferences({});
 
   // 2. Register Image & Media File Panel (adds top Finder/Preview/Copy/Metadata toolbar inside image tabs)
@@ -101,6 +112,17 @@ export default function contribute(client: PluginClientContext) {
       extensions: SUPPORTED_IMAGE_EXTENSIONS,
     },
     Component: ImageInspectorFilePanel,
+  });
+
+  // 2b. Register Multi-Document Preview Panel (PDF, DOCX, XLSX, PPTX, RTF, ODT, EPUB, iWork with Scroll & Drag + Compare)
+  client.addFilePanel({
+    id: "doc-inspector",
+    title: pluginTranslations.message("plugin.docPanelTitle"),
+    icon: "FileText",
+    files: {
+      extensions: SUPPORTED_DOCUMENT_EXTENSIONS,
+    },
+    Component: DocumentInspectorFilePanel,
   });
 
   // 3. Register Workspace & Explorer Sidebar Panel
@@ -1771,6 +1793,55 @@ export default function contribute(client: PluginClientContext) {
     getLocale: () => client.i18n.locale,
   });
 
+  const cleanupDocPreviewEnhancer = installDesktopDocPreviewEnhancer({
+    getLocale: () => client.i18n.locale,
+  });
+
+  client.addCommandCenterItem({
+    id: "preview-latest-document",
+    title: "Finder: Preview Latest Workspace Document",
+    icon: "FileText",
+    keywords: ["pdf", "docx", "xlsx", "pptx", "document", "preview", "compare"],
+    context: "workspace",
+    async onSelect({ workspace, rpc }) {
+      const res = await rpc(listSiblingDocumentsRpc, {
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.directory ?? undefined,
+        limit: 4,
+      });
+      const first = res.items[0];
+      if (first) {
+        openWorkspaceFileTabsInSidePane(workspace.id, [first.relativePath || first.absolutePath]);
+      }
+    },
+  });
+
+  client.addSlashCommand({
+    name: "preview-doc",
+    description: "Open one or more PDF / Office documents in Paseo's side preview pane",
+    argumentHint: "<path> [second-path ...]",
+    context: "workspace",
+    async onSubmit({ args, workspace, rpc }) {
+      const tokens = args
+        .split(/\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (tokens.length > 0) {
+        openWorkspaceFileTabsInSidePane(workspace.id, tokens);
+        return;
+      }
+      const res = await rpc(listSiblingDocumentsRpc, {
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.directory ?? undefined,
+        limit: 2,
+      });
+      const paths = res.items.slice(0, 2).map((i) => i.relativePath || i.absolutePath);
+      if (paths.length > 0) {
+        openWorkspaceFileTabsInSidePane(workspace.id, paths);
+      }
+    },
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -1793,6 +1864,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSessionRefText();
     cleanupSubagentsTreeEnhancer();
     cleanupSessionLineageEnhancer();
+    cleanupDocPreviewEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
     for (const btn of forkButtons.values()) btn.remove();

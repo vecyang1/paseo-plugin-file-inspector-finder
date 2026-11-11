@@ -46,6 +46,7 @@ import {
   inspectSystemPromptRpc,
 } from "../shared/contracts";
 import { isChineseLocale, pluginTranslations } from "./i18n";
+import { DocPreviewSettingsSection } from "./doc-settings-section";
 import { MermaidSettingsSection } from "./mermaid-settings-section";
 import {
   type ScheduleRunsDomHealthSnapshot,
@@ -3649,6 +3650,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       </SettingsSection>
 
       <MermaidSettingsSection isZh={isZh} styles={styles} />
+
+      <DocPreviewSettingsSection isZh={isZh} styles={styles} />
 
       <SettingsSection
         title={

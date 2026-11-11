@@ -72,11 +72,24 @@ import {
 } from "./server/link-first-retitle";
 import { handleResolveCommitOrigin } from "./server/commit-origin";
 import { resolveCommitOriginRpc } from "./shared/commit-origin-contracts";
+import {
+  diagnoseDocPreviewRpc,
+  listSiblingDocumentsRpc,
+  previewDocumentRpc,
+} from "./shared/doc-preview-contracts";
+import {
+  handleDiagnoseDocPreview,
+  handleListSiblingDocuments,
+  handlePreviewDocument,
+} from "./server/doc-preview-handlers";
 
 export default function contribute(server: PluginServerContext) {
   const settingsHandle = server.registerSettings(pluginSettings);
 
   server.handle(inspectFileRpc, handleInspectFile);
+  server.handle(previewDocumentRpc, handlePreviewDocument);
+  server.handle(listSiblingDocumentsRpc, handleListSiblingDocuments);
+  server.handle(diagnoseDocPreviewRpc, handleDiagnoseDocPreview);
   server.handle(openFileTargetRpc, handleOpenFileTarget);
   server.handle(listWorkspaceMediaRpc, handleListWorkspaceMedia);
   server.handle(diagnosePathRpc, handleDiagnosePath);
@@ -823,6 +836,41 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const docPreviewTool = defineAgentTool({
+    name: "finder_preview_document",
+    title: "Inspect or Probe Multi-Format Document Preview",
+    description:
+      "Inspect available Paseo document preview rendering engines (PDF, DOCX, XLSX, PPTX, RTF, ODT, EPUB, iWork), list sibling workspace documents for multi-doc comparison, or probe rendering metadata and page count for a document.",
+    input: z.object({
+      action: z.enum(["status", "probe", "list_siblings", "clear_cache"]).default("status"),
+      path: z.string().optional().describe("Relative or absolute document path when action is probe or list_siblings"),
+    }),
+    async execute(input, { agent, paseo }) {
+      if (input.action === "list_siblings") {
+        const res = await handleListSiblingDocuments(
+          {
+            workspaceId: agent.workspaceId ?? undefined,
+            workspaceRoot: agent.cwd ?? undefined,
+            currentPath: input.path,
+            limit: 24,
+          },
+          { paseo },
+        );
+        return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+      }
+      const res = await handleDiagnoseDocPreview(
+        {
+          action: input.action,
+          workspaceId: agent.workspaceId ?? undefined,
+          workspaceRoot: agent.cwd ?? undefined,
+          path: input.path,
+        },
+        { paseo },
+      );
+      return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -852,6 +900,7 @@ export default function contribute(server: PluginServerContext) {
         linkRetitleTool,
         commitOriginTool,
         inspectSystemPromptTool,
+        docPreviewTool,
       ],
     };
   });
