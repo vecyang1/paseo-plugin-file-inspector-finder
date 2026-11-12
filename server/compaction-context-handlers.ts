@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type AntigravityContextSnapshot,
+  type AntigravityRuntimeContextLimits,
   type CompactionSummaryItem,
   type inspectAntigravityContextRpc,
   resolveAntigravityAutoCompactCeilingTokens,
@@ -96,27 +97,48 @@ async function resolveTranscriptPath(conversationId: string, homeDir: string): P
   return null;
 }
 
-function cleanUserPromptBody(raw: string): string {
+async function readAntigravityContextLimits(homeDir: string): Promise<AntigravityRuntimeContextLimits> {
+  const limPath =
+    process.env.VEC_AGY_CONTEXT_LIMITS_PATH ||
+    path.join(homeDir, ".gemini", "antigravity-cli", "context_limits.json");
+  try {
+    const raw = JSON.parse(await fs.readFile(limPath, "utf8")) as Record<string, unknown>;
+    const num = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) && v >= 32_000 && v <= 2_000_000 ? Math.round(v) : undefined;
+    return {
+      effectiveGeminiMaxTokens: num(raw.effective_gemini_max_tokens),
+      fallbackMaxTokens: num(raw.fallback_max_tokens),
+      claude4MaxTokens: num(raw.claude_4_max_tokens),
+      gptOssMaxTokens: num(raw.gpt_oss_max_tokens),
+    };
+  } catch {
+    return {};
+  }
+}
+
+export function cleanUserPromptBody(raw: string): string {
   let text = raw;
   const reqMatch = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i.exec(text);
   if (reqMatch?.[1] !== undefined) text = reqMatch[1];
   const directiveIdx = text.indexOf("\n\n<!-- vec-slash-directive -->");
   if (directiveIdx !== -1) text = text.slice(0, directiveIdx);
-  text = text
-    .replace(/^\s*<system starter prompt in paseo>[\s\S]*?(?:-----------------[\s\S]*?<user prompt>:\s*|-----------------)/i, "")
-    .replace(/<!--\s*paseo-peers:start[\s\S]*?(?:<!--\s*paseo-peers:end\s*-->|$)/gi, "")
-    .replace(/^\s*<cadance>[\s\S]*?(?:<\/cadance>|(?=If u need make change to Paseo app)|(?=\r?\n\r?\n(?!\s*\/scheduled-task-rescheduler|\s*scan patterns|\s*reply concisly|\s*e2e test)))/gi, "")
-    .replace(/^\s*If u need make change to Paseo app,\s*make sure it would survive auto updates and see if need contribute back to community auto\.?\s*/i, "")
-    .replace(/^\s*<user prompt>:\s*/i, "");
+  text = text.replace(/^[\s\u200b]*(?:\/(?:plan|goal|grill-me|browser|schedule|learn|deepagent)\s+)+(?=\u200b)/i, "");
+  text = text.replace(/^[\s\u200b]+/, "");
+  text = text.replace(/(?:^|\r?\n\r?\n)[\s\u200b]*<system starter prompt in paseo>[\s\S]*?<user prompt>:\s*/gi, "\n");
+  text = text.replace(/(?:^|\r?\n\r?\n)[\s\u200b]*<system starter prompt in paseo>[\s\S]*?\r?\n[ \t]*-{15,}[ \t]*(?:\r?\n|$)/gi, "\n");
+  text = text.replace(/\r?\n\r?\n[\s\u200b]*<system starter prompt in paseo>[\s\S]*$/i, "");
+  text = text.replace(/<!--\s*paseo-peers:start[\s\S]*?(?:<!--\s*paseo-peers:end[^>]*-->|$)/gi, "");
+  text = text.replace(/^[\s\u200b]*<user prompt>:\s*/i, "");
   return text.trim();
 }
 
 export function parseAntigravityTranscriptContext(
   rawTranscript: string,
   modelId?: string | null,
+  limits?: AntigravityRuntimeContextLimits | null,
 ): Omit<AntigravityContextSnapshot, "agentId" | "workspaceId" | "conversationId" | "model"> {
   const contextWindowMaxTokens = resolveAntigravityModelContextMaxTokens(modelId);
-  const autoCompactCeilingTokens = resolveAntigravityAutoCompactCeilingTokens(modelId);
+  const autoCompactCeilingTokens = resolveAntigravityAutoCompactCeilingTokens(modelId, limits);
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedInputTokens = 0;
@@ -299,6 +321,7 @@ export async function handleInspectAntigravityContext(
   }
 
   const maxScan = targetAgentSet ? targetAgentSet.size + 10 : targetWorkspaceId ? 1000 : 200;
+  const runtimeLimits = await readAntigravityContextLimits(homeDir);
   const items: AntigravityContextSnapshot[] = [];
   for (const filePath of candidateFiles.slice(0, maxScan)) {
     let record: RawAgentDiskRecord;
@@ -321,7 +344,7 @@ export async function handleInspectAntigravityContext(
         conversationId: null,
         model,
         contextWindowMaxTokens: resolveAntigravityModelContextMaxTokens(model),
-        autoCompactCeilingTokens: resolveAntigravityAutoCompactCeilingTokens(model),
+        autoCompactCeilingTokens: resolveAntigravityAutoCompactCeilingTokens(model, runtimeLimits),
         contextWindowUsedTokens: 0,
         inputTokens: 0,
         outputTokens: 0,
@@ -341,7 +364,7 @@ export async function handleInspectAntigravityContext(
     } catch {
       continue;
     }
-    const parsed = parseAntigravityTranscriptContext(rawTranscript, model);
+    const parsed = parseAntigravityTranscriptContext(rawTranscript, model, runtimeLimits);
     items.push({
       agentId,
       workspaceId: record.workspaceId ?? null,

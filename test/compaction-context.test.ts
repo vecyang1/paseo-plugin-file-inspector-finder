@@ -343,19 +343,34 @@ test("formatEnhancedCompactionLabel & recordCompactionPostTokens render preToken
   );
   assert.equal(
     resolveAntigravityAutoCompactCeilingTokens("gemini-3.8-flash-high"),
-    262_144,
+    600_000,
   );
   assert.equal(
     resolveAntigravityAutoCompactCeilingTokens("gemini-4-argon-high"),
-    262_144,
+    600_000,
   );
   assert.equal(
     resolveAntigravityAutoCompactCeilingTokens("gemini-4-carbon-high"),
-    1_000_000,
+    600_000,
   );
   assert.equal(
     resolveAntigravityAutoCompactCeilingTokens("claude-opus-5-5-high"),
-    1_000_000,
+    600_000,
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("claude-opus-4-6-thinking"),
+    160_000,
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("gpt-oss-120b-medium"),
+    80_000,
+  );
+  assert.equal(
+    resolveAntigravityAutoCompactCeilingTokens("gemini-3.8-flash-high", {
+      effectiveGeminiMaxTokens: 800_000,
+      fallbackMaxTokens: 800_000,
+    }),
+    800_000,
   );
 
   // Exact postTokens refinement from first PLANNER_RESPONSE after CHECKPOINT
@@ -385,7 +400,7 @@ test("formatEnhancedCompactionLabel & recordCompactionPostTokens render preToken
     multiRows.map((r) => JSON.stringify(r)).join("\n"),
     "gemini-3.8-flash-high",
   );
-  assert.equal(parsed.autoCompactCeilingTokens, 262_144);
+  assert.equal(parsed.autoCompactCeilingTokens, 600_000);
   assert.equal(parsed.lastCompaction?.preTokens, 268170);
   assert.equal(parsed.lastCompaction?.postTokens, 48974);
   assert.equal(parsed.compactions?.length, 1);

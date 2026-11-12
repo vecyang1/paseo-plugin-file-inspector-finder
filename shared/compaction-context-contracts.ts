@@ -46,8 +46,16 @@ export const inspectAntigravityContextRpc = defineRpc({
   }),
 });
 
+export interface AntigravityRuntimeContextLimits {
+  effectiveGeminiMaxTokens?: number;
+  fallbackMaxTokens?: number;
+  claude4MaxTokens?: number;
+  gptOssMaxTokens?: number;
+}
+
 export function resolveAntigravityModelContextMaxTokens(modelId?: string | null): number {
-  const id = String(modelId ?? "").trim().toLowerCase();
+  const raw = String(modelId ?? "").trim().toLowerCase();
+  const id = raw.startsWith("gemini-api:") ? raw.slice("gemini-api:".length) : raw;
   if (id.startsWith("gpt-oss")) return 128_000;
   if (/claude-(?:opus|sonnet|haiku)-4/.test(id) && !id.includes("1m")) return 200_000;
   return 1_000_000;
@@ -55,24 +63,32 @@ export function resolveAntigravityModelContextMaxTokens(modelId?: string | null)
 
 /**
  * Returns the effective context ceiling at which `agy_cli` triggers automatic `CHECKPOINT`
- * compaction (`cascade_config.checkpoint_config.max_token_limit`).
+ * compaction (`cascade_config.checkpoint_config.max_token_limit`), aligned with
+ * `~/.gemini/antigravity-cli/context_limits.json` SSOT:
  *
  * - Built-in `agy_cli` Gemini models (`gemini-3.8-flash*`, `gemini-4-argon*`, `gemini-2.5*`)
- *   enforce a `262,144` (`256K`) auto-compaction ceiling even though the raw API window is 1M.
- * - Custom `gemini-api:*` routed models (`gemini-4-carbon*`, `claude-*-5-*`) use 1,000,000.
+ *   use `effectiveGeminiMaxTokens` (default `600,000`, monotonically auto-evolving with upstream).
+ * - Custom `gemini-api:*` routed 1M models (`gemini-4-carbon*`, `claude-*-5-*`) hit
+ *   `GetCheckpointConfig` fallback (`0x101364b10`, `fallbackMaxTokens`, default `600,000`).
+ * - Claude 4.x (`MODEL_PLACEHOLDER_M26`, `200K` API window) uses `claude4MaxTokens` (`160,000`).
+ * - GPT-OSS (`MODEL_OPENAI_GPT_OSS_120B_MEDIUM`, `128K` API window) uses `gptOssMaxTokens` (`80,000`).
  */
-export function resolveAntigravityAutoCompactCeilingTokens(modelId?: string | null): number {
-  const id = String(modelId ?? "").trim().toLowerCase();
-  if (id.startsWith("gpt-oss")) return 128_000;
-  if (/claude-(?:opus|sonnet|haiku)-4/.test(id) && !id.includes("1m")) return 200_000;
-  if (
-    id.startsWith("gemini-api:") ||
-    id.startsWith("gemini-4-carbon") ||
-    id.startsWith("claude-")
-  ) {
-    return 1_000_000;
+export function resolveAntigravityAutoCompactCeilingTokens(
+  modelId?: string | null,
+  limits?: AntigravityRuntimeContextLimits | null,
+): number {
+  const raw = String(modelId ?? "").trim().toLowerCase();
+  const id = raw.startsWith("gemini-api:") ? raw.slice("gemini-api:".length) : raw;
+  const geminiEff = limits?.effectiveGeminiMaxTokens ?? 600_000;
+  const fallbackEff = limits?.fallbackMaxTokens ?? geminiEff;
+  const claude4Eff = limits?.claude4MaxTokens ?? 160_000;
+  const gptOssEff = limits?.gptOssMaxTokens ?? 80_000;
+  if (id.startsWith("gpt-oss")) return gptOssEff;
+  if (/claude-(?:opus|sonnet|haiku)-4/.test(id) && !id.includes("1m")) return claude4Eff;
+  if (raw.startsWith("gemini-api:") || id.startsWith("gemini-4-carbon") || id.startsWith("claude-")) {
+    return fallbackEff;
   }
-  return 262_144;
+  return geminiEff;
 }
 
 export function formatEnhancedCompactionLabel(input: {
