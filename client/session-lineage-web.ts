@@ -16,13 +16,6 @@ import {
   recordShownWorkspaceRows,
   shownWorkspaceKeysForQuery,
 } from "./command-center-dedupe";
-import {
-  findCadenceScheduleForWorkspace,
-  findRunningCadenceElapsedSec,
-  formatRunningCadenceElapsed,
-  triggerRunScheduleNow,
-  CADENCE_TIMER_SVG,
-} from "./schedule-runs-web";
 
 export interface SessionLineageWebClient {
   call<
@@ -2208,28 +2201,6 @@ export function openSystemPromptViewer(
         ? `${zh ? "修改时间" : "Updated"}: ${new Date(res.mtime).toLocaleString()}`
         : "";
 
-      if (res.sections.length > 0) {
-        const sectionsBar = doc.createElement("div");
-        Object.assign(sectionsBar.style, {
-          display: "flex",
-          gap: "6px",
-          flexWrap: "wrap",
-        });
-        for (const sec of res.sections) {
-          const tag = doc.createElement("span");
-          Object.assign(tag.style, {
-            fontSize: "11px",
-            padding: "2px 8px",
-            borderRadius: "10px",
-            backgroundColor: theme.surface2,
-            color: theme.foregroundMuted,
-          });
-          tag.textContent = `${sec.title} (${sec.charCount}c)`;
-          sectionsBar.appendChild(tag);
-        }
-        body.appendChild(sectionsBar);
-      }
-
       const pre = doc.createElement("pre");
       Object.assign(pre.style, {
         margin: "0",
@@ -2501,13 +2472,6 @@ export function installDesktopSessionLineageEnhancer(
       returnBreadcrumb || uniqueReferencedPeers.length > 0 || colleagues.length > 0,
     );
 
-    const effectiveWsId = current?.workspaceId ?? curWksId;
-    const cadenceSched = findCadenceScheduleForWorkspace(
-      effectiveWsId,
-      current?.workspaceTitle,
-    );
-    const hasCadence = Boolean(cadenceSched);
-
     if (
       !data ||
       (!hasParent &&
@@ -2515,12 +2479,10 @@ export function installDesktopSessionLineageEnhancer(
         children.length === 0 &&
         colleagues.length === 0 &&
         !hasBriefOrReport &&
-        !hasReturnOrPeerMentions &&
-        !hasCadence) ||
+        !hasReturnOrPeerMentions) ||
       (!hasCrossWorkspaceLineage &&
         !hasBriefOrReport &&
-        !hasReturnOrPeerMentions &&
-        !hasCadence)
+        !hasReturnOrPeerMentions)
     ) {
       for (const b of allExistingBars) b.remove();
       return;
@@ -2588,7 +2550,6 @@ export function installDesktopSessionLineageEnhancer(
       sibCount: siblings.length,
       brief: current?.briefPath,
       report: current?.reportExists,
-      cad: cadenceSched ? `${cadenceSched.id}:${cadenceSched.lastRunStatus}` : null,
       open: activePopoverSection,
       zh,
       theme: tokens.name,
@@ -2673,65 +2634,6 @@ export function installDesktopSessionLineageEnhancer(
       flexWrap: "wrap",
       minWidth: "0",
     });
-
-    // 0. Cadence Quick-Run Capsule
-    if (cadenceSched) {
-      const isRunning =
-        Boolean(cadenceSched.runningRuns && cadenceSched.runningRuns > 0) ||
-        cadenceSched.lastRunStatus === "running";
-      const elapsedSec = isRunning
-        ? findRunningCadenceElapsedSec(cadenceSched, effectiveWsId)
-        : null;
-      const elapsedText = formatRunningCadenceElapsed(elapsedSec, zh);
-      const cadenceBtn = document.createElement("button");
-      cadenceBtn.type = "button";
-      cadenceBtn.setAttribute("data-testid", "session-cadence-run-pill");
-      cadenceBtn.title = zh
-        ? `定时任务节奏: ${cadenceSched.name}${elapsedText ? ` · 已耗时 ${elapsedText}` : ""} · 单击立即运行 · ⌘⇧H 查看全部记录`
-        : `Cadence: ${cadenceSched.name}${elapsedText ? ` · Running for ${elapsedText}` : ""} · Click to run now · ⌘⇧H for runs history`;
-
-      const iconWrap = document.createElement("span");
-      iconWrap.innerHTML = CADENCE_TIMER_SVG;
-      Object.assign(iconWrap.style, {
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: isRunning ? tokens.primary : tokens.foregroundMuted,
-        flexShrink: "0",
-        animation: isRunning ? "paseoCadenceBadgeBreathe 2s ease-in-out infinite" : "none",
-        transformOrigin: "center",
-      });
-
-      const textSpan = document.createElement("span");
-      textSpan.textContent = zh
-        ? isRunning
-          ? "节奏运行中"
-          : "立即运行节奏"
-        : isRunning
-          ? "Cadence Running"
-          : "Run Cadence Now";
-
-      cadenceBtn.appendChild(iconWrap);
-      cadenceBtn.appendChild(textSpan);
-      styleTrackPill(cadenceBtn, { active: isRunning });
-
-      cadenceBtn.addEventListener("pointerenter", () => {
-        cadenceBtn.style.backgroundColor = tokens.surface2;
-        cadenceBtn.style.color = tokens.foreground;
-      });
-      cadenceBtn.addEventListener("pointerleave", () => {
-        cadenceBtn.style.backgroundColor = isRunning ? tokens.surface2 : tokens.surface1;
-        cadenceBtn.style.color = isRunning ? tokens.foreground : tokens.foregroundMuted;
-      });
-
-      cadenceBtn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        void triggerRunScheduleNow(cadenceSched.id);
-      });
-
-      leftGroup.appendChild(cadenceBtn);
-    }
 
     // 0. Return Breadcrumb ("Don't Lose Yourself" 1-Click Jump Back)
     if (returnBreadcrumb) {

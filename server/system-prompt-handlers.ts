@@ -102,13 +102,14 @@ export function parsePromptSections(raw: string): SystemPromptSection[] {
   };
 
   for (const line of lines) {
-    const headingMatch = /^(?:#{1,4}\s+|\[)(.+?)(?:\])?$/.exec(line.trim());
-    if (headingMatch && line.trim().startsWith("#")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) {
       flush();
-      currentTitle = headingMatch[1]?.trim() ?? "Section";
-    } else if (line.trim().startsWith("[") && line.trim().endsWith("]")) {
+      const rawTitle = trimmed.replace(/^#+\s*/, "").trim();
+      currentTitle = rawTitle.replace(/^\[(.*)\]$/, "$1").trim() || "Section";
+    } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
       flush();
-      currentTitle = line.trim();
+      currentTitle = trimmed.slice(1, -1).trim() || "Section";
     } else {
       currentLines.push(line);
     }

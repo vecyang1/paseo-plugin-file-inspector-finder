@@ -99,3 +99,40 @@ test("System Prompt 5: handleInspectSystemPrompt action=test_clean runs sanitiza
   assert.equal(res.testResult?.cleanedText, "https://my-task.org");
   assert.equal(res.testResult?.strippedPrefix, true);
 });
+
+test("System Prompt 6: parsePromptSections cleanly strips brackets to prevent double-bracket pill badges", () => {
+  const raw = `
+[关注点分工 · 三权分立]
+文案 -> /unslop
+设计 -> /design-md
+
+## [执行与闭环流水线 · 五步法]
+1. 意图解析
+2. 标杆摄取
+
+# [Peer Agents]
+Teammates.
+`;
+  const sections = parsePromptSections(raw);
+  assert.equal(sections.length, 3);
+  assert.equal(sections[0]?.title, "关注点分工 · 三权分立");
+  assert.equal(sections[1]?.title, "执行与闭环流水线 · 五步法");
+  assert.equal(sections[2]?.title, "Peer Agents");
+  // Invariant: no title retains surrounding brackets
+  assert.ok(sections.every((s) => !s.title.startsWith("[") && !s.title.endsWith("]")));
+});
+
+test("System Prompt 7: cleanPromptTextPure removes cadance block cleanly without leftover prompt noise", () => {
+  const withCadence = `
+<cadance>
+If you think u need cadance to RSI or auto evolve and fix, init it.
+ /scheduled-task-rescheduler for above to see if need create cadance or audit, updates ; plz scan patterns, ur log or other intake data source /feedback source and see how should be productive enough as input and audit sidecard if need;
+</cadance>
+
+User actual message here.
+`;
+  const cleaned = cleanPromptTextPure(withCadence);
+  assert.equal(cleaned, "User actual message here.");
+  assert.ok(!cleaned.includes("<cadance>"));
+  assert.ok(!cleaned.includes("how should be productive"));
+});
