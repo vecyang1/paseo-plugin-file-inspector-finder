@@ -1333,11 +1333,79 @@ export const PeerAgentProfileItemSchema = z.object({
   launchFlags: z.string().optional(),
 });
 
+// Peer presence (T-098): which files two or more sessions edited, read from
+// `antigravity-ops peers touching --json`. One row is one working session.
+export const PeerSharedFileSessionSchema = z.object({
+  /** Paseo agent id, or "" for a session outside Paseo. */
+  agent: z.string(),
+  /** Provider session id. */
+  session: z.string(),
+  provider: z.string(),
+  harness: z.string(),
+  model: z.string(),
+  status: z.string(),
+  title: z.string(),
+  scheduled: z.boolean().nullable(),
+  /** Last edit, epoch seconds. null = the CLI did not state it. */
+  last: z.number().nullable(),
+  /** Edits in the window. null = the CLI did not state it. */
+  count: z.number().nullable(),
+});
+
+export type PeerSharedFileSession = z.infer<typeof PeerSharedFileSessionSchema>;
+
+export const PeerSharedFileSchema = z.object({
+  path: z.string(),
+  /** `path` with the home directory written as `~`. */
+  shortPath: z.string(),
+  sessions: z.array(PeerSharedFileSessionSchema),
+});
+
+export type PeerSharedFile = z.infer<typeof PeerSharedFileSchema>;
+
+export const PeerPresenceSummarySchema = z.object({
+  windowMinutes: z.number().nullable(),
+  edits: z.number().nullable(),
+  sessions: z.number().nullable(),
+  files: z.number().nullable(),
+  /** Shared files the CLI reported, before the cap. null = the list could not be read. */
+  sharedTotal: z.number().nullable(),
+  /** True when `sharedFiles` holds fewer rows than `sharedTotal`. */
+  truncated: z.boolean(),
+  warnings: z.array(z.string()),
+});
+
+export type PeerPresenceSummary = z.infer<typeof PeerPresenceSummarySchema>;
+
+export const PeerPresenceVerifyHarnessSchema = z.object({
+  harness: z.string(),
+  gradedSessions: z.number().nullable(),
+  editedPairs: z.number().nullable(),
+  inLedger: z.number().nullable(),
+  beforeHook: z.number().nullable(),
+  missingSessions: z.array(z.string()),
+  hookRanButEditUnread: z.array(z.string()),
+  noHookRun: z.array(z.string()),
+  missingExamples: z.array(z.string()),
+});
+
+export const PeerPresenceVerifySchema = z.object({
+  /** true = every edit reached the ledger, false = a gap, null = the CLI could not grade it. */
+  ok: z.boolean().nullable(),
+  reason: z.string().nullable(),
+  /** Short session ids with edits missing from the ledger, across harnesses. */
+  gapSessions: z.array(z.string()),
+  harness: z.array(PeerPresenceVerifyHarnessSchema),
+  warnings: z.array(z.string()),
+});
+
+export type PeerPresenceVerify = z.infer<typeof PeerPresenceVerifySchema>;
+
 export const managePeerAgentsRpc = defineRpc({
   name: "finder.manage_peer_agents",
   input: z.object({
     action: z
-      .enum(["status", "test_resolve", "enable_all", "heal_outbox"])
+      .enum(["status", "test_resolve", "enable_all", "heal_outbox", "verify_presence"])
       .default("status"),
     profileQuery: z.string().optional(),
     cwd: z.string().optional(),
@@ -1363,6 +1431,12 @@ export const managePeerAgentsRpc = defineRpc({
       })
       .nullable()
       .optional(),
+    // Optional so an older client keeps working. Present on `status` (`sharedFiles`, `presence`)
+    // and on `verify_presence` (`presenceVerify`). null = the CLI run failed or could not be
+    // read, which is unknown and never an empty list.
+    sharedFiles: z.array(PeerSharedFileSchema).nullable().optional(),
+    presence: PeerPresenceSummarySchema.nullable().optional(),
+    presenceVerify: PeerPresenceVerifySchema.nullable().optional(),
     message: z.string(),
     durationMs: z.number(),
   }),

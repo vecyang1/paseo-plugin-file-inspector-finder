@@ -793,12 +793,12 @@ export default function contribute(server: PluginServerContext) {
     name: "manage_peer_agents",
     title: "Inspect, Dry-Run Resolve, or Sync Paseo Peer Agents & Cross-Model Review (v5)",
     description:
-      "Inspect Paseo peer-awareness v5 block states across harnesses & configured agentProfiles (能读), dry-run resolve shorthand model names like 'gemini4, opus 5.5' into exact Paseo profiles (能试), or sync v5 blocks & heal the peer outbox (能调).",
+      "Inspect Paseo peer-awareness v5 block states across harnesses & configured agentProfiles (能读), dry-run resolve shorthand model names like 'gemini4, opus 5.5' into exact Paseo profiles (能试), or sync v5 blocks & heal the peer outbox (能调). status also returns sharedFiles (files two or more sessions edited in the last 30 minutes; null = unknown); verify_presence returns presenceVerify (whether the edit hooks are recording).",
     input: z.object({
       action: z
-        .enum(["status", "test_resolve", "enable_all", "heal_outbox"])
+        .enum(["status", "test_resolve", "enable_all", "heal_outbox", "verify_presence"])
         .optional()
-        .describe("status (default), test_resolve, enable_all, or heal_outbox"),
+        .describe("status (default), test_resolve, enable_all, heal_outbox, or verify_presence"),
       profileQuery: z
         .string()
         .optional()

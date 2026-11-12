@@ -877,6 +877,9 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
           "title": "Peer Agents & Cross-Model Review Reconciler (v5)"
         },
         {
+          "title": "Shared files are edited by two or more sessions. Each line shows who is editing."
+        },
+        {
           "title": "System Starter Prompt & Instructions"
         },
         {

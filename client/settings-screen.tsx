@@ -26,6 +26,9 @@ import {
   type InlineRenameCaretPosition,
   type LabelShortcutCombo,
   type OpenerTarget,
+  type PeerPresenceSummary,
+  type PeerPresenceVerify,
+  type PeerSharedFile,
   type ProjectPickerShortcutPreset,
   type QuickJumpAction,
   VOICE_STT_PRESETS,
@@ -47,6 +50,11 @@ import {
   inspectSystemPromptRpc,
 } from "../shared/contracts";
 import { isChineseLocale, pluginTranslations } from "./i18n";
+import {
+  formatPeerSessionRow,
+  formatPresenceSummary,
+  formatPresenceVerdict,
+} from "../shared/peer-presence-format";
 import { DocPreviewSettingsSection } from "./doc-settings-section";
 import { MermaidSettingsSection } from "./mermaid-settings-section";
 import { RelaySettingsSection } from "./relay-settings-section";
@@ -417,6 +425,26 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [peerAgentsSnapData, setPeerAgentsSnapData] = useState<
     Awaited<ReturnType<typeof managePeerAgents>> | null
   >(null);
+  // Shared files (T-098). undefined = not answered yet, null = the check gave nothing readable.
+  // Kept apart from the snapshot above: the other buttons replace it with a reply that carries
+  // no list, and that must not turn a list into "unknown".
+  const [peerSharedFiles, setPeerSharedFiles] = useState<PeerSharedFile[] | null | undefined>(
+    undefined,
+  );
+  const [peerPresenceSummary, setPeerPresenceSummary] = useState<PeerPresenceSummary | null>(null);
+  const [peerPresenceVerify, setPeerPresenceVerify] = useState<
+    PeerPresenceVerify | null | undefined
+  >(undefined);
+  const [peerPresenceBusy, setPeerPresenceBusy] = useState<"" | "status" | "verify_presence">("");
+  const applyPeerStatus = (res: Awaited<ReturnType<typeof managePeerAgents>>) => {
+    setPeerAgentsSnapData(res);
+    setPeerSharedFiles(res.sharedFiles ?? null);
+    setPeerPresenceSummary(res.presence ?? null);
+  };
+  const markPeerSharedFilesUnknown = () => {
+    setPeerSharedFiles(null);
+    setPeerPresenceSummary(null);
+  };
 
   useEffect(() => {
     if (settings.status === "ready") {
@@ -540,10 +568,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       action: "status",
       source: "settings-ui",
     })
-      .then((res) => {
-        setPeerAgentsSnapData(res);
-      })
-      .catch(() => {});
+      .then(applyPeerStatus)
+      .catch(markPeerSharedFilesUnknown);
   }, [
     manageVoiceStt,
     manageAgentHistory,
@@ -4147,6 +4173,125 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             • {isZh ? "发件箱与队列对账" : "Outbox Summary"}:{" "}
             {peerAgentsSnapData?.outboxSummary ?? "outbox: ok"}
           </Text>
+
+          <View style={{ gap: 4, marginTop: 6 }} testID="peer-shared-files">
+            <View style={styles.row}>
+              <Text style={styles.label}>
+                {isZh
+                  ? `共享文件 (${peerPresenceSummary?.windowMinutes ?? 30} 分钟)`
+                  : `Shared files (${peerPresenceSummary?.windowMinutes ?? 30} min)`}
+              </Text>
+              <Text style={styles.detail} testID="peer-shared-files-count">
+                {peerPresenceBusy === "status"
+                  ? isZh
+                    ? "检查中..."
+                    : "checking..."
+                  : peerSharedFiles === undefined
+                    ? isZh
+                      ? "加载中..."
+                      : "loading..."
+                    : peerSharedFiles === null
+                      ? isZh
+                        ? "未知"
+                        : "unknown"
+                      : [
+                          String(peerPresenceSummary?.sharedTotal ?? peerSharedFiles.length),
+                          formatPresenceSummary(peerPresenceSummary, isZh),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+              </Text>
+            </View>
+            <Text style={styles.detail}>
+              {isZh
+                ? "共享文件指两个及以上会话改过的文件，每行显示谁在改。"
+                : "Shared files are edited by two or more sessions. Each line shows who is editing."}
+            </Text>
+            {peerSharedFiles === null ? (
+              <Text style={styles.detail} testID="peer-shared-files-unknown">
+                {isZh
+                  ? "未知：检查没有返回可读结果。终端里的同一检查：antigravity-ops peers touching"
+                  : "Unknown: the check returned nothing readable. The same check in a terminal: antigravity-ops peers touching"}
+              </Text>
+            ) : null}
+            {peerSharedFiles && peerSharedFiles.length === 0 ? (
+              <Text style={styles.detail} testID="peer-shared-files-empty">
+                {isZh ? "当前没有共享文件。" : "No file is shared right now."}
+              </Text>
+            ) : null}
+            {(peerSharedFiles ?? []).flatMap((file) => [
+              <Text
+                key={file.path}
+                style={[styles.detail, { color: theme.colors.foreground }]}
+              >
+                {file.shortPath}
+              </Text>,
+              ...file.sessions.map((peerSession, index) => (
+                <Text
+                  key={`${file.path}#${peerSession.agent || peerSession.session || index}`}
+                  style={[styles.detail, { paddingLeft: 12 }]}
+                >
+                  {formatPeerSessionRow(peerSession, Date.now() / 1000, isZh)}
+                </Text>
+              )),
+            ])}
+            {peerSharedFiles && peerPresenceSummary?.truncated ? (
+              <Text style={styles.detail}>
+                {isZh
+                  ? `显示 ${peerPresenceSummary.sharedTotal} 个中的前 ${peerSharedFiles.length} 个。`
+                  : `Showing ${peerSharedFiles.length} of ${peerPresenceSummary.sharedTotal}.`}
+              </Text>
+            ) : null}
+            {(peerPresenceSummary?.warnings ?? []).map((warning, index) => (
+              <Text key={`${index}:${warning}`} style={styles.detail}>
+                {isZh ? "警告" : "Warning"}: {warning}
+              </Text>
+            ))}
+            {peerPresenceBusy === "verify_presence" || peerPresenceVerify !== undefined ? (
+              <Text style={styles.detail} testID="peer-presence-verdict">
+                {isZh ? "记录" : "Recording"}:{" "}
+                {peerPresenceBusy === "verify_presence"
+                  ? isZh
+                    ? "检查中..."
+                    : "checking..."
+                  : formatPresenceVerdict(peerPresenceVerify, isZh)}
+              </Text>
+            ) : null}
+            <View style={styles.row}>
+              <Pressable
+                accessibilityRole="button"
+                disabled={peerPresenceBusy !== ""}
+                testID="peer-shared-files-recheck"
+                onPress={() => {
+                  setPeerPresenceBusy("status");
+                  void managePeerAgents({ action: "status", source: "settings-ui" })
+                    .then(applyPeerStatus)
+                    .catch(markPeerSharedFilesUnknown)
+                    .finally(() => setPeerPresenceBusy(""));
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryBtnText}>{isZh ? "重新检查" : "Re-check"}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={peerPresenceBusy !== ""}
+                testID="peer-presence-verify"
+                onPress={() => {
+                  setPeerPresenceBusy("verify_presence");
+                  void managePeerAgents({ action: "verify_presence", source: "settings-ui" })
+                    .then((res) => setPeerPresenceVerify(res.presenceVerify ?? null))
+                    .catch(() => setPeerPresenceVerify(null))
+                    .finally(() => setPeerPresenceBusy(""));
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryBtnText}>
+                  {isZh ? "检查记录" : "Check recording"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
 
           <View style={styles.row}>
             <View style={{ flex: 1, minWidth: 220 }}>

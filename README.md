@@ -123,6 +123,12 @@ Option+D leaves the sidebar still (parks a real session row near the bottom edge
 node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/mark-done-no-scroll-e2e.mts [--port 6811]
 ```
 
+Settings -> Peer Agents -> Shared files (which files two or more sessions edited in the last 30 minutes, and whether the edit hooks are recording). The script records two made-up sessions on one scratch file through the real edit-hook adapter, then compares the count, the rows, `Re-check` and `Check recording` on the page with `antigravity-ops peers touching --json` and `--verify --json` in the same minute:
+
+```bash
+node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/peer-shared-files-e2e.mts [--port 6797] [--shots <dir>]
+```
+
 ## Agent 接入与分布式共建
 
 Agent接入后可自行推理, 也可以完善和提交回改进。

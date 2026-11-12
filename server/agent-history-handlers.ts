@@ -26,6 +26,7 @@ import type {
   reconcilePaseoRecoveryRpc,
 } from "../shared/contracts";
 import { getRecentActionLogs } from "./handlers";
+import { collectPeerPresence } from "./peer-presence";
 import { nonSubagentRelation } from "../shared/sidebar-child-sessions";
 
 const APP_SESSION_TS =
@@ -2560,6 +2561,13 @@ export async function handleManagePeerAgents(
 ) {
   const startMs = Date.now();
   const action = input.action ?? "status";
+  // Shared files on `status`, the recording check on `verify_presence` (server/peer-presence.ts).
+  // Runs beside the status call and never rejects: a failed run comes back as null (unknown).
+  const presencePending = collectPeerPresence(
+    action,
+    (args) => execCommand(ANTIGRAVITY_OPS_BIN, args, { timeout: 20_000 }),
+    { home: os.homedir() },
+  );
   try {
     if (action === "enable_all") {
       await execCommand(ANTIGRAVITY_OPS_BIN, ["peers", "enable", "--json"], {
@@ -2663,6 +2671,7 @@ export async function handleManagePeerAgents(
       };
     }
 
+    const presenceFields = await presencePending;
     const durationMs = Date.now() - startMs;
     const enabledCount = surfaces.filter((s) => s.state === "enabled").length;
     const message = resolvedPreview
@@ -2680,10 +2689,12 @@ export async function handleManagePeerAgents(
       closedPeersCount,
       outboxSummary,
       resolvedPreview,
+      ...presenceFields,
       message,
       durationMs,
     };
   } catch (err) {
+    const presenceFields = await presencePending;
     const durationMs = Date.now() - startMs;
     const errMsg = err instanceof Error ? err.message : String(err);
     return {
@@ -2697,6 +2708,7 @@ export async function handleManagePeerAgents(
       closedPeersCount: 0,
       outboxSummary: "outbox: unknown",
       resolvedPreview: null,
+      ...presenceFields,
       message: `Peer agents reconciler error: ${errMsg}`,
       durationMs,
     };
