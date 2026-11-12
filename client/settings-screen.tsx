@@ -31,6 +31,7 @@ import {
   type PeerSharedFile,
   type ProjectPickerShortcutPreset,
   type QuickJumpAction,
+  type SidebarGroupingPreset,
   VOICE_STT_PRESETS,
   diagnosePathRpc,
   importFolderWorkspaceRpc,
@@ -94,6 +95,14 @@ import {
   runProjectPickerShortcutSelfTest,
   syncProjectPickerShortcutPrefs,
 } from "./project-picker-shortcut-web";
+import {
+  SIDEBAR_GROUPING_SHORTCUT_EVENT,
+  type SidebarGroupingShortcutStatus,
+  getSidebarGroupingShortcutStatus,
+  runSidebarGroupingShortcutSelfTest,
+  switchSidebarGrouping,
+  syncSidebarGroupingShortcutPrefs,
+} from "./sidebar-grouping-shortcut-web";
 import {
   SIDEBAR_DEFAULT_COLLAPSE_EVENT,
   type SidebarDefaultCollapseStatus,
@@ -325,6 +334,120 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       setMenuCapturing(false);
     };
   }, [recordingProjectShortcut, settings, t]);
+  const [sidebarGroupingStatus, setSidebarGroupingStatus] =
+    useState<SidebarGroupingShortcutStatus | null>(null);
+  const [customGroupingProjectInput, setCustomGroupingProjectInput] = useState("Cmd+Ctrl+P");
+  const [customGroupingStatusInput, setCustomGroupingStatusInput] = useState("Cmd+Ctrl+S");
+  const lastSyncedGroupingProjectRef = useRef<string | null>(null);
+  const lastSyncedGroupingStatusRef = useRef<string | null>(null);
+  const [recordingGroupingTarget, setRecordingGroupingTarget] = useState<"project" | "status" | null>(
+    null,
+  );
+  const [groupingProjectShortcutError, setGroupingProjectShortcutError] = useState<string | null>(
+    null,
+  );
+  const [groupingStatusShortcutError, setGroupingStatusShortcutError] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+    if (typeof window === "undefined") return;
+    const onEvent = () => setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+    window.addEventListener(SIDEBAR_GROUPING_SHORTCUT_EVENT, onEvent);
+    return () => window.removeEventListener(SIDEBAR_GROUPING_SHORTCUT_EVENT, onEvent);
+  }, []);
+  useEffect(() => {
+    if (!recordingGroupingTarget || typeof window === "undefined") return;
+    type PaseoDesktopBridge = {
+      menu?: { setCapturingShortcut?: (capturing: boolean) => Promise<void> | void };
+    };
+    const setMenuCapturing = (capturing: boolean) => {
+      try {
+        const desktop = (window as unknown as { paseoDesktop?: PaseoDesktopBridge }).paseoDesktop;
+        void desktop?.menu?.setCapturingShortcut?.(capturing);
+      } catch {
+        // Ignore on web / non-Electron hosts
+      }
+    };
+    setMenuCapturing(true);
+    try {
+      document?.documentElement?.setAttribute("data-paseo-recording-shortcut", "true");
+    } catch {
+      // Ignore
+    }
+    const onCapture = (ev: KeyboardEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation?.();
+      const captured = captureKeyboardEventAsShortcut(ev, isMacPlatform());
+      if (!captured.ok) {
+        if (captured.reason === "modifier-only" || captured.reason === "composing") return;
+        if (captured.reason === "cancelled") {
+          setRecordingGroupingTarget(null);
+          setGroupingProjectShortcutError(null);
+          setGroupingStatusShortcutError(null);
+          return;
+        }
+        if (recordingGroupingTarget === "project") {
+          setGroupingProjectShortcutError(t("settings.sidebarGroupingInvalidShortcut"));
+        } else {
+          setGroupingStatusShortcutError(t("settings.sidebarGroupingInvalidShortcut"));
+        }
+        return;
+      }
+      const target = recordingGroupingTarget;
+      setRecordingGroupingTarget(null);
+      setGroupingProjectShortcutError(null);
+      setGroupingStatusShortcutError(null);
+      if (target === "project") {
+        lastSyncedGroupingProjectRef.current = captured.spec;
+        setCustomGroupingProjectInput(captured.spec);
+        syncSidebarGroupingShortcutPrefs({
+          preset: "custom",
+          projectShortcut: captured.spec,
+        });
+        setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+        if (settings.status === "ready") {
+          void settings.save(
+            {
+              ...settings.values,
+              sidebarGroupingPreset: "custom",
+              sidebarGroupingProjectShortcut: captured.spec,
+            },
+            settings.revision,
+          );
+        }
+      } else {
+        lastSyncedGroupingStatusRef.current = captured.spec;
+        setCustomGroupingStatusInput(captured.spec);
+        syncSidebarGroupingShortcutPrefs({
+          preset: "custom",
+          statusShortcut: captured.spec,
+        });
+        setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+        if (settings.status === "ready") {
+          void settings.save(
+            {
+              ...settings.values,
+              sidebarGroupingPreset: "custom",
+              sidebarGroupingStatusShortcut: captured.spec,
+            },
+            settings.revision,
+          );
+        }
+      }
+    };
+    window.addEventListener("keydown", onCapture, true);
+    return () => {
+      window.removeEventListener("keydown", onCapture, true);
+      setMenuCapturing(false);
+      try {
+        document?.documentElement?.removeAttribute("data-paseo-recording-shortcut");
+      } catch {
+        // Ignore
+      }
+    };
+  }, [recordingGroupingTarget, settings, t]);
   const [sidebarChildStatus, setSidebarChildStatus] = useState<SidebarChildSessionsStatus | null>(null);
   const [sidebarChildChecks, setSidebarChildChecks] = useState<SidebarChildSessionsCheck[] | null>(null);
   useEffect(() => {
@@ -500,6 +623,24 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         setCustomProjectShortcutInput(savedCustomShortcut);
       }
       setProjectPickerStatus(getProjectPickerShortcutStatus());
+      syncSidebarGroupingShortcutPrefs({
+        enabled: settings.values.enableSidebarGroupingShortcuts ?? true,
+        preset: settings.values.sidebarGroupingPreset ?? "cmd_ctrl_p_s",
+        projectShortcut: settings.values.sidebarGroupingProjectShortcut ?? "Cmd+Ctrl+P",
+        statusShortcut: settings.values.sidebarGroupingStatusShortcut ?? "Cmd+Ctrl+S",
+        toggleOnRePress: settings.values.sidebarGroupingToggleOnRePress ?? false,
+      });
+      const savedGroupingProject = settings.values.sidebarGroupingProjectShortcut ?? "Cmd+Ctrl+P";
+      if (lastSyncedGroupingProjectRef.current !== savedGroupingProject) {
+        lastSyncedGroupingProjectRef.current = savedGroupingProject;
+        setCustomGroupingProjectInput(savedGroupingProject);
+      }
+      const savedGroupingStatus = settings.values.sidebarGroupingStatusShortcut ?? "Cmd+Ctrl+S";
+      if (lastSyncedGroupingStatusRef.current !== savedGroupingStatus) {
+        lastSyncedGroupingStatusRef.current = savedGroupingStatus;
+        setCustomGroupingStatusInput(savedGroupingStatus);
+      }
+      setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
       syncSidebarDefaultCollapsePrefs({ enabled: settings.values.startNewProjectsCollapsed });
       syncSettingsSearchPrefs({
         enabled: settings.values.enableSettingsSearch ?? true,
@@ -843,6 +984,85 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         ...values,
         projectPickerShortcutPreset: "alt_p",
         projectPickerCustomShortcut: "Alt+P",
+      },
+      revision,
+    );
+  };
+
+  const applyCustomSidebarGroupingShortcut = (target: "project" | "status", raw: string) => {
+    const trimmed = raw.trim();
+    const isDisable = trimmed === "" || trimmed.toLowerCase() === "none" || trimmed.toLowerCase() === "off";
+    const parsed = isDisable ? null : parseProjectPickerShortcutChord(trimmed);
+    if (!isDisable && !parsed) {
+      if (target === "project") {
+        setGroupingProjectShortcutError(t("settings.sidebarGroupingInvalidShortcut"));
+      } else {
+        setGroupingStatusShortcutError(t("settings.sidebarGroupingInvalidShortcut"));
+      }
+      return;
+    }
+    const nextValue = isDisable ? "none" : trimmed;
+    if (target === "project") {
+      setGroupingProjectShortcutError(null);
+      lastSyncedGroupingProjectRef.current = nextValue;
+      setCustomGroupingProjectInput(nextValue);
+      syncSidebarGroupingShortcutPrefs({
+        preset: "custom",
+        projectShortcut: nextValue,
+      });
+      setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+      void save(
+        {
+          ...values,
+          sidebarGroupingPreset: "custom",
+          sidebarGroupingProjectShortcut: nextValue,
+        },
+        revision,
+      );
+    } else {
+      setGroupingStatusShortcutError(null);
+      lastSyncedGroupingStatusRef.current = nextValue;
+      setCustomGroupingStatusInput(nextValue);
+      syncSidebarGroupingShortcutPrefs({
+        preset: "custom",
+        statusShortcut: nextValue,
+      });
+      setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+      void save(
+        {
+          ...values,
+          sidebarGroupingPreset: "custom",
+          sidebarGroupingStatusShortcut: nextValue,
+        },
+        revision,
+      );
+    }
+  };
+
+  const resetSidebarGroupingShortcutToDefault = () => {
+    setGroupingProjectShortcutError(null);
+    setGroupingStatusShortcutError(null);
+    setRecordingGroupingTarget(null);
+    lastSyncedGroupingProjectRef.current = "Cmd+Ctrl+P";
+    lastSyncedGroupingStatusRef.current = "Cmd+Ctrl+S";
+    setCustomGroupingProjectInput("Cmd+Ctrl+P");
+    setCustomGroupingStatusInput("Cmd+Ctrl+S");
+    syncSidebarGroupingShortcutPrefs({
+      enabled: true,
+      preset: "cmd_ctrl_p_s",
+      projectShortcut: "Cmd+Ctrl+P",
+      statusShortcut: "Cmd+Ctrl+S",
+      toggleOnRePress: false,
+    });
+    setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+    void save(
+      {
+        ...values,
+        enableSidebarGroupingShortcuts: true,
+        sidebarGroupingPreset: "cmd_ctrl_p_s",
+        sidebarGroupingProjectShortcut: "Cmd+Ctrl+P",
+        sidebarGroupingStatusShortcut: "Cmd+Ctrl+S",
+        sidebarGroupingToggleOnRePress: false,
       },
       revision,
     );
@@ -1728,6 +1948,154 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
                 </View>
               </SettingsRow>
             )}
+
+          <SettingsSwitch
+            label={t("settings.sidebarGroupingShortcutLabel")}
+            hint={t("settings.sidebarGroupingShortcutHint")}
+            value={values.enableSidebarGroupingShortcuts ?? true}
+            onValueChange={(next) => {
+              syncSidebarGroupingShortcutPrefs({ enabled: next });
+              setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+              void save({ ...values, enableSidebarGroupingShortcuts: next }, revision);
+            }}
+          />
+
+          {(values.enableSidebarGroupingShortcuts ?? true) && (
+            <>
+              <SettingsSelect
+                label={t("settings.sidebarGroupingPresetLabel")}
+                hint={t("settings.sidebarGroupingPresetHint")}
+                value={values.sidebarGroupingPreset ?? "cmd_ctrl_p_s"}
+                options={[
+                  { label: t("settings.optGroupingShortcutCmdCtrl"), value: "cmd_ctrl_p_s" },
+                  { label: t("settings.optGroupingShortcutCmdAlt"), value: "cmd_alt_p_s" },
+                  { label: t("settings.optGroupingShortcutCtrlShift"), value: "ctrl_shift_p_s" },
+                  { label: t("settings.optGroupingShortcutCustom"), value: "custom" },
+                ]}
+                onValueChange={(next) => {
+                  const preset = next as SidebarGroupingPreset;
+                  setGroupingProjectShortcutError(null);
+                  setGroupingStatusShortcutError(null);
+                  syncSidebarGroupingShortcutPrefs({ preset });
+                  setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+                  void save({ ...values, sidebarGroupingPreset: preset }, revision);
+                }}
+              />
+
+              {(values.sidebarGroupingPreset ?? "cmd_ctrl_p_s") === "custom" && (
+                <>
+                  <SettingsRow
+                    label={t("settings.sidebarGroupingProjectCustomLabel")}
+                    hint={t("settings.sidebarGroupingProjectCustomHint")}
+                    error={groupingProjectShortcutError}
+                  >
+                    <View style={styles.row}>
+                      <TextInput
+                        value={customGroupingProjectInput}
+                        onChangeText={(txt) => {
+                          setCustomGroupingProjectInput(txt);
+                          setGroupingProjectShortcutError(null);
+                        }}
+                        onSubmitEditing={() => {
+                          applyCustomSidebarGroupingShortcut("project", customGroupingProjectInput);
+                        }}
+                        placeholder="Cmd+Ctrl+P"
+                        placeholderTextColor={theme.colors.foregroundMuted}
+                        style={styles.input}
+                      />
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={t("settings.projectPickerApplyBtn")}
+                        onPress={() => {
+                          applyCustomSidebarGroupingShortcut("project", customGroupingProjectInput);
+                        }}
+                        style={styles.btn}
+                      >
+                        <Text style={styles.btnText}>{t("settings.projectPickerApplyBtn")}</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={t("settings.projectPickerRecordBtn")}
+                        onPress={() => {
+                          setGroupingProjectShortcutError(null);
+                          setRecordingGroupingTarget((prev) =>
+                            prev === "project" ? null : "project",
+                          );
+                        }}
+                        style={styles.secondaryBtn}
+                      >
+                        <Text style={styles.secondaryBtnText}>
+                          {recordingGroupingTarget === "project"
+                            ? t("settings.projectPickerRecordingBtn")
+                            : t("settings.projectPickerRecordBtn")}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </SettingsRow>
+
+                  <SettingsRow
+                    label={t("settings.sidebarGroupingStatusCustomLabel")}
+                    hint={t("settings.sidebarGroupingStatusCustomHint")}
+                    error={groupingStatusShortcutError}
+                  >
+                    <View style={styles.row}>
+                      <TextInput
+                        value={customGroupingStatusInput}
+                        onChangeText={(txt) => {
+                          setCustomGroupingStatusInput(txt);
+                          setGroupingStatusShortcutError(null);
+                        }}
+                        onSubmitEditing={() => {
+                          applyCustomSidebarGroupingShortcut("status", customGroupingStatusInput);
+                        }}
+                        placeholder="Cmd+Ctrl+S"
+                        placeholderTextColor={theme.colors.foregroundMuted}
+                        style={styles.input}
+                      />
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={t("settings.projectPickerApplyBtn")}
+                        onPress={() => {
+                          applyCustomSidebarGroupingShortcut("status", customGroupingStatusInput);
+                        }}
+                        style={styles.btn}
+                      >
+                        <Text style={styles.btnText}>{t("settings.projectPickerApplyBtn")}</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={t("settings.projectPickerRecordBtn")}
+                        onPress={() => {
+                          setGroupingStatusShortcutError(null);
+                          setRecordingGroupingTarget((prev) =>
+                            prev === "status" ? null : "status",
+                          );
+                        }}
+                        style={styles.secondaryBtn}
+                      >
+                        <Text style={styles.secondaryBtnText}>
+                          {recordingGroupingTarget === "status"
+                            ? t("settings.projectPickerRecordingBtn")
+                            : t("settings.projectPickerRecordBtn")}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </SettingsRow>
+                </>
+              )}
+
+              <SettingsSwitch
+                label={t("settings.sidebarGroupingToggleOnRePressLabel")}
+                hint={t("settings.sidebarGroupingToggleOnRePressHint")}
+                value={values.sidebarGroupingToggleOnRePress ?? false}
+                onValueChange={(next) => {
+                  syncSidebarGroupingShortcutPrefs({ toggleOnRePress: next });
+                  setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+                  void save({ ...values, sidebarGroupingToggleOnRePress: next }, revision);
+                }}
+              />
+            </>
+          )}
 
           <SettingsSwitch
             label={t("settings.showComposerPillLabel")}
@@ -2694,6 +3062,84 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
             ))
           ) : (
             <Text style={styles.detail}>{t("settings.projectPickerNoReceipts")}</Text>
+          )}
+        </View>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.sectionSidebarGroupingShortcut")}>
+        <View style={styles.diagBox}>
+          <Text style={styles.label}>
+            {t("settings.sidebarGroupingStatusPrefix")}{" "}
+            {sidebarGroupingStatus
+              ? `${sidebarGroupingStatus.prefs.enabled ? "on" : "off"} · active=${sidebarGroupingStatus.currentMode} · project=${sidebarGroupingStatus.displayProjectShortcut} · status=${sidebarGroupingStatus.displayStatusShortcut} (${sidebarGroupingStatus.prefs.preset}) · toggleOnRePress=${sidebarGroupingStatus.prefs.toggleOnRePress} · store=${sidebarGroupingStatus.storeAvailable} · installed=${sidebarGroupingStatus.installed}`
+              : "-"}
+          </Text>
+          <View style={styles.row}>
+            <Pressable
+              style={styles.btn}
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.sidebarGroupingTestProjectBtn")}
+              onPress={() => {
+                switchSidebarGrouping("project", { trigger: "project" });
+                setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+              }}
+            >
+              <Text style={styles.btnText}>{t("settings.sidebarGroupingTestProjectBtn")}</Text>
+            </Pressable>
+            <Pressable
+              style={styles.btn}
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.sidebarGroupingTestStatusBtn")}
+              onPress={() => {
+                switchSidebarGrouping("status", { trigger: "status" });
+                setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+              }}
+            >
+              <Text style={styles.btnText}>{t("settings.sidebarGroupingTestStatusBtn")}</Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.sidebarGroupingTestToggleBtn")}
+              onPress={() => {
+                switchSidebarGrouping("toggle", { trigger: "toggle" });
+                setSidebarGroupingStatus(getSidebarGroupingShortcutStatus());
+              }}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.sidebarGroupingTestToggleBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.sidebarGroupingSelfTestBtn")}
+              onPress={() => setSidebarGroupingStatus(runSidebarGroupingShortcutSelfTest())}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.sidebarGroupingSelfTestBtn")}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel={t("settings.projectPickerResetBtn")}
+              onPress={resetSidebarGroupingShortcutToDefault}
+            >
+              <Text style={styles.secondaryBtnText}>
+                {t("settings.projectPickerResetBtn")}
+              </Text>
+            </Pressable>
+          </View>
+          <Text style={styles.detail}>{t("settings.sidebarGroupingReceiptsTitle")}</Text>
+          {sidebarGroupingStatus && sidebarGroupingStatus.receipts.length > 0 ? (
+            sidebarGroupingStatus.receipts.slice(0, 6).map((r, idx) => (
+              <Text key={`${r.at}-${r.trigger}-${idx}`} style={styles.detail}>
+                • [{r.ok ? "OK" : "ERR"}] {r.at.slice(11, 19)} [{r.trigger}] {r.prevMode} → {r.nextMode} · {r.outcome}
+              </Text>
+            ))
+          ) : (
+            <Text style={styles.detail}>{t("settings.sidebarGroupingNoReceipts")}</Text>
           )}
         </View>
       </SettingsSection>

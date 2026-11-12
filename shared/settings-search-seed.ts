@@ -6,7 +6,7 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
   "version": 1,
   "paseoVersion": "0.15.3",
   "locale": "en",
-  "generatedAt": "2026-11-11",
+  "generatedAt": "2026-11-12",
   "pages": [
     {
       "key": "section:general",
@@ -742,6 +742,18 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
           "hint": "Select a conflict-free preset or enter any custom key chord."
         },
         {
+          "title": "Enable sidebar grouping shortcuts (By Project / By Status)",
+          "hint": "Switch left sidebar grouping between Project and Status from anywhere with configurable keyboard shortcuts, annotating the Grouping menu."
+        },
+        {
+          "title": "Grouping shortcut preset",
+          "hint": "Select a conflict-free pair or configure custom chords for Project and Status."
+        },
+        {
+          "title": "Toggle mode when re-pressing active shortcut",
+          "hint": "When on, pressing the Project shortcut while already in Project mode switches to Status, and vice versa."
+        },
+        {
           "title": "Show Finder button in chat composer",
           "hint": "Display a shortcut pill below the chat input box"
         },
@@ -784,6 +796,9 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
         },
         {
           "title": "Choose the project shortcut"
+        },
+        {
+          "title": "Sidebar grouping shortcuts"
         },
         {
           "title": "Voice & Custom STT Model Reconciler (SiliconFlow / OpenWhispr / Audio Pool :8787)"

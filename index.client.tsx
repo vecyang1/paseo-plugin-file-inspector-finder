@@ -8,6 +8,7 @@ import {
   type OpenerTarget,
   type ProjectPickerShortcutPreset,
   type QuickJumpAction,
+  type SidebarGroupingPreset,
   SUPPORTED_IMAGE_EXTENSIONS,
   WORKSPACE_LABEL_COLORS,
   type WorkspaceLabelColor,
@@ -65,6 +66,11 @@ import {
   openProjectPickerFromShortcut,
   syncProjectPickerShortcutPrefs,
 } from "./client/project-picker-shortcut-web";
+import {
+  installSidebarGroupingShortcut,
+  switchSidebarGrouping,
+  syncSidebarGroupingShortcutPrefs,
+} from "./client/sidebar-grouping-shortcut-web";
 import { installSidebarDefaultCollapse } from "./client/sidebar-default-collapse-web";
 import { installSidebarChildSessions } from "./client/sidebar-child-sessions-web";
 import { installSettingsSearch, openSettingsSearch } from "./client/settings-search-web";
@@ -1823,6 +1829,7 @@ export default function contribute(client: PluginClientContext) {
   const cleanupModelQuickSwitch = installModelQuickSwitch();
 
   const cleanupProjectPickerShortcut = installProjectPickerShortcut();
+  const cleanupSidebarGroupingShortcut = installSidebarGroupingShortcut();
   void client
     .rpc(settingsRpc(pluginSettings.id).read, {})
     .then((res) => {
@@ -1837,6 +1844,28 @@ export default function contribute(client: PluginClientContext) {
           customShortcut:
             typeof v.projectPickerCustomShortcut === "string"
               ? v.projectPickerCustomShortcut
+              : undefined,
+        });
+        syncSidebarGroupingShortcutPrefs({
+          enabled:
+            typeof v.enableSidebarGroupingShortcuts === "boolean"
+              ? v.enableSidebarGroupingShortcuts
+              : undefined,
+          preset:
+            typeof v.sidebarGroupingPreset === "string"
+              ? (v.sidebarGroupingPreset as SidebarGroupingPreset)
+              : undefined,
+          projectShortcut:
+            typeof v.sidebarGroupingProjectShortcut === "string"
+              ? v.sidebarGroupingProjectShortcut
+              : undefined,
+          statusShortcut:
+            typeof v.sidebarGroupingStatusShortcut === "string"
+              ? v.sidebarGroupingStatusShortcut
+              : undefined,
+          toggleOnRePress:
+            typeof v.sidebarGroupingToggleOnRePress === "boolean"
+              ? v.sidebarGroupingToggleOnRePress
               : undefined,
         });
       }
@@ -1967,6 +1996,56 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  client.addCommandCenterItem({
+    id: "group-sidebar-by-project",
+    title: pluginTranslations.message("commands.groupByProject"),
+    icon: "Folder",
+    keywords: ["group", "grouping", "project", "sidebar", "shortcut"],
+    context: "global",
+    onSelect() {
+      switchSidebarGrouping("project", { trigger: "project" });
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "group-sidebar-by-status",
+    title: pluginTranslations.message("commands.groupByStatus"),
+    icon: "CircleDashed",
+    keywords: ["group", "grouping", "status", "sidebar", "shortcut"],
+    context: "global",
+    onSelect() {
+      switchSidebarGrouping("status", { trigger: "status" });
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "toggle-sidebar-grouping",
+    title: pluginTranslations.message("commands.toggleSidebarGrouping"),
+    icon: "ArrowLeftRight",
+    keywords: ["group", "grouping", "toggle", "project", "status", "sidebar"],
+    context: "global",
+    onSelect() {
+      switchSidebarGrouping("toggle", { trigger: "toggle" });
+    },
+  });
+
+  client.addSlashCommand({
+    name: "group",
+    description: pluginTranslations.message("commands.groupSlashDescription"),
+    argumentHint: pluginTranslations.message("commands.groupSlashHint"),
+    context: "workspace",
+    onSubmit({ args }) {
+      const normalized = args.trim().toLowerCase();
+      if (normalized === "project" || normalized === "p" || normalized === "proj") {
+        switchSidebarGrouping("project", { trigger: "project" });
+      } else if (normalized === "status" || normalized === "s" || normalized === "stat") {
+        switchSidebarGrouping("status", { trigger: "status" });
+      } else {
+        switchSidebarGrouping("toggle", { trigger: "toggle" });
+      }
+    },
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -1978,6 +2057,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupVoiceSttEnhancer();
     cleanupModelQuickSwitch();
     cleanupProjectPickerShortcut();
+    cleanupSidebarGroupingShortcut();
     cleanupSidebarDefaultCollapse();
     cleanupSidebarChildSessions();
     cleanupSettingsSearch();

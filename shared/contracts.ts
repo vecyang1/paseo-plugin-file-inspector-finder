@@ -122,6 +122,16 @@ export type ProjectPickerShortcutPreset = z.infer<
   typeof ProjectPickerShortcutPresetSchema
 >;
 
+export const SidebarGroupingPresetSchema = z.enum([
+  "cmd_ctrl_p_s",
+  "cmd_alt_p_s",
+  "ctrl_shift_p_s",
+  "custom",
+]);
+export type SidebarGroupingPreset = z.infer<
+  typeof SidebarGroupingPresetSchema
+>;
+
 export const SmartCopyBulletMarkerSchema = z.enum(["bullet", "dash"]);
 export type SmartCopyBulletMarker = z.infer<typeof SmartCopyBulletMarkerSchema>;
 
@@ -179,6 +189,11 @@ export const pluginSettings = defineSettings({
     enableProjectPickerShortcut: z.boolean().default(true),
     projectPickerShortcutPreset: ProjectPickerShortcutPresetSchema.default("alt_p"),
     projectPickerCustomShortcut: z.string().default("Alt+P"),
+    enableSidebarGroupingShortcuts: z.boolean().default(true),
+    sidebarGroupingPreset: SidebarGroupingPresetSchema.default("cmd_ctrl_p_s"),
+    sidebarGroupingProjectShortcut: z.string().default("Cmd+Ctrl+P"),
+    sidebarGroupingStatusShortcut: z.string().default("Cmd+Ctrl+S"),
+    sidebarGroupingToggleOnRePress: z.boolean().default(false),
     enableAgentHistoryAutoHeal: z.boolean().default(true),
     showComposerPill: z.boolean().default(false),
     defaultCanvasBackground: z.enum(["dark", "checker", "light"]).default("checker"),

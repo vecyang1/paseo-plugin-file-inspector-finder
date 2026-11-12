@@ -50,6 +50,12 @@ export const enMessages = {
     copyMdSlashDescription:
       "Copy selection or latest assistant reply as raw Markdown with ** and ### syntax",
     copyMdSlashHint: "[optional mode]",
+    groupByProject: "Finder: Group Sidebar by Project",
+    groupByStatus: "Finder: Group Sidebar by Status",
+    toggleSidebarGrouping: "Finder: Toggle Sidebar Grouping (Project / Status)",
+    groupSlashDescription:
+      "Switch sidebar grouping between Project and Status (or toggle)",
+    groupSlashHint: "[project | status | toggle]",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -368,6 +374,33 @@ export const enMessages = {
     projectPickerReceiptsTitle: "Recent receipts",
     projectPickerNoReceipts: "No receipts yet. Open New Workspace and press the shortcut while typing.",
     projectPickerInvalidShortcut: "Invalid shortcut: include at least Cmd, Ctrl, or Alt (or F1-F12).",
+    sectionSidebarGroupingShortcut: "Sidebar grouping shortcuts",
+    sidebarGroupingShortcutLabel: "Enable sidebar grouping shortcuts (By Project / By Status)",
+    sidebarGroupingShortcutHint:
+      "Switch left sidebar grouping between Project and Status from anywhere with configurable keyboard shortcuts, annotating the Grouping menu.",
+    sidebarGroupingPresetLabel: "Grouping shortcut preset",
+    sidebarGroupingPresetHint: "Select a conflict-free pair or configure custom chords for Project and Status.",
+    optGroupingShortcutCmdCtrl: "Ctrl+Cmd+P (Project) / Ctrl+Cmd+S (Status) · Recommended",
+    optGroupingShortcutCmdAlt: "Option+Cmd+P (Project) / Option+Cmd+S (Status)",
+    optGroupingShortcutCtrlShift: "Ctrl+Shift+P (Project) / Ctrl+Shift+S (Status)",
+    optGroupingShortcutCustom: "Custom shortcuts",
+    sidebarGroupingProjectCustomLabel: "Group by Project shortcut",
+    sidebarGroupingProjectCustomHint:
+      "Enter e.g. Cmd+Ctrl+P, Ctrl+Alt+P, or click Record and press keys (or 'none' to disable).",
+    sidebarGroupingStatusCustomLabel: "Group by Status shortcut",
+    sidebarGroupingStatusCustomHint:
+      "Enter e.g. Cmd+Ctrl+S, Ctrl+Alt+S, or click Record and press keys (or 'none' to disable).",
+    sidebarGroupingToggleOnRePressLabel: "Toggle mode when re-pressing active shortcut",
+    sidebarGroupingToggleOnRePressHint:
+      "When on, pressing the Project shortcut while already in Project mode switches to Status, and vice versa.",
+    sidebarGroupingStatusPrefix: "Sidebar grouping:",
+    sidebarGroupingTestProjectBtn: "Switch to Project",
+    sidebarGroupingTestStatusBtn: "Switch to Status",
+    sidebarGroupingTestToggleBtn: "Toggle Mode",
+    sidebarGroupingSelfTestBtn: "Run self-test",
+    sidebarGroupingReceiptsTitle: "Recent receipts",
+    sidebarGroupingNoReceipts: "No receipts yet. Press Ctrl+Cmd+P / Ctrl+Cmd+S or use the test buttons.",
+    sidebarGroupingInvalidShortcut: "Invalid shortcut: include at least Cmd, Ctrl, or Alt (or F1-F12), or 'none'.",
     voiceSttDiagPrompt:
       "Inspect Paseo's active Speech-to-text configuration, switch to SiliconFlow free/SOTA models or any custom model ID, or run a live audio transcription probe:",
     voiceSttModelPlaceholder:
@@ -464,6 +497,11 @@ export const zhMessages: PluginMessageCatalog = {
     copyCleanSlashHint: "[smart | plain | markdown]",
     copyMdSlashDescription: "将当前选中内容或最新回复复制为保留 ** 与 ### 的原始 Markdown",
     copyMdSlashHint: "[可选模式]",
+    groupByProject: "Finder：侧边栏按项目分组",
+    groupByStatus: "Finder：侧边栏按状态分组",
+    toggleSidebarGrouping: "Finder：切换侧边栏分组模式（项目 / 状态）",
+    groupSlashDescription: "切换侧边栏分组模式为按项目或按状态（留空为切换）",
+    groupSlashHint: "[project | status | toggle]",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
@@ -774,6 +812,33 @@ export const zhMessages: PluginMessageCatalog = {
     projectPickerReceiptsTitle: "最近回执",
     projectPickerNoReceipts: "暂无回执。在新建工作区输入框中按下快捷键即可触发并记录。",
     projectPickerInvalidShortcut: "无效快捷键：请至少包含 Cmd、Ctrl 或 Alt 修饰键（或 F1-F12）。",
+    sectionSidebarGroupingShortcut: "侧边栏分组快捷键",
+    sidebarGroupingShortcutLabel: "启用侧边栏分组快捷键（按项目 / 按状态）",
+    sidebarGroupingShortcutHint:
+      "使用可自由配置的快捷键在「按项目」与「按状态」分组之间一键切换，并在原生 Grouping 菜单中展示键位提示。",
+    sidebarGroupingPresetLabel: "分组快捷键组合",
+    sidebarGroupingPresetHint: "选择无冲突预设组合，或分别为按项目与按状态自定义快捷键。",
+    optGroupingShortcutCmdCtrl: "Ctrl+Cmd+P（按项目）/ Ctrl+Cmd+S（按状态）· 推荐",
+    optGroupingShortcutCmdAlt: "Option+Cmd+P（按项目）/ Option+Cmd+S（按状态）",
+    optGroupingShortcutCtrlShift: "Ctrl+Shift+P（按项目）/ Ctrl+Shift+S（按状态）",
+    optGroupingShortcutCustom: "自定义快捷键",
+    sidebarGroupingProjectCustomLabel: "「按项目分组」快捷键",
+    sidebarGroupingProjectCustomHint:
+      "支持输入如 Cmd+Ctrl+P、Ctrl+Alt+P，或点击「录制按键」直接捕获组合键（留空或填 none 可单独禁用）。",
+    sidebarGroupingStatusCustomLabel: "「按状态分组」快捷键",
+    sidebarGroupingStatusCustomHint:
+      "支持输入如 Cmd+Ctrl+S、Ctrl+Alt+S，或点击「录制按键」直接捕获组合键（留空或填 none 可单独禁用）。",
+    sidebarGroupingToggleOnRePressLabel: "重复按下当前模式快捷键时自动切换",
+    sidebarGroupingToggleOnRePressHint:
+      "开启后，若当前已处于按项目分组，再按按项目快捷键会自动切换为按状态分组（反之亦然）。",
+    sidebarGroupingStatusPrefix: "侧边栏分组：",
+    sidebarGroupingTestProjectBtn: "切至按项目",
+    sidebarGroupingTestStatusBtn: "切至按状态",
+    sidebarGroupingTestToggleBtn: "切换模式",
+    sidebarGroupingSelfTestBtn: "运行自检",
+    sidebarGroupingReceiptsTitle: "最近回执",
+    sidebarGroupingNoReceipts: "暂无回执。按下 Ctrl+Cmd+P / Ctrl+Cmd+S 或点击上方实测按钮即可记录。",
+    sidebarGroupingInvalidShortcut: "无效快捷键：请至少包含 Cmd、Ctrl 或 Alt 修饰键（或 F1-F12），或填 none。",
     voiceSttDiagPrompt:
       "实时读取 Paseo 当前生效的语音转文字配置，一键切换硅基流动免费/高精模型或任意自定义模型 ID，并发送真实音频执行端到端转录验收：",
     voiceSttModelPlaceholder:
