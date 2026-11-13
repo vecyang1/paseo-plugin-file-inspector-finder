@@ -100,8 +100,8 @@ test("Quote Reply 10: send labels cover Paseo's shipped locales and reject other
 
 test("Quote Reply 11: a multi-line quote with a short first line is still found in its sent bubble", () => {
   // The bubble shows every quoted line behind "> ", so a probe spanning the line break never matches.
-  const quotes = [q("Next steps:\nemail the 486 past buyers this week")];
-  const bubble = "> Next steps:\n> email the 486 past buyers this week\n\nmy comment\n\ngo";
+  const quotes = [q("Next steps:\nsend the summary to the whole team this week")];
+  const bubble = "> Next steps:\n> send the summary to the whole team this week\n\nmy comment\n\ngo";
   assert.equal(messageContainsQuote(bubble, quotes), true);
 });
 

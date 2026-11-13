@@ -1154,23 +1154,48 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
 
   let verifyTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** User bubbles of one chat pane, each marked new when it was not on screen before the send. */
+  const readPaneBubbles = (pane: Element | null, before: ReadonlySet<Element>) =>
+    Array.from(pane?.querySelectorAll(USER_MESSAGE_SELECTOR) ?? []).map((el) => ({
+      text: userBubbleMessageText(el.textContent ?? "", el.querySelector(USER_MESSAGE_TRAILING_SELECTOR)?.textContent ?? ""),
+      isNew: !before.has(el),
+    }));
+
+  /**
+   * The pane whose bubbles can speak for this send: the composer's own chat list. When the composer
+   * is gone (a new session navigated to its chat), the single visible chat list stands in; with
+   * none or several visible there is no safe answer and the check stays silent.
+   */
+  const resolveSendPane = (composer: HTMLTextAreaElement): Element | null => {
+    if (composer.isConnected) return findChatPaneFor(composer);
+    const visible = Array.from(doc.querySelectorAll(CHAT_SCROLL_SELECTOR)).filter((el) => isVisible(el));
+    return visible.length === 1 ? visible[0] : null;
+  };
+
+  /** Folds the tray and presses Paseo's own send button: the tray's Send and Cmd/Ctrl+Enter in a comment. */
   const sendFromTray = (via: string) => {
+    if (folding) return; // a send is already being verified; folding again would write the quotes twice
     const composer = findComposer(doc, lastComposer);
     if (!composer || !readQuoteTray(getSessionKey()).length) return;
     lastComposer = composer;
     foldTrayIntoComposer(composer, via);
+    if (!folding) return;
+    // The composed text is in the composer now, so Paseo renders its send button. If it never
+    // appears (offline, composer disabled), the verifier below puts the text back and keeps the tray.
     const clickSend = (attempt: number) => {
       const btn = findNativeSendButton(composer);
       if (btn) {
         btn.click();
+        composer.focus();
         return;
       }
-      if (attempt < 5) setTimeout(() => clickSend(attempt + 1), 16);
+      if (attempt < 8) setTimeout(() => clickSend(attempt + 1), 16);
     };
-    setTimeout(() => clickSend(0), 0);
+    clickSend(0);
   };
 
   const foldTrayIntoComposer = (composer: HTMLTextAreaElement, via: string) => {
+    if (folding) return;
     const key = getSessionKey();
     const quotes = readQuoteTray(key);
     if (!quotes.length) return;
@@ -1178,49 +1203,78 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
     const leading = typed.length - typed.replace(/^\s+/, "").length;
     const caret = Math.max(0, (composer.selectionStart ?? typed.length) - leading);
     const composed = composeQuotedMessage(quotes, typed);
+    // Every user bubble on screen before the send, in any pane: anything else is new afterwards.
+    const before = new Set<Element>(Array.from(doc.querySelectorAll(USER_MESSAGE_SELECTOR)));
     setComposerText(composer, composed.text, composed.prefix.length + caret);
     folding = true;
-    const sentAt = Date.now();
-    const userCountBefore = doc.querySelectorAll(USER_MESSAGE_SELECTOR).length;
+    const foldedAt = Date.now();
     if (verifyTimer) clearTimeout(verifyTimer);
     // Hide the tray right away so the UI reads as "sent"; storage is cleared once verified.
     doc.getElementById(TRAY_ID)?.remove();
-    verifyTimer = setTimeout(() => {
-      verifyTimer = null;
+
+    const keepTray = (outcome: string, toast: boolean) => {
       folding = false;
-      const value = composer.isConnected ? composer.value : "";
-      const stillComposed = value.startsWith(composed.prefix) && value.length >= composed.prefix.length;
-      if (stillComposed) {
-        // The key / press did not send (send shortcut differs, button disabled, etc.).
-        const restored = stripQuotedPrefix(value, composed.prefix);
-        if (restored !== null) setComposerText(composer, restored);
-        recordQuoteReplyReceipt({ trigger: "send-reverted", sessionKey: key, quoteCount: quotes.length, chars: 0, ok: true, outcome: `${via}: did not send, message text restored, tray kept` });
-        options.notify?.(copy().revertedToast);
+      recordQuoteReplyReceipt({ trigger: "send-reverted", sessionKey: key, quoteCount: quotes.length, chars: 0, ok: true, outcome: `${via}: ${outcome}` });
+      if (toast) options.notify?.(copy().revertedToast);
+      renderTray();
+    };
+
+    // Step 2, after the composer says "sent": look for the bubble in this composer's own pane.
+    const confirmInBubble = (sentAt: number) => {
+      const elapsed = Date.now() - sentAt;
+      const verdict = judgeQuoteSend({
+        bubbles: readPaneBubbles(resolveSendPane(composer), before),
+        quotes,
+        typed,
+        settled: elapsed >= CONFIRM_SETTLE_MS,
+      });
+      if (verdict === "confirmed") return;
+      if (verdict === "dropped") {
+        const current = readQuoteTray(key);
+        writeQuoteTray(key, [...quotes, ...current.filter((q) => !quotes.some((o) => o.id === q.id))]);
+        recordQuoteReplyReceipt({ trigger: "send-restored", sessionKey: key, quoteCount: quotes.length, chars: 0, ok: false, outcome: `${via}: the message went out as the typed text only, tray restored` });
+        options.notify?.(copy().restoredToast);
         renderTray();
         return;
       }
+      // No bubble yet (a queued send, a slow echo): keep looking, then stop without touching anything.
+      if (elapsed < CONFIRM_WINDOW_MS) setTimeout(() => confirmInBubble(sentAt), CONFIRM_POLL_MS);
+    };
+
+    // Step 1: did the key / press send at all?
+    const settle = () => {
+      verifyTimer = null;
+      const connected = composer.isConnected;
+      const outcome = judgeFoldedComposer({
+        connected,
+        value: connected ? composer.value : "",
+        prefix: composed.prefix,
+        locked: connected && (composer.readOnly || composer.disabled),
+      });
+      if (outcome === "in-flight") {
+        if (Date.now() - foldedAt < LOCKED_WAIT_MS) {
+          verifyTimer = setTimeout(settle, LOCKED_POLL_MS);
+          return;
+        }
+        // Still locked: leave the text alone (it may yet send) and bring the tray back.
+        keepTray("still sending after 90s, tray kept", false);
+        return;
+      }
+      if (outcome === "not-sent") {
+        // The key / press did not send (send shortcut differs, button disabled, offline).
+        const restored = stripQuotedPrefix(composer.value, composed.prefix);
+        if (restored !== null) setComposerText(composer, restored);
+        keepTray("did not send, message text restored, tray kept", true);
+        return;
+      }
+      folding = false;
       writeQuoteTray(key, []);
       recordQuoteReplyReceipt({ trigger: "send", sessionKey: key, quoteCount: quotes.length, chars: composed.text.length, ok: true, outcome: `${via}: folded ${quotes.length} quote(s) into the message` });
       renderTray();
-      // Second check: the newest user bubble should carry the quote text.
-      const confirm = (attempt: number) => {
-        const bubbles = doc.querySelectorAll(USER_MESSAGE_SELECTOR);
-        const newest = bubbles[bubbles.length - 1];
-        if (bubbles.length > userCountBefore && newest) {
-          if (!messageContainsQuote(newest.textContent ?? "", quotes)) {
-            const current = readQuoteTray(key);
-            writeQuoteTray(key, [...quotes, ...current.filter((q) => !quotes.some((o) => o.id === q.id))]);
-            recordQuoteReplyReceipt({ trigger: "send-restored", sessionKey: key, quoteCount: quotes.length, chars: 0, ok: false, outcome: `${via}: quote text not found in the sent bubble, tray restored` });
-            options.notify?.(copy().restoredToast);
-            renderTray();
-          }
-          return;
-        }
-        // Queued sends or a different pane may not add a bubble here; stop after ~6s.
-        if (attempt < 12 && Date.now() - sentAt < 8000) setTimeout(() => confirm(attempt + 1), 500);
-      };
-      setTimeout(() => confirm(0), 400);
-    }, 650);
+      const sentAt = Date.now();
+      setTimeout(() => confirmInBubble(sentAt), CONFIRM_POLL_MS);
+    };
+    verifyTimer = setTimeout(settle, FOLD_CHECK_MS);
   };
 
   const onKeyDownCapture = (event: KeyboardEvent) => {
@@ -1230,6 +1284,7 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
     if (!readQuoteReplyPreferences().enabled) return;
     if (!readQuoteTray(getSessionKey()).length) return;
     if (doc.querySelector(AUTOCOMPLETE_SELECTOR)) return; // Enter picks a slash / @ suggestion
+    if (folding) return; // the text already carries the quotes; a second fold would write them twice
     lastComposer = target;
     foldTrayIntoComposer(target, event.metaKey || event.ctrlKey ? "mod-enter" : "enter");
   };
@@ -1241,6 +1296,7 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
     if (!btn || !btn.closest(COMPOSER_ROOT_SELECTOR)) return;
     if (!isQuoteReplySendLabel(btn.getAttribute("aria-label"))) return;
     if (!readQuoteReplyPreferences().enabled || !readQuoteTray(getSessionKey()).length) return;
+    if (folding) return;
     const composer = btn.closest(COMPOSER_ROOT_SELECTOR)?.querySelector<HTMLTextAreaElement>(COMPOSER_SELECTOR);
     if (!composer) return;
     lastComposer = composer;
