@@ -18,6 +18,7 @@ import {
   importFolderWorkspaceRpc,
   listWorkspaceMediaRpc,
   manageAgentHistoryRpc,
+  manageHarnessCatalogsRpc,
   manageSessionLineageRpc,
   manageSlashSkillsRpc,
   manageVoiceSttRpc,
@@ -2099,6 +2100,42 @@ export default function contribute(client: PluginClientContext) {
         (input) => rpc(manageIntakeDecisionsRpc, input),
         taskQuery,
       );
+    },
+  });
+
+  client.addCommandCenterItem({
+    id: "sync-harness-model-catalogs",
+    title: "Models: Sync & Live-Refresh Latest Models Across All Harnesses",
+    icon: "RefreshCw",
+    keywords: [
+      "models",
+      "catalog",
+      "sync",
+      "hydrogen",
+      "gemini",
+      "claude",
+      "codex",
+      "cursor",
+      "模型",
+      "同步",
+      "刷新模型",
+    ],
+    context: "global",
+    async onSelect({ rpc }) {
+      await rpc(manageHarnessCatalogsRpc, { action: "sync" });
+    },
+  });
+
+  client.addSlashCommand({
+    name: "sync-models",
+    description:
+      "Discover and live-refresh latest models and profiles across all Paseo harnesses without restarting (/sync-models [status|sync|refresh])",
+    argumentHint: "[status | sync | refresh]",
+    context: "workspace",
+    async onSubmit({ args, rpc }) {
+      const raw = args.trim().toLowerCase();
+      const action = raw === "status" ? "status" : raw === "refresh" ? "refresh" : "sync";
+      await rpc(manageHarnessCatalogsRpc, { action });
     },
   });
 

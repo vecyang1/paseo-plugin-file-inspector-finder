@@ -59,6 +59,7 @@ import {
 import { DocPreviewSettingsSection } from "./doc-settings-section";
 import { IntakeDecisionsSettingsSection } from "./intake-decisions-settings-section";
 import { MermaidSettingsSection } from "./mermaid-settings-section";
+import { ModelCatalogSettingsSection } from "./model-catalog-settings-section";
 import { RelaySettingsSection } from "./relay-settings-section";
 import {
   type ScheduleRunsDomHealthSnapshot,
@@ -4440,6 +4441,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       <DocPreviewSettingsSection isZh={isZh} styles={styles} />
 
       <RelaySettingsSection isZh={isZh} styles={styles} />
+
+      <ModelCatalogSettingsSection isZh={isZh} styles={styles} />
 
       <IntakeDecisionsSettingsSection isZh={isZh} styles={styles} />
 

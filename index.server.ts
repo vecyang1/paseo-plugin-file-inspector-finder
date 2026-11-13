@@ -20,6 +20,7 @@ import {
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
   manageAgentHistoryRpc,
+  manageHarnessCatalogsRpc,
   managePeerAgentsRpc,
   manageRelayHealthRpc,
   manageSessionLineageRpc,
@@ -40,6 +41,7 @@ import {
   handleInspectFile,
   handleListWorkspaceMedia,
   handleManageAgentHistory,
+  handleManageHarnessCatalogs,
   handleManagePeerAgents,
   handleManageRelayHealth,
   handleManageSessionLineage,
@@ -129,6 +131,7 @@ export default function contribute(rawServer: PluginServerContext) {
   server.handle(reconcilePaseoRecoveryRpc, handleReconcilePaseoRecovery);
   server.handle(managePeerAgentsRpc, handleManagePeerAgents);
   server.handle(manageRelayHealthRpc, handleManageRelayHealth);
+  server.handle(manageHarnessCatalogsRpc, handleManageHarnessCatalogs);
   server.handle(forkSessionRpc, handleForkSession);
   server.handle(resolveCommitOriginRpc, (input) => handleResolveCommitOrigin(input));
   server.handle(inspectSystemPromptRpc, handleInspectSystemPrompt);
@@ -930,6 +933,23 @@ export default function contribute(rawServer: PluginServerContext) {
     },
   });
 
+  const finderHarnessCatalogsTool = defineAgentTool({
+    name: "finder_manage_model_catalogs",
+    title: "Inspect or Live-Sync Paseo Multi-Harness Model Catalogs & Profiles",
+    description:
+      "Inspect cross-harness model catalog alignment (status), synthesize live models & dynamic routes and push to Paseo without daemon restart (sync), or force-refresh all provider snapshots (refresh).",
+    input: z.object({
+      action: z.enum(["status", "sync", "refresh"]).optional().default("status"),
+    }),
+    async execute(input, { paseo }) {
+      const res = await handleManageHarnessCatalogs(
+        { action: input.action ?? "status" },
+        { paseo } as never,
+      );
+      return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -962,6 +982,7 @@ export default function contribute(rawServer: PluginServerContext) {
         docPreviewTool,
         finderInspectContextTool,
         finderIntakeDecisionsTool,
+        finderHarnessCatalogsTool,
       ],
     };
   });

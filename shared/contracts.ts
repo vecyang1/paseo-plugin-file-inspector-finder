@@ -1549,3 +1549,35 @@ export const manageRelayHealthRpc = defineRpc({
     durationMs: z.number(),
   }),
 });
+
+export const HarnessCatalogItemSchema = z.object({
+  provider: z.string(),
+  paseoModelCount: z.number(),
+  upstreamCount: z.number().nullable(),
+  inSync: z.boolean(),
+  topModels: z.array(z.string()),
+  missingInPaseo: z.array(z.string()),
+});
+
+export type HarnessCatalogItem = z.infer<typeof HarnessCatalogItemSchema>;
+
+export const manageHarnessCatalogsRpc = defineRpc({
+  name: "finder.manage_harness_catalogs",
+  input: z.object({
+    action: z.enum(["status", "sync", "refresh"]).default("status"),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.enum(["status", "sync", "refresh"]),
+    catalogSignature: z.string(),
+    syncedAt: z.string(),
+    antigravityTotal: z.number(),
+    nativeEffortCount: z.number(),
+    bridgeCount: z.number(),
+    harnesses: z.array(HarnessCatalogItemSchema),
+    actions: z.array(z.string()),
+    issues: z.array(z.string()),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});

@@ -17,6 +17,7 @@ import type {
   SubagentTimerOrTaskNode,
   WritebackReplayEvent,
   manageAgentHistoryRpc,
+  manageHarnessCatalogsRpc,
   managePeerAgentsRpc,
   manageRelayHealthRpc,
   manageSessionLineageRpc,
@@ -727,6 +728,87 @@ export async function handleManageRelayHealth(
       actions: [] as string[],
       issues: [errMsg],
       details: errMsg,
+      message: errMsg,
+      durationMs,
+    };
+  }
+}
+
+export async function handleManageHarnessCatalogs(
+  input: RpcInput<typeof manageHarnessCatalogsRpc>,
+  _context: PluginHandlerContext,
+) {
+  const startMs = Date.now();
+  const action = input.action ?? "status";
+  const args = ["catalog", action, "--json"];
+  try {
+    let stdoutText = "";
+    try {
+      const res = await execCommand(ANTIGRAVITY_OPS_BIN, args, {
+        timeout: 35_000,
+        env: { ...process.env, VEC_PASEO_NO_RESTART: "1" },
+      });
+      stdoutText = res.stdout || "";
+    } catch (execErr) {
+      const maybeStdout = (execErr as { stdout?: string })?.stdout ?? "";
+      if (maybeStdout.trim().startsWith("{")) {
+        stdoutText = maybeStdout;
+      } else {
+        throw execErr;
+      }
+    }
+    const parsed = JSON.parse(stdoutText || "{}") as Record<string, unknown>;
+    const agObj = (parsed.antigravity ?? {}) as Record<string, unknown>;
+    const harnessesMap = (parsed.harnesses ?? {}) as Record<string, Record<string, unknown>>;
+    const harnesses = Object.entries(harnessesMap).map(([prov, hv]) => ({
+      provider: prov,
+      paseoModelCount: Number(hv?.paseo_model_count ?? 0),
+      upstreamCount: typeof hv?.upstream_count === "number" ? hv.upstream_count : null,
+      inSync: Boolean(hv?.in_sync),
+      topModels: Array.isArray(hv?.paseo_top_models) ? hv.paseo_top_models.map(String) : [],
+      missingInPaseo: Array.isArray(hv?.missing_in_paseo) ? hv.missing_in_paseo.map(String) : [],
+    }));
+    const actions = Array.isArray(parsed.actions) ? parsed.actions.map(String) : [];
+    const issues = Array.isArray(parsed.issues) ? parsed.issues.map(String) : [];
+    const agModels = Array.isArray(agObj.models) ? agObj.models.length : 0;
+    const nativeIds = Array.isArray(agObj.native_ids) ? agObj.native_ids.length : 0;
+    const bridgeIds = Array.isArray(agObj.non_native_ids) ? agObj.non_native_ids.length : 0;
+    const ok = Boolean(parsed.ok);
+    const durationMs = Date.now() - startMs;
+    const summaryMsg =
+      actions[0] ||
+      issues[0] ||
+      (ok
+        ? `Catalog synced (${harnesses.length} providers, ${agModels} Antigravity models)`
+        : "Catalog drift detected");
+    return {
+      ok,
+      action,
+      catalogSignature: String(parsed.catalog_signature ?? ""),
+      syncedAt: String(parsed.synced_at ?? new Date().toISOString()),
+      antigravityTotal: agModels,
+      nativeEffortCount: nativeIds,
+      bridgeCount: bridgeIds,
+      harnesses,
+      actions,
+      issues,
+      message: summaryMsg,
+      durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - startMs;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      action,
+      catalogSignature: "",
+      syncedAt: new Date().toISOString(),
+      antigravityTotal: 0,
+      nativeEffortCount: 0,
+      bridgeCount: 0,
+      harnesses: [],
+      actions: [] as string[],
+      issues: [errMsg],
       message: errMsg,
       durationMs,
     };
