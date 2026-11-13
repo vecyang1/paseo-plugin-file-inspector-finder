@@ -46,6 +46,7 @@ import {
   openQuickWorkspaceSwitcherModal,
   readQuickJumpPreferences,
   resolveCurrentActiveWorkspaceId,
+  showFinderNoticeToast,
   syncImagePanelAssociations,
   syncInlineRenamePreferences,
   synchronizeWorkspaceTitleDom,
@@ -123,9 +124,14 @@ import {
   reconcileAllPinnedNow,
   syncPinPrefixPrefs,
 } from "./client/pin-prefix-web";
+import {
+  installQuotaQueueGuard,
+  syncQuotaQueuePrefs,
+} from "./client/quota-queue-guard-web";
 import { createKeyedSerialQueue } from "./client/keyed-serial";
 import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
 import { manageIntakeDecisionsRpc } from "./shared/intake-decisions-contracts";
+import { manageQuotaQueueRpc } from "./shared/quota-queue-contracts";
 
 // One queue for every title write path (Option+D, /done, the Command Center action, F2, slash rename).
 // Each rename sends a native setTitle and then a plugin RPC that sets the title again; without
@@ -1911,6 +1917,16 @@ export default function contribute(client: PluginClientContext) {
               ? v.pinTitlePrefix
               : undefined,
         });
+        syncQuotaQueuePrefs({
+          enabled:
+            typeof v.enableQuotaQueueGuard === "boolean"
+              ? v.enableQuotaQueueGuard
+              : undefined,
+          autoDrain:
+            typeof v.quotaQueueAutoDrain === "boolean"
+              ? v.quotaQueueAutoDrain
+              : undefined,
+        });
       }
     })
     .catch(() => {});
@@ -1994,6 +2010,12 @@ export default function contribute(client: PluginClientContext) {
     getWebWindow(),
     (input) => client.rpc(manageIntakeDecisionsRpc, input),
   );
+
+  const cleanupQuotaQueueGuard = installQuotaQueueGuard({
+    win: getWebWindow() as Window | null,
+    rpcCall: (input) => client.rpc(manageQuotaQueueRpc, input),
+    getLocale: () => client.i18n.locale,
+  });
 
   client.addCommandCenterItem({
     id: "refresh-context-window-meter",
@@ -2199,6 +2221,49 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  client.addCommandCenterItem({
+    id: "inspect-quota-queue",
+    title: pluginTranslations.message("commands.inspectQuotaQueue"),
+    icon: "Clock",
+    keywords: ["quota", "queue", "429", "cooldown", "rate limit", "排队", "配额"],
+    context: "global",
+    async onSelect({ rpc }) {
+      const res = await rpc(manageQuotaQueueRpc, {
+        action: "status",
+        source: "command-center",
+      });
+      const win = getWebWindow();
+      if (win?.document) showFinderNoticeToast(win.document, win, res.message, !res.ok);
+    },
+  });
+
+  client.addSlashCommand({
+    name: "quota-queue",
+    description: pluginTranslations.message("commands.quotaQueueSlashDescription"),
+    argumentHint: "[status | check | drain | release | reset]",
+    context: "workspace",
+    async onSubmit({ args, rpc }) {
+      const raw = args.trim().toLowerCase();
+      const action =
+        raw === "check"
+          ? "check"
+          : raw === "drain"
+            ? "drain_one"
+            : raw === "release"
+              ? "release"
+              : raw === "reset"
+                ? "reset"
+                : "status";
+      const res = await rpc(manageQuotaQueueRpc, {
+        action,
+        triggerRecoveryIfReady: action === "check" || action === "drain_one",
+        source: "slash-command",
+      });
+      const win = getWebWindow();
+      if (win?.document) showFinderNoticeToast(win.document, win, res.message, !res.ok);
+    },
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -2226,6 +2291,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupDocPreviewEnhancer();
     cleanupCompactionAndContextEnhancer();
     cleanupIntakeDecisionsEnhancer();
+    cleanupQuotaQueueGuard();
     cleanupPinTitlePrefixSync();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();

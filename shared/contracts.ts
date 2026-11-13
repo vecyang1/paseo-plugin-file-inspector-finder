@@ -170,6 +170,8 @@ export const pluginSettings = defineSettings({
     enablePinWorkspaceShortcut: z.boolean().default(true),
     enablePinTitlePrefix: z.boolean().default(true),
     pinTitlePrefix: z.string().default("[pin] "),
+    enableQuotaQueueGuard: z.boolean().default(true),
+    quotaQueueAutoDrain: z.boolean().default(true),
     labelShortcutCombo: LabelShortcutComboSchema.default("both"),
     enableMarkDoneShortcut: z.boolean().default(true),
     markDonePrefix: z.string().default("d "),
@@ -781,6 +783,8 @@ export const reconcilePaseoRecoveryRpc = defineRpc({
     interruptedCount: z.number(),
     healedCount: z.number(),
     unhealedCount: z.number(),
+    timelineDesyncCount: z.number().optional(),
+    timelineSyncedCount: z.number().optional(),
     circuitBreakerCount: z.number(),
     totalScanned: z.number(),
     agents: z.array(PaseoRecoveryAgentItemSchema),
@@ -1615,3 +1619,10 @@ export const managePinPrefixRpc = defineRpc({
     durationMs: z.number(),
   }),
 });
+
+export {
+  manageQuotaQueueRpc,
+  QuotaQueueItemSchema,
+  QuotaQueueAgentEntrySchema,
+  QuotaQueueReceiptSchema,
+} from "./quota-queue-contracts";

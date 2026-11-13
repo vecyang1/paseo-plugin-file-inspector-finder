@@ -61,6 +61,9 @@ export const enMessages = {
       "Open the Task Decisions Queue to approve options and resume paused Paseo sessions in-place",
     decisionsSlashHint: "[optional task short id]",
     syncPinPrefixes: "Finder: Sync [pin] Prefix on Pinned Sessions",
+    inspectQuotaQueue: "Finder: Inspect Quota-Held Queued Messages",
+    quotaQueueSlashDescription:
+      "Inspect, check, or drain queued messages held on 429 or quota cooldown",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -526,6 +529,8 @@ export const zhMessages: PluginMessageCatalog = {
     decisionsSlashDescription: "打开待拍板任务队列，选择方案并直接唤醒原 Paseo 会话续跑",
     decisionsSlashHint: "[可选任务短编号]",
     syncPinPrefixes: "Finder：为已置顶会话同步 [pin] 标题前缀",
+    inspectQuotaQueue: "Finder：检查配额冷却中暂缓的排队消息",
+    quotaQueueSlashDescription: "检查、探测配额刷新或逐条恢复被 429 限流暂缓的排队消息",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",

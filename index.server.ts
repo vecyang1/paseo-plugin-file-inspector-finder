@@ -92,6 +92,8 @@ import { inspectAntigravityContextRpc } from "./shared/compaction-context-contra
 import { handleInspectAntigravityContext } from "./server/compaction-context-handlers";
 import { manageIntakeDecisionsRpc } from "./shared/intake-decisions-contracts";
 import { handleManageIntakeDecisions } from "./server/intake-decisions-handlers";
+import { manageQuotaQueueRpc } from "./shared/quota-queue-contracts";
+import { handleManageQuotaQueue } from "./server/quota-queue-handlers";
 import { withRpcTiming } from "./server/rpc-timing";
 
 export default function contribute(rawServer: PluginServerContext) {
@@ -102,6 +104,7 @@ export default function contribute(rawServer: PluginServerContext) {
   server.handle(inspectFileRpc, handleInspectFile);
   server.handle(inspectAntigravityContextRpc, (input) => handleInspectAntigravityContext(input));
   server.handle(manageIntakeDecisionsRpc, (input) => handleManageIntakeDecisions(input));
+  server.handle(manageQuotaQueueRpc, (input, context) => handleManageQuotaQueue(input, context));
   server.handle(previewDocumentRpc, handlePreviewDocument);
   server.handle(listSiblingDocumentsRpc, handleListSiblingDocuments);
   server.handle(diagnoseDocPreviewRpc, handleDiagnoseDocPreview);
@@ -983,6 +986,33 @@ export default function contribute(rawServer: PluginServerContext) {
     },
   });
 
+  const finderManageQuotaQueueTool = defineAgentTool({
+    name: "finder_manage_quota_queue",
+    title: "Inspect or Drain Quota-Held Queued Messages",
+    description:
+      "Inspect queued Paseo messages held on 429/quota cooldown, check whether quota refreshed and the previous turn completed (check), drain one ready message serially (drain_one), or release/reset holds.",
+    input: z.object({
+      action: z
+        .enum(["status", "check", "drain_one", "release", "clear_agent", "reset"])
+        .optional()
+        .default("status"),
+      agentId: z.string().optional(),
+      triggerRecoveryIfReady: z.boolean().optional(),
+    }),
+    async execute(input, { paseo }) {
+      const res = await handleManageQuotaQueue(
+        {
+          action: input.action ?? "status",
+          agentId: input.agentId,
+          triggerRecoveryIfReady: input.triggerRecoveryIfReady,
+          source: "agent-tool",
+        },
+        { paseo } as never,
+      );
+      return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -1017,6 +1047,7 @@ export default function contribute(rawServer: PluginServerContext) {
         finderIntakeDecisionsTool,
         finderHarnessCatalogsTool,
         finderManagePinPrefixTool,
+        finderManageQuotaQueueTool,
       ],
     };
   });

@@ -6,7 +6,7 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
   "version": 1,
   "paseoVersion": "0.15.3",
   "locale": "en",
-  "generatedAt": "2026-11-12",
+  "generatedAt": "2026-11-13",
   "pages": [
     {
       "key": "section:general",
@@ -663,6 +663,10 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
           "hint": "Click to test toggling pin on the active workspace and verify workspace.pin dispatch with ⌘⌥P hint"
         },
         {
+          "title": "Add [pin] prefix to pinned session titles",
+          "hint": "Automatically prepends [pin] to the session title when pinned and strips it when unpinned, so pinned status is directly readable in the header, tabs, and Cmd+K."
+        },
+        {
           "title": "Enable mark session done shortcut (Option+D / ⌥D)",
           "hint": "Press Option+D or Option+Shift+D to toggle the 'd ' prefix on the current session. The sidebar row flashes in place and the sidebar does not scroll"
         },
@@ -821,6 +825,14 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
           "title": "Startup Auto-Pull-Up & Interrupted Agent Reconciler (/pull-up)"
         },
         {
+          "title": "Hold queued messages on 429 quota wait and drain one by one",
+          "hint": "When a turn ends on 429 or quota cooldown, hold queued messages until quota refreshes and the previous turn finishes, then drain strictly one message at a time."
+        },
+        {
+          "title": "Automatically drain queued messages one by one after quota refresh",
+          "hint": "When disabled, queued messages stay held until you trigger drain manually."
+        },
+        {
           "title": "Stop Hook & Writeback Gate Reconciler (finishing-with-writeback)"
         },
         {
@@ -877,6 +889,9 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
         },
         {
           "title": "Remote Relay & Timeline Reconciler"
+        },
+        {
+          "title": "Multi-Harness Model Catalog Auto-Sync"
         },
         {
           "title": "Task Decisions & In-Place Session Resume"

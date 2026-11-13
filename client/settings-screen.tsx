@@ -39,6 +39,7 @@ import {
   manageAgentHistoryRpc,
   managePeerAgentsRpc,
   managePinPrefixRpc,
+  manageQuotaQueueRpc,
   manageSlashSkillsRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
@@ -73,6 +74,7 @@ import {
   triggerScheduleRunsDrawer,
 } from "./schedule-runs-web";
 import { syncVoiceCustomModelPreferences } from "./voice-stt-web";
+import { syncQuotaQueuePrefs } from "./quota-queue-guard-web";
 import {
   PIN_PREFIX_EVENT,
   type PinPrefixStatusSnapshot,
@@ -216,6 +218,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const manageVoiceStt = useRpc(manageVoiceSttRpc);
   const manageAgentHistory = useRpc(manageAgentHistoryRpc);
   const managePinPrefix = useRpc(managePinPrefixRpc);
+  const manageQuotaQueue = useRpc(manageQuotaQueueRpc);
   const manageSlashSkills = useRpc(manageSlashSkillsRpc);
   const manageWritebackHook = useRpc(manageWritebackHookRpc);
   const reconcilePaseoRecovery = useRpc(reconcilePaseoRecoveryRpc);
@@ -554,6 +557,9 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [recoverySnapData, setRecoverySnapData] = useState<
     Awaited<ReturnType<typeof reconcilePaseoRecovery>> | null
   >(null);
+  const [quotaQueueSnapData, setQuotaQueueSnapData] = useState<
+    Awaited<ReturnType<typeof manageQuotaQueue>> | null
+  >(null);
   const [customizeSearchInput, setCustomizeSearchInput] = useState("");
   const [customizeCategory, setCustomizeCategory] = useState<CustomizeCategory>("all");
   const [customizeScope, setCustomizeScope] = useState<CustomizeScope>("all");
@@ -728,6 +734,11 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         setRecoverySnapData(res);
       })
       .catch(() => {});
+    void manageQuotaQueue({ action: "status", source: "settings-ui" })
+      .then((res) => {
+        setQuotaQueueSnapData(res);
+      })
+      .catch(() => {});
     void manageSlashSkills({
       action: "status",
       limit: 120,
@@ -755,6 +766,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
     manageVoiceStt,
     manageAgentHistory,
     reconcilePaseoRecovery,
+    manageQuotaQueue,
     manageSlashSkills,
     manageWritebackHook,
     managePeerAgents,
@@ -4107,7 +4119,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               onChangeText={setRecoveryAgentInput}
               placeholder={
                 isZh
-                  ? "筛选 Agent ID 前缀（留空默认扫描最近 12 小时全部活跃会话）..."
+                  ? "筛选 Agent ID 前缀（留空默认扫描最近 24 小时全部活跃会话）..."
                   : "Optional Agent ID prefix (leave empty to scan all recent active agents)..."
               }
               placeholderTextColor={theme.colors.foregroundMuted}
@@ -4188,7 +4200,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               <Text style={styles.detail}>
                 • Scanned: {recoverySnapData.totalScanned} active agents · Startup failed in daemon.log:{" "}
                 {recoverySnapData.daemonStartupFailedCount} · Interrupted:{" "}
-                {recoverySnapData.interruptedCount} · Healed: {recoverySnapData.healedCount} ·
+                {recoverySnapData.interruptedCount} · Healed: {recoverySnapData.healedCount} · Timeline desync:{" "}
+                {recoverySnapData.timelineDesyncCount ?? 0} (synced: {recoverySnapData.timelineSyncedCount ?? 0}) ·
                 Circuit breaker skipped: {recoverySnapData.circuitBreakerCount}
               </Text>
               {recoverySnapData.agents.slice(0, 6).map((ag) => (
@@ -4225,6 +4238,147 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               ))}
             </View>
           ) : null}
+
+          <View
+            style={{
+              marginTop: 10,
+              paddingTop: 10,
+              borderTopWidth: 1,
+              borderTopColor: theme.colors.border,
+              gap: 8,
+            }}
+          >
+            <SettingsSwitch
+              label={
+                isZh
+                  ? "429 配额冷却期间暂缓排队消息并逐条恢复"
+                  : "Hold queued messages on 429 quota wait and drain one by one"
+              }
+              hint={
+                isZh
+                  ? "当前回合因 429 或配额冷却中断时，暂缓自动下发后续排队消息；等待配额刷新且前序回合输入完成后，再严格逐条发送。"
+                  : "When a turn ends on 429 or quota cooldown, hold queued messages until quota refreshes and the previous turn finishes, then drain strictly one message at a time."
+              }
+              value={values.enableQuotaQueueGuard ?? true}
+              onValueChange={(next: boolean) => {
+                syncQuotaQueuePrefs({ enabled: next });
+                void save({ ...values, enableQuotaQueueGuard: next }, revision);
+              }}
+            />
+            <SettingsSwitch
+              label={
+                isZh
+                  ? "配额刷新后自动逐条发送排队消息"
+                  : "Automatically drain queued messages one by one after quota refresh"
+              }
+              hint={
+                isZh
+                  ? "关闭后仅暂缓下发，需手动点击检测或发送。"
+                  : "When disabled, queued messages stay held until you trigger drain manually."
+              }
+              value={values.quotaQueueAutoDrain ?? true}
+              onValueChange={(next: boolean) => {
+                syncQuotaQueuePrefs({ autoDrain: next });
+                void save({ ...values, quotaQueueAutoDrain: next }, revision);
+              }}
+            />
+
+            <View style={styles.row}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => {
+                  void manageQuotaQueue({
+                    action: recoveryAgentInput.trim() ? "check" : "status",
+                    agentId: recoveryAgentInput.trim() || undefined,
+                    triggerRecoveryIfReady: Boolean(recoveryAgentInput.trim()),
+                    source: "settings-ui",
+                  }).then((res) => {
+                    setQuotaQueueSnapData(res);
+                    toast.show(res.message, { variant: res.ok ? "success" : "error" });
+                  });
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Icon name="Clock" size={14} color={theme.colors.foreground} />
+                <Text style={styles.secondaryBtnText}>
+                  {isZh ? "检查排队与配额" : "Inspect Quota Queue"}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => {
+                  const targetAid =
+                    recoveryAgentInput.trim() ||
+                    quotaQueueSnapData?.entries.find((e) => e.queuedMessages.length > 0)?.agentId;
+                  if (!targetAid) {
+                    toast.show(
+                      isZh ? "当前没有待发送的配额暂缓队列" : "No quota-held queued messages",
+                      { variant: "info" },
+                    );
+                    return;
+                  }
+                  void manageQuotaQueue({
+                    action: "drain_one",
+                    agentId: targetAid,
+                    source: "settings-ui",
+                  }).then((res) => {
+                    setQuotaQueueSnapData(res);
+                    toast.show(res.message, { variant: res.ok ? "success" : "error" });
+                  });
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryBtnText}>
+                  {isZh ? "探测并发送 1 条" : "Check & Drain 1"}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => {
+                  syncQuotaQueuePrefs({ enabled: true, autoDrain: true });
+                  void save(
+                    {
+                      ...values,
+                      enableQuotaQueueGuard: true,
+                      quotaQueueAutoDrain: true,
+                    },
+                    revision,
+                  );
+                  void manageQuotaQueue({ action: "reset", source: "settings-ui" }).then((res) => {
+                    setQuotaQueueSnapData(res);
+                    toast.show(res.message, { variant: "success" });
+                  });
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryBtnText}>
+                  {isZh ? "恢复队列默认设置" : "Reset Queue Defaults"}
+                </Text>
+              </Pressable>
+            </View>
+
+            {quotaQueueSnapData ? (
+              <View style={{ gap: 4 }}>
+                <Text style={styles.detail}>
+                  {isZh
+                    ? `• 暂缓会话: ${quotaQueueSnapData.heldCount} 个 · 排队消息总数: ${quotaQueueSnapData.totalQueuedMessages} 条 · 账本: ${quotaQueueSnapData.stateFile}`
+                    : `• Held agents: ${quotaQueueSnapData.heldCount} · Total queued: ${quotaQueueSnapData.totalQueuedMessages} · Ledger: ${quotaQueueSnapData.stateFile}`}
+                </Text>
+                {quotaQueueSnapData.entries.slice(0, 5).map((entry) => (
+                  <Text key={entry.agentId} style={styles.detail} numberOfLines={2}>
+                    • {entry.agentId.slice(0, 8)} ({entry.provider || "provider"}/
+                    {entry.model || "model"}) · {entry.queuedCount}{" "}
+                    {isZh ? "条排队" : "queued"} ·{" "}
+                    {entry.held
+                      ? entry.holdReason || (isZh ? "等待配额刷新" : "Waiting for quota refresh")
+                      : isZh
+                        ? "已放行待逐条发送"
+                        : "Ready for serial drain"}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+          </View>
         </View>
       </SettingsSection>
 
