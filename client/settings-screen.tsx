@@ -57,6 +57,7 @@ import {
   formatPresenceVerdict,
 } from "../shared/peer-presence-format";
 import { DocPreviewSettingsSection } from "./doc-settings-section";
+import { IntakeDecisionsSettingsSection } from "./intake-decisions-settings-section";
 import { MermaidSettingsSection } from "./mermaid-settings-section";
 import { RelaySettingsSection } from "./relay-settings-section";
 import {
@@ -581,6 +582,11 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         inlineRenameCaretPosition: settings.values.inlineRenameCaretPosition,
         enableQuickRenameAndLabelShortcuts:
           settings.values.enableQuickRenameAndLabelShortcuts,
+        enableLabelNumberShortcuts:
+          settings.values.enableLabelNumberShortcuts ?? true,
+        labelNumberShortcutMode:
+          settings.values.labelNumberShortcutMode ?? "empty-input",
+        labelShortcutCombo: settings.values.labelShortcutCombo ?? "both",
         enableThreadNavigationShortcuts:
           settings.values.enableThreadNavigationShortcuts ?? true,
         enablePinWorkspaceShortcut:
@@ -1352,6 +1358,36 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               }}
             />
           )}
+
+          {values.enableQuickRenameAndLabelShortcuts && (
+            <SettingsSwitch
+              label={t("settings.enableLabelNumberShortcutsLabel")}
+              hint={t("settings.enableLabelNumberShortcutsHint")}
+              value={values.enableLabelNumberShortcuts ?? true}
+              onValueChange={(next) => {
+                syncInlineRenamePreferences({
+                  enableLabelNumberShortcuts: next,
+                });
+                void save({ ...values, enableLabelNumberShortcuts: next }, revision);
+              }}
+            />
+          )}
+
+          {values.enableQuickRenameAndLabelShortcuts &&
+            (values.enableLabelNumberShortcuts ?? true) && (
+              <SettingsSwitch
+                label={t("settings.labelNumberShortcutModeLabel")}
+                hint={t("settings.labelNumberShortcutModeHint")}
+                value={(values.labelNumberShortcutMode ?? "empty-input") !== "modifier-only"}
+                onValueChange={(next) => {
+                  const mode = next ? "empty-input" : "modifier-only";
+                  syncInlineRenamePreferences({
+                    labelNumberShortcutMode: mode,
+                  });
+                  void save({ ...values, labelNumberShortcutMode: mode }, revision);
+                }}
+              />
+            )}
 
           {values.enableQuickRenameAndLabelShortcuts && (
             <SettingsAction
@@ -4404,6 +4440,8 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
       <DocPreviewSettingsSection isZh={isZh} styles={styles} />
 
       <RelaySettingsSection isZh={isZh} styles={styles} />
+
+      <IntakeDecisionsSettingsSection isZh={isZh} styles={styles} />
 
       <SettingsSection
         title={

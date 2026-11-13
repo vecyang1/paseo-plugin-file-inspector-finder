@@ -2,6 +2,7 @@ import { Platform } from "react-native";
 import {
   type InlineRenameCaretPosition,
   type InlineRenameSource,
+  type LabelNumberShortcutMode,
   type LabelShortcutCombo,
   type OpenerTarget,
   type ProjectJumpCandidate,
@@ -14,6 +15,12 @@ import {
 } from "../shared/contracts";
 import { PASEO_IDENTITY_BG_HEX } from "../shared/paseo-theme";
 import { getCatalogForLocale, isChineseLocale } from "./i18n";
+import { createKeyedSerialQueue } from "./keyed-serial";
+import {
+  MAX_NUMBERED_LABEL_CHIPS,
+  labelHintTextFor,
+  resolveLabelDigitAction,
+} from "./label-quick-pick";
 import {
   resolveSidebarProjectVisual,
   syncPaseoThemeCssVariables,
@@ -50,6 +57,7 @@ export interface MinimalElement {
   scrollLeft?: number;
   parentElement?: MinimalElement | null;
   nextSibling?: MinimalElement | null;
+  previousElementSibling?: MinimalElement | null;
   children?: ArrayLike<MinimalElement>;
   style?: Record<string, string>;
   getAttribute?(name: string): string | null;
@@ -132,6 +140,7 @@ export interface MinimalKeyboardEvent {
   keyCode?: number;
   which?: number;
   isComposing?: boolean;
+  repeat?: boolean;
   metaKey?: boolean;
   ctrlKey?: boolean;
   shiftKey?: boolean;
@@ -139,6 +148,7 @@ export interface MinimalKeyboardEvent {
   target?: MinimalElement | null;
   preventDefault(): void;
   stopPropagation?(): void;
+  stopImmediatePropagation?(): void;
 }
 
 export interface MinimalDocument {
@@ -295,6 +305,8 @@ export interface InlineRenamePreferences {
   autoJumpToFirstPlaceInput: boolean;
   inlineRenameCaretPosition: InlineRenameCaretPosition;
   enableQuickRenameAndLabelShortcuts: boolean;
+  enableLabelNumberShortcuts: boolean;
+  labelNumberShortcutMode: LabelNumberShortcutMode;
   enableThreadNavigationShortcuts: boolean;
   enablePinWorkspaceShortcut: boolean;
   labelShortcutCombo: LabelShortcutCombo;
@@ -342,6 +354,14 @@ export function syncInlineRenamePreferences(
       enableQuickRenameAndLabelShortcuts:
         prefs.enableQuickRenameAndLabelShortcuts ??
         existing.enableQuickRenameAndLabelShortcuts,
+      enableLabelNumberShortcuts:
+        prefs.enableLabelNumberShortcuts ??
+        existing.enableLabelNumberShortcuts ??
+        true,
+      labelNumberShortcutMode:
+        prefs.labelNumberShortcutMode ??
+        existing.labelNumberShortcutMode ??
+        "empty-input",
       enableThreadNavigationShortcuts:
         prefs.enableThreadNavigationShortcuts ??
         existing.enableThreadNavigationShortcuts ??
@@ -380,6 +400,8 @@ export function readInlineRenamePreferences(
     autoJumpToFirstPlaceInput: true,
     inlineRenameCaretPosition: "start",
     enableQuickRenameAndLabelShortcuts: true,
+    enableLabelNumberShortcuts: true,
+    labelNumberShortcutMode: "empty-input",
     enableThreadNavigationShortcuts: true,
     enablePinWorkspaceShortcut: true,
     labelShortcutCombo: "both",
@@ -432,12 +454,17 @@ export function readInlineRenamePreferences(
         ? rawCombo
         : "both";
 
+    const labelNumberShortcutMode: LabelNumberShortcutMode =
+      parsed.labelNumberShortcutMode === "modifier-only" ? "modifier-only" : "empty-input";
+
     return {
       enableInlineDoubleClickRename: parsed.enableInlineDoubleClickRename !== false,
       autoJumpToFirstPlaceInput: caretPosition === "start",
       inlineRenameCaretPosition: caretPosition,
       enableQuickRenameAndLabelShortcuts:
         parsed.enableQuickRenameAndLabelShortcuts !== false,
+      enableLabelNumberShortcuts: parsed.enableLabelNumberShortcuts !== false,
+      labelNumberShortcutMode,
       enableThreadNavigationShortcuts:
         parsed.enableThreadNavigationShortcuts !== false,
       enablePinWorkspaceShortcut:
@@ -4386,9 +4413,47 @@ export function openNewWorkspaceInApp(
   return true;
 }
 
-function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): void {
+export function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): void {
   try {
-    if (win?.KeyboardEvent) {
+    // Only dismiss when a real host/native menu surface is currently open.
+    // Never dispatch global Escape unconditionally, because Paseo binds global Escape
+    // to `agent.interrupt` and would pause/cancel a running agent turn.
+    const openMenuSurface = doc.querySelector?.(
+      '[data-menu-surface="true"], [data-radix-popper-content-wrapper], [role="menu"]:not([data-paseo-finder-injected="true"])',
+    );
+    if (!openMenuSurface) {
+      return;
+    }
+
+    // 1. Prefer clicking Paseo's MenuOverlay backdrop directly (zero keyboard side effects).
+    const prevSibling = openMenuSurface.previousElementSibling;
+    const prevTestId = prevSibling?.getAttribute?.("data-testid") ?? "";
+    if (
+      prevSibling &&
+      (prevTestId.endsWith("-backdrop") ||
+        prevSibling.getAttribute?.("role") === "button" ||
+        openMenuSurface.getAttribute?.("data-menu-surface") === "true") &&
+      typeof prevSibling.click === "function"
+    ) {
+      prevSibling.click();
+      return;
+    }
+
+    const explicitBackdrop = doc.querySelector?.(
+      '#overlay-root [data-testid$="-backdrop"], [data-testid$="-backdrop"]',
+    );
+    if (explicitBackdrop && typeof explicitBackdrop.click === "function") {
+      explicitBackdrop.click();
+      return;
+    }
+
+    // 2. Fallback: only if a Paseo MenuOverlay (`data-menu-surface="true"`) is open,
+    // dispatch a single Escape on `win` (captured and stopImmediatePropagation'd by MenuOverlay).
+    // Never broadcast to both `doc` and `win` (a second Escape leaks to `agent.interrupt`).
+    if (
+      win?.KeyboardEvent &&
+      doc.querySelector?.('[data-menu-surface="true"]')
+    ) {
       const escDown = new win.KeyboardEvent("keydown", {
         key: "Escape",
         code: "Escape",
@@ -4396,11 +4461,10 @@ function dismissNativeMenu(win: MinimalWindow | null, doc: MinimalDocument): voi
         bubbles: true,
         cancelable: true,
       });
-      doc.dispatchEvent?.(escDown);
       win.dispatchEvent?.(escDown);
     }
   } catch {
-    // Ignore if synthetic KeyboardEvent is unsupported
+    // Ignore if synthetic dismissal is unsupported
   }
 }
 
@@ -6350,24 +6414,24 @@ export function installDesktopRevealHelpers(
     backdrop.addEventListener?.("mousedown", onBackdropDismiss);
     backdrop.addEventListener?.("click", onBackdropDismiss);
 
-    const onGlobalEscape = (ev: unknown) => {
-      const ke = ev as MinimalKeyboardEvent;
-      if (ke.key === "Escape") {
-        ke.preventDefault?.();
-        ke.stopPropagation?.();
-        removeMenu();
-      }
-    };
-    win.addEventListener?.("keydown", onGlobalEscape, true);
+    let isDisposed = false;
+    let onBarKeyDown: ((ev: unknown) => void) | null = null;
 
     activeMenuCleanup = () => {
+      isDisposed = true;
+      try {
+        (container as unknown as { hidePopover?: () => void }).hidePopover?.();
+      } catch {}
       backdrop.remove?.();
-      win.removeEventListener?.("keydown", onGlobalEscape, true);
+      if (onBarKeyDown) {
+        win.removeEventListener?.("keydown", onBarKeyDown, true);
+      }
     };
 
     const container = doc.createElement("div");
     container.setAttribute?.("data-testid", "paseo-finder-quick-thread-bar");
     container.setAttribute?.("role", "dialog");
+    container.setAttribute?.("popover", "manual");
     container.addEventListener?.("pointerdown", (ev) => (ev as MinimalMouseEvent)?.stopPropagation?.());
     container.addEventListener?.("mousedown", (ev) => (ev as MinimalMouseEvent)?.stopPropagation?.());
     container.addEventListener?.("click", (ev) => (ev as MinimalMouseEvent)?.stopPropagation?.());
@@ -6376,6 +6440,8 @@ export function installDesktopRevealHelpers(
 
     if (container.style) {
       container.style.position = "fixed";
+      container.style.inset = "auto";
+      container.style.margin = "0";
       container.style.left = `${leftPx}px`;
       container.style.top = "56px";
       container.style.width = "440px";
@@ -6536,11 +6602,91 @@ export function installDesktopRevealHelpers(
       chipsWrap.style.gap = "6px";
     }
 
+    const prefs = readInlineRenamePreferences(win.localStorage);
+    const isMac = isMacPlatform(win);
+    const numberShortcutsEnabled = prefs.enableLabelNumberShortcuts !== false;
+    const digitMode = prefs.labelNumberShortcutMode ?? "empty-input";
+    const labelToggleQueue = createKeyedSerialQueue();
+    let titleFocusedState = mode === "rename";
+
     let currentAssigned = new Set<string>(snap.assignedLabels);
     let currentCatalog = [...snap.catalog];
     const deletingLabels = new Set<string>();
+    const togglingLabels = new Set<string>();
+    let chipHintRefs: Array<{
+      index: number;
+      chip: MinimalElement;
+      hintEl: MinimalElement;
+    }> = [];
 
-    const renderChips = () => {
+    const isTitleFocusedNow = (target?: MinimalElement | null): boolean =>
+      doc.activeElement === titleInput ||
+      target === titleInput ||
+      (doc.activeElement == null && titleFocusedState);
+
+    let labelInputEl: MinimalElement | null = null;
+    const isLabelFocusedNow = (target?: MinimalElement | null): boolean =>
+      (labelInputEl !== null && (doc.activeElement === labelInputEl || target === labelInputEl));
+
+    const updateChipHints = () => {
+      if (!numberShortcutsEnabled) return;
+      const titleFocused = isTitleFocusedNow(null);
+      const labelVal = labelInputEl?.value ?? "";
+      for (const ref of chipHintRefs) {
+        const text = labelHintTextFor({
+          index: ref.index,
+          digitMode,
+          isTitleInputFocused: titleFocused,
+          labelInputValue: labelVal,
+          isMac,
+        });
+        if (ref.hintEl.textContent !== text) {
+          ref.hintEl.textContent = text;
+        }
+        const ariaShortcut =
+          digitMode === "empty-input" && !titleFocused && labelVal.length === 0
+            ? `${ref.index} ${isMac ? `Meta+${ref.index}` : `Control+${ref.index}`}`
+            : isMac
+              ? `Meta+${ref.index}`
+              : `Control+${ref.index}`;
+        ref.chip.setAttribute?.("aria-keyshortcuts", ariaShortcut);
+      }
+    };
+
+    let renderChips = () => {};
+
+    const toggleCatalogEntry = (entry: {
+      name: string;
+      color: WorkspaceLabelColor;
+    }) => {
+      if (isDisposed || !callbacks.onToggleLabel) return;
+      togglingLabels.add(entry.name);
+      renderChips();
+      void labelToggleQueue
+        .run(snap.workspaceId, async () => {
+          return await callbacks.onToggleLabel?.(
+            entry.name,
+            entry.color,
+            snap.workspaceId,
+          );
+        })
+        .then((updated) => {
+          togglingLabels.delete(entry.name);
+          if (isDisposed) return;
+          if (updated) {
+            currentAssigned = new Set(updated.assignedLabels);
+            currentCatalog = [...updated.catalog];
+          }
+          renderChips();
+        })
+        .catch(() => {
+          togglingLabels.delete(entry.name);
+          if (!isDisposed) renderChips();
+        });
+    };
+
+    renderChips = () => {
+      chipHintRefs = [];
       if (typeof chipsWrap.replaceChildren === "function") {
         chipsWrap.replaceChildren();
       } else if (chipsWrap.innerHTML !== undefined) {
@@ -6562,9 +6708,16 @@ export function installDesktopRevealHelpers(
         chipsWrap.appendChild?.(emptyHint);
         return;
       }
-      for (const entry of currentCatalog) {
+      currentCatalog.forEach((entry, idx) => {
         const isAssigned = currentAssigned.has(entry.name);
+        const isToggling = togglingLabels.has(entry.name);
+        const oneBasedIndex = idx + 1;
         const chip = doc.createElement("div");
+        chip.setAttribute?.("data-testid", `quick-label-chip-${entry.name}`);
+        chip.setAttribute?.("data-label-index", String(oneBasedIndex));
+        if (isToggling) {
+          chip.setAttribute?.("aria-busy", "true");
+        }
         const dotColor = LABEL_COLOR_HEX[entry.color] ?? LABEL_COLOR_HEX.violet;
         if (chip.style) {
           chip.style.display = "flex";
@@ -6576,9 +6729,41 @@ export function installDesktopRevealHelpers(
           chip.style.fontSize = "12px";
           chip.style.cursor = "pointer";
           chip.style.userSelect = "none";
+          chip.style.opacity = isToggling ? "0.65" : "1";
           chip.style.backgroundColor = isAssigned ? `${dotColor}1f` : tokens.surface2;
           chip.style.border = isAssigned ? `1px solid ${dotColor}` : `1px solid ${tokens.border}`;
           chip.style.color = tokens.foreground;
+        }
+
+        if (numberShortcutsEnabled && idx < MAX_NUMBERED_LABEL_CHIPS) {
+          const hintEl = doc.createElement("span");
+          hintEl.setAttribute?.("data-testid", `label-shortcut-hint-${entry.name}`);
+          hintEl.setAttribute?.("data-label-index", String(oneBasedIndex));
+          hintEl.setAttribute?.("aria-hidden", "true");
+          if (hintEl.style) {
+            hintEl.style.display = "inline-flex";
+            hintEl.style.alignItems = "center";
+            hintEl.style.justifyContent = "center";
+            hintEl.style.minWidth = "15px";
+            hintEl.style.height = "15px";
+            hintEl.style.padding = "0 3.5px";
+            hintEl.style.boxSizing = "border-box";
+            hintEl.style.borderRadius = "4px";
+            hintEl.style.fontSize = "10px";
+            hintEl.style.fontWeight = "600";
+            hintEl.style.lineHeight = "1";
+            hintEl.style.fontVariantNumeric = "tabular-nums";
+            hintEl.style.flexShrink = "0";
+            hintEl.style.userSelect = "none";
+            hintEl.style.pointerEvents = "none";
+            hintEl.style.backgroundColor = isAssigned ? `${dotColor}26` : tokens.surface0;
+            hintEl.style.border = isAssigned
+              ? `1px solid ${dotColor}66`
+              : `1px solid ${tokens.border}`;
+            hintEl.style.color = isAssigned ? tokens.foreground : tokens.foregroundMuted;
+          }
+          chip.appendChild?.(hintEl);
+          chipHintRefs.push({ index: oneBasedIndex, chip, hintEl });
         }
 
         const tagBody = doc.createElement("span");
@@ -6662,17 +6847,20 @@ export function installDesktopRevealHelpers(
           ev.stopPropagation?.();
           if (deletingLabels.has(entry.name)) return;
           deletingLabels.add(entry.name);
-          void callbacks
-            .onDeleteLabel?.(entry.name, snap.workspaceId)
-            ?.then((updated) => {
+          void labelToggleQueue
+            .run(snap.workspaceId, async () => {
+              return await callbacks.onDeleteLabel?.(entry.name, snap.workspaceId);
+            })
+            .then((updated) => {
               deletingLabels.delete(entry.name);
+              if (isDisposed) return;
               if (updated) {
                 currentAssigned = new Set(updated.assignedLabels);
                 currentCatalog = [...updated.catalog];
                 renderChips();
               }
             })
-            ?.catch(() => {
+            .catch(() => {
               deletingLabels.delete(entry.name);
             });
         };
@@ -6692,22 +6880,14 @@ export function installDesktopRevealHelpers(
         const handleToggle = (ev: MinimalMouseEvent) => {
           ev.preventDefault?.();
           ev.stopPropagation?.();
-          void callbacks
-            .onToggleLabel?.(entry.name, entry.color, snap.workspaceId)
-            ?.then((updated) => {
-              if (updated) {
-                currentAssigned = new Set(updated.assignedLabels);
-                currentCatalog = [...updated.catalog];
-                renderChips();
-              }
-            })
-            ?.catch(() => null);
+          toggleCatalogEntry(entry);
         };
 
         tagBody.addEventListener?.("click", (ev) => handleToggle(ev as MinimalMouseEvent));
         chip.addEventListener?.("click", (ev) => handleToggle(ev as MinimalMouseEvent));
         chipsWrap.appendChild?.(chip);
-      }
+      });
+      updateChipHints();
     };
 
     renderChips();
@@ -6723,6 +6903,7 @@ export function installDesktopRevealHelpers(
     }
 
     const labelInput = doc.createElement("input");
+    labelInputEl = labelInput;
     labelInput.placeholder = catalog.browser.newLabelPlaceholder;
     if (labelInput.style) {
       labelInput.style.flex = "1";
@@ -6788,15 +6969,24 @@ export function installDesktopRevealHelpers(
       const nameVal = (labelInput.value ?? "").trim();
       if (!nameVal) return;
       labelInput.value = "";
-      void callbacks
-        .onToggleLabel?.(nameVal, selectedColor, snap.workspaceId)
+      updateChipHints();
+      void labelToggleQueue
+        .run(snap.workspaceId, async () => {
+          return await callbacks.onToggleLabel?.(
+            nameVal,
+            selectedColor,
+            snap.workspaceId,
+          );
+        })
         .then((updated) => {
-        if (updated) {
-          currentAssigned = new Set(updated.assignedLabels);
-          currentCatalog = [...updated.catalog];
-          renderChips();
-        }
-      });
+          if (isDisposed) return;
+          if (updated) {
+            currentAssigned = new Set(updated.assignedLabels);
+            currentCatalog = [...updated.catalog];
+            renderChips();
+          }
+        })
+        .catch(() => null);
     };
 
     addLabelBtn.addEventListener?.("click", (ev) => {
@@ -6804,6 +6994,23 @@ export function installDesktopRevealHelpers(
       me.preventDefault?.();
       me.stopPropagation?.();
       triggerAddLabel();
+    });
+
+    titleInput.addEventListener?.("focus", () => {
+      titleFocusedState = true;
+      updateChipHints();
+    });
+    titleInput.addEventListener?.("blur", () => {
+      titleFocusedState = false;
+      updateChipHints();
+    });
+
+    labelInput.addEventListener?.("focus", () => {
+      titleFocusedState = false;
+      updateChipHints();
+    });
+    labelInput.addEventListener?.("input", () => {
+      updateChipHints();
     });
 
     labelInput.addEventListener?.("keydown", (ev) => {
@@ -6822,18 +7029,57 @@ export function installDesktopRevealHelpers(
     newLabelRow.appendChild?.(addLabelBtn);
     container.appendChild?.(newLabelRow);
 
+    onBarKeyDown = (ev: unknown) => {
+      if (isDisposed || activeMenuEl !== container) return;
+      const ke = ev as MinimalKeyboardEvent;
+      if (ke.key === "Escape") {
+        ke.preventDefault?.();
+        ke.stopPropagation?.();
+        removeMenu();
+        return;
+      }
+      if (!numberShortcutsEnabled) return;
+      const targetEl = (ke.target ?? null) as MinimalElement | null;
+      const action = resolveLabelDigitAction({
+        event: ke,
+        digitMode,
+        isTitleInputFocused: isTitleFocusedNow(targetEl),
+        isLabelInputFocused: isLabelFocusedNow(targetEl),
+        labelInputValue: labelInput.value ?? "",
+        catalogLength: currentCatalog.length,
+        isMac,
+      });
+      if (!action) return;
+      ke.preventDefault?.();
+      ke.stopPropagation?.();
+      ke.stopImmediatePropagation?.();
+      if (ke.repeat) return;
+      if (action.swallowOnly) return;
+      const entry = currentCatalog[action.index - 1];
+      if (!entry) return;
+      toggleCatalogEntry(entry);
+    };
+    win.addEventListener?.("keydown", onBarKeyDown, true);
+
     doc.body.appendChild?.(backdrop);
     doc.body.appendChild?.(container);
+    try {
+      (container as unknown as { showPopover?: () => void }).showPopover?.();
+    } catch {}
     activeMenuEl = container;
     activeQuickThreadBarWsId = activeWsId ?? null;
 
     setTimeout(() => {
+      if (isDisposed || activeMenuEl !== container) return;
       if (mode === "labels") {
+        titleFocusedState = false;
         labelInput.focus?.();
       } else {
+        titleFocusedState = true;
         const renamePrefs = readInlineRenamePreferences(win.localStorage);
         applyInlineInputCaret(titleInput, renamePrefs.inlineRenameCaretPosition);
       }
+      updateChipHints();
     }, 10);
     return true;
   };
@@ -7505,6 +7751,13 @@ export function installDesktopRevealHelpers(
     if (!prefs.enableDesktopContextMenuHelper) return;
 
     if (ke.key === "Escape") {
+      if (activeMenuEl) {
+        ke.preventDefault?.();
+        ke.stopPropagation?.();
+        ke.stopImmediatePropagation?.();
+        removeMenu();
+        return;
+      }
       removeMenu();
       return;
     }
@@ -7720,33 +7973,30 @@ export function installDesktopRevealHelpers(
     ) {
       const combo = prefs.labelShortcutCombo ?? "both";
       const isShift = Boolean(ke.shiftKey);
+      const matchesCombo = isShift
+        ? combo === "cmd_shift_l" || combo === "both"
+        : combo === "cmd_l" || combo === "both";
 
-      // If typing inside an input/textarea (like prompt composer), blur input so focus moves cleanly to labels bar:
-      if (isEditableInput(ke.target ?? null)) {
-        (ke.target as unknown as { blur?: () => void })?.blur?.();
-      }
+      if (matchesCombo) {
+        // Blur composer/editable element (including doc.activeElement in case Paseo's Cmd+L
+        // focus-message-input handler ran earlier in window capture) before opening labels bar:
+        if (isEditableInput(ke.target ?? null)) {
+          (ke.target as unknown as { blur?: () => void })?.blur?.();
+        }
+        if (doc.activeElement && doc.activeElement !== ke.target && isEditableInput(doc.activeElement)) {
+          (doc.activeElement as unknown as { blur?: () => void })?.blur?.();
+        }
 
-      // If the quick labels bar is already open on screen, pressing Cmd+L or Cmd+Shift+L toggles it off!
-      if (activeMenuEl) {
         ke.preventDefault();
         ke.stopPropagation?.();
-        removeMenu();
-        return;
-      }
+        ke.stopImmediatePropagation?.();
 
-      // 1. Shift chord: Cmd+Shift+L is universal
-      if (isShift && (combo === "cmd_shift_l" || combo === "both")) {
-        ke.preventDefault();
-        ke.stopPropagation?.();
-        dismissNativeMenu(win, doc);
-        void showQuickThreadMetadataBar("labels");
-        return;
-      }
+        // If the quick labels bar is already open on screen, pressing the configured shortcut toggles it off!
+        if (activeMenuEl) {
+          removeMenu();
+          return;
+        }
 
-      // 2. Non-shift chord: Cmd+L
-      if (!isShift && (combo === "cmd_l" || combo === "both")) {
-        ke.preventDefault();
-        ke.stopPropagation?.();
         dismissNativeMenu(win, doc);
         void showQuickThreadMetadataBar("labels");
         return;

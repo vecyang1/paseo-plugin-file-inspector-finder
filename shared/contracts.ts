@@ -111,6 +111,14 @@ export const LabelShortcutComboSchema = z.enum([
 ]);
 export type LabelShortcutCombo = z.infer<typeof LabelShortcutComboSchema>;
 
+export const LabelNumberShortcutModeSchema = z.enum([
+  "empty-input",
+  "modifier-only",
+]);
+export type LabelNumberShortcutMode = z.infer<
+  typeof LabelNumberShortcutModeSchema
+>;
+
 export const ProjectPickerShortcutPresetSchema = z.enum([
   "alt_p",
   "cmd_shift_j",
@@ -155,6 +163,8 @@ export const pluginSettings = defineSettings({
     autoJumpToFirstPlaceInput: z.boolean().default(true),
     inlineRenameCaretPosition: InlineRenameCaretPositionSchema.default("start"),
     enableQuickRenameAndLabelShortcuts: z.boolean().default(true),
+    enableLabelNumberShortcuts: z.boolean().default(true),
+    labelNumberShortcutMode: LabelNumberShortcutModeSchema.default("empty-input"),
     enableThreadNavigationShortcuts: z.boolean().default(true),
     enablePinWorkspaceShortcut: z.boolean().default(true),
     labelShortcutCombo: LabelShortcutComboSchema.default("both"),

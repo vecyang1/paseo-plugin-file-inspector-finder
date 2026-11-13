@@ -1457,8 +1457,15 @@ async function canSmartSkipSubagentCli(input: RpcInput<typeof manageSubagentsRpc
       }
     }
   }
+  if (reqAgent.startsWith("vec-subagent:")) {
+    const subCid = reqAgent.slice("vec-subagent:".length).trim();
+    if (subCid && (await hasTranscriptSubagentOrTimerActivity(subCid))) {
+      return false;
+    }
+    if (!reqWs) return true;
+  }
   if (candidates.length === 0) {
-    if (reqWs && !reqAgent) return true;
+    if (reqWs) return true;
     return false;
   }
   for (const cand of candidates) {
@@ -1600,7 +1607,9 @@ export async function handleManageSubagents(
     )}:${(input.conversationId ?? "").trim()}:${Boolean(input.includeTimeline)}:${input.limit ?? ""}`;
     const now = Date.now();
     const cached = SUBAGENT_RPC_CACHE.get(cacheKey);
-    const ttlMs = cached?.hasRunning ? 2_000 : 6_000;
+    const isBatchTree =
+      action === "tree" && !input.agentId && !input.workspaceId && !input.conversationId;
+    const ttlMs = cached?.hasRunning ? (isBatchTree ? 8_000 : 5_000) : 30_000;
     if (cached && now - cached.fetchedAtMs < ttlMs) {
       return {
         ...cached.payload,

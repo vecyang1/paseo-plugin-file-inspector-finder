@@ -5,7 +5,7 @@ export const enMessages = {
     filePanelTitle: "Image Inspector",
     docPanelTitle: "Document Preview",
     workspacePanelTitle: "Finder & Media",
-    settingsTitle: "File Inspector & Finder",
+    settingsTitle: "Paseo Powerpack",
     headerButtonTitle: "Reveal files & images in Finder",
     composerPillTitle: "Reveal files in Finder",
     composerPillLabel: "Finder",
@@ -56,6 +56,10 @@ export const enMessages = {
     groupSlashDescription:
       "Switch sidebar grouping between Project and Status (or toggle)",
     groupSlashHint: "[project | status | toggle]",
+    openIntakeDecisions: "Finder: Open Task Decisions Queue (Ctrl+Cmd+D)",
+    decisionsSlashDescription:
+      "Open the Task Decisions Queue to approve options and resume paused Paseo sessions in-place",
+    decisionsSlashHint: "[optional task short id]",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -210,6 +214,12 @@ export const enMessages = {
     optLabelShortcutBoth: "Both Cmd+L and Cmd+Shift+L (Recommended)",
     optLabelShortcutCmdL: "Cmd+L only (Fast 2-key chord)",
     optLabelShortcutCmdShiftL: "Cmd+Shift+L only (Preserve composer focus)",
+    enableLabelNumberShortcutsLabel: "Select labels with 1–9 in labels bar",
+    enableLabelNumberShortcutsHint:
+      "Show 1–9 key badges on the first nine labels after pressing Cmd+L or Cmd+Shift+L so you can toggle tags from the keyboard",
+    labelNumberShortcutModeLabel: "Plain 1–9 toggles when label input is empty",
+    labelNumberShortcutModeHint:
+      "Off: only ⌘1–⌘9 toggle labels, and plain digits always type into the new-label field",
     testLabelsBarLabel: "Test open workspace labels bar",
     testLabelsBarHint:
       "Click to test opening the workspace labels management bar on the active workspace",
@@ -457,7 +467,7 @@ export const zhMessages: PluginMessageCatalog = {
     filePanelTitle: "图片检查器",
     docPanelTitle: "多格式文档预览",
     workspacePanelTitle: "Finder 与媒体",
-    settingsTitle: "文件检查与 Finder",
+    settingsTitle: "Paseo Powerpack",
     headerButtonTitle: "在 Finder 中显示文件与图片",
     composerPillTitle: "在 Finder 中定位文件",
     composerPillLabel: "Finder",
@@ -502,6 +512,9 @@ export const zhMessages: PluginMessageCatalog = {
     toggleSidebarGrouping: "Finder：切换侧边栏分组模式（项目 / 状态）",
     groupSlashDescription: "切换侧边栏分组模式为按项目或按状态（留空为切换）",
     groupSlashHint: "[project | status | toggle]",
+    openIntakeDecisions: "Finder：打开待拍板任务队列 (Ctrl+Cmd+D)",
+    decisionsSlashDescription: "打开待拍板任务队列，选择方案并直接唤醒原 Paseo 会话续跑",
+    decisionsSlashHint: "[可选任务短编号]",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
@@ -653,6 +666,12 @@ export const zhMessages: PluginMessageCatalog = {
     optLabelShortcutBoth: "同时支持 Cmd+L 与 Cmd+Shift+L（推荐）",
     optLabelShortcutCmdL: "仅使用 Cmd+L（极速双键）",
     optLabelShortcutCmdShiftL: "仅使用 Cmd+Shift+L（保留原生输入框聚焦）",
+    enableLabelNumberShortcutsLabel: "在标签栏中按 1–9 一键切换标签",
+    enableLabelNumberShortcutsHint:
+      "按 Cmd+L 或 Cmd+Shift+L 打开标签栏后，在前 9 个标签上显示 1–9 角标，按数字键即可直接勾选或取消",
+    labelNumberShortcutModeLabel: "标签输入框为空时直接按 1–9 切换",
+    labelNumberShortcutModeHint:
+      "关闭后仅响应 ⌘1–⌘9，单独按数字键始终输入到新标签输入框",
     testLabelsBarLabel: "测试打开工作区标签栏",
     testLabelsBarHint:
       "点击即刻在当前活跃工作区打开彩色标签管理栏，测试标签列表与切换响应",

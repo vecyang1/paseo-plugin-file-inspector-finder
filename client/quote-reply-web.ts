@@ -11,13 +11,26 @@
  *   3. On send (Enter / Cmd+Enter / the send button) the tray is folded into the message text as
  *      Markdown blockquotes, each followed by its comment, then the typed message. The result is
  *      visible in the sent bubble, so what the agent received is always auditable.
+ *   4. Quotes and comments can be sent with no typed message. Paseo renders its send button only
+ *      when the composer has text, so the tray shows its own "Send" while that button is absent;
+ *      Cmd/Ctrl+Enter inside a comment field sends too. Both fold the tray and press Paseo's own
+ *      send button, so queue / interrupt behaviour is whatever the user configured.
  *
  * Send safety: the composition is written into the composer synchronously in the capture phase, so
- * Paseo's own submit handler reads the composed text. A verifier then checks the outcome: if the
- * key did not send (for example the send shortcut is set to Cmd+Enter), the composer text is
- * restored and the tray kept; if the message went out but the quote text cannot be found in the
- * newest user bubble, the tray is restored too. Nothing is dropped silently, and every outcome is a
- * receipt shown in Settings -> Plugins -> File Inspector & Finder (read / test / tune).
+ * Paseo's own submit handler reads the composed text. A verifier then checks the outcome:
+ *   - composer still holds the text and is editable: the key did not send (for example the send
+ *     shortcut is Cmd+Enter). The text is restored and the tray kept.
+ *   - composer still holds the text but is read-only: a new session keeps it locked while the agent
+ *     is created. That send is in flight; the verifier waits instead of pulling the text back.
+ *   - composer cleared: sent. The tray is emptied, then the sent bubble is looked for.
+ *
+ * The bubble check reads only this composer's own chat list. Paseo keeps every session opened in
+ * this window mounted and hidden, so "the last user message in the document" is usually another
+ * session's; reading it made a successful send look like a dropped one and put the quotes back
+ * (fixed 2026-11-13). The tray is restored only on positive evidence: a new bubble in this pane
+ * that is exactly the typed text with the quotes missing. No bubble, or an unrelated one, proves
+ * nothing and changes nothing. Every outcome is a receipt shown in Settings -> Plugins -> File
+ * Inspector & Finder (read / test / tune).
  */
 
 import { syncPaseoThemeCssVariables } from "./theme-web";
@@ -75,6 +88,10 @@ export interface QuoteReplyStatus {
   quotes: QuoteItem[];
   composerFound: boolean;
   trayMounted: boolean;
+  /** Chat lists in the document right now, hidden sessions included. */
+  mountedChatPanes: number;
+  /** Whether the after-send check can find this composer's own chat list among them. */
+  paneResolved: boolean;
   receipts: QuoteReplyReceipt[];
 }
 
@@ -110,6 +127,18 @@ const COMPOSER_ROOT_SELECTOR = '[data-testid="message-input-root"]';
 const ATTACH_BUTTON_SELECTOR = '[data-testid="message-input-attach-button"]';
 const AUTOCOMPLETE_SELECTOR = '[data-testid="composer-autocomplete-popover"]';
 const USER_MESSAGE_SELECTOR = '[data-testid="user-message"]';
+const USER_MESSAGE_TRAILING_SELECTOR = '[data-testid="user-message-trailing-row"]';
+const CHAT_SCROLL_SELECTOR = '[data-testid="agent-chat-scroll"]';
+
+/** First look at the composer after a key / press that may have sent. */
+const FOLD_CHECK_MS = 650;
+/** A new session keeps the text read-only while its agent is created; poll that long before giving up. */
+const LOCKED_POLL_MS = 400;
+const LOCKED_WAIT_MS = 90_000;
+/** Looking for the sent bubble: poll, and only call it dropped once the list has settled. */
+const CONFIRM_POLL_MS = 400;
+const CONFIRM_SETTLE_MS = 3000;
+const CONFIRM_WINDOW_MS = 10_000;
 
 /** Regions where a selection may be quoted. Anything editable is always excluded. */
 const QUOTABLE_REGION_SELECTOR = [
@@ -181,6 +210,8 @@ interface QuoteCopy {
   comment: string;
   trayTitle: (n: number) => string;
   commentPlaceholder: string;
+  send: string;
+  sendHint: (modKey: string) => string;
   insert: string;
   insertHint: string;
   clear: string;
@@ -195,6 +226,8 @@ const COPY_ZH: QuoteCopy = {
   comment: "评论",
   trayTitle: (n) => `引用 ${n}`,
   commentPlaceholder: "添加评论（可选）",
+  send: "发送",
+  sendHint: (modKey) => `直接发送引用和评论，无需输入正文（评论框内按 ${modKey}）`,
   insert: "展开到输入框",
   insertHint: "把引用写进输入框正文，便于直接编辑",
   clear: "清空",
@@ -209,6 +242,8 @@ const COPY_EN: QuoteCopy = {
   comment: "Comment",
   trayTitle: (n) => (n === 1 ? "1 quote" : `${n} quotes`),
   commentPlaceholder: "Add a comment (optional)",
+  send: "Send",
+  sendHint: (modKey) => `Send the quotes and comments as they are, no message needed (${modKey} in a comment)`,
   insert: "Expand into message",
   insertHint: "Write the quotes into the message text so you can edit them directly",
   clear: "Clear",
@@ -406,9 +441,16 @@ export function resolveQuoteSessionKey(pathname: string | null | undefined): str
   return "draft";
 }
 
-/** Short probe used to confirm the quote actually reached the sent bubble. */
+const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/**
+ * Short probe used to confirm the quote actually reached the sent bubble. Taken from the first
+ * non-empty line only: the bubble shows every quoted line behind "> ", so a probe that spans a
+ * line break is never found there.
+ */
 export function quoteFingerprint(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, 24);
+  const firstLine = text.split("\n").find((line) => line.trim().length > 0) ?? "";
+  return collapseWhitespace(firstLine).slice(0, 24);
 }
 
 export function messageContainsQuote(messageText: string, quotes: ReadonlyArray<Pick<QuoteItem, "text">>): boolean {
@@ -417,6 +459,53 @@ export function messageContainsQuote(messageText: string, quotes: ReadonlyArray<
     const probe = quoteFingerprint(q.text);
     return !probe || hay.includes(probe);
   });
+}
+
+export type QuoteFoldOutcome = "sent" | "in-flight" | "not-sent";
+
+/**
+ * What the composer says after a key / press folded the tray into it. `locked` is the textarea
+ * being read-only or disabled: Paseo does that while a new session's agent is being created and
+ * keeps the text on screen meanwhile, so text that is still there is not proof that nothing was sent.
+ */
+export function judgeFoldedComposer(input: {
+  connected: boolean;
+  value: string;
+  prefix: string;
+  locked: boolean;
+}): QuoteFoldOutcome {
+  if (!input.connected) return "sent"; // the screen moved on; the text went with the send or into the draft
+  if (!input.prefix || !input.value.startsWith(input.prefix)) return "sent";
+  return input.locked ? "in-flight" : "not-sent";
+}
+
+export type QuoteSendVerdict = "confirmed" | "dropped" | "pending";
+
+/**
+ * Reads the user bubbles of ONE chat pane and decides whether the folded quotes reached the message.
+ *   confirmed: a bubble that appeared after the send carries every quote.
+ *   dropped:   the list has settled and the newest such bubble is exactly the typed text, so the
+ *              message went out without its quotes.
+ *   pending:   anything else. An unrelated bubble, or none at all (a queued send, a row that is not
+ *              mounted), is not evidence either way.
+ */
+export function judgeQuoteSend(input: {
+  bubbles: ReadonlyArray<{ text: string; isNew: boolean }>;
+  quotes: ReadonlyArray<Pick<QuoteItem, "text">>;
+  typed: string;
+  settled: boolean;
+}): QuoteSendVerdict {
+  const fresh = input.bubbles.filter((b) => b.isNew);
+  if (fresh.some((b) => messageContainsQuote(b.text, input.quotes))) return "confirmed";
+  const typed = collapseWhitespace(input.typed);
+  const newest = fresh[fresh.length - 1];
+  if (input.settled && typed && newest && collapseWhitespace(newest.text) === typed) return "dropped";
+  return "pending";
+}
+
+/** A bubble's own message text: its full text minus the timestamp / actions row that follows it. */
+export function userBubbleMessageText(full: string, trailing: string): string {
+  return trailing && full.endsWith(trailing) ? full.slice(0, full.length - trailing.length) : full;
 }
 
 function newQuoteId(): string {
@@ -509,6 +598,34 @@ function findComposerCard(textarea: HTMLTextAreaElement): HTMLElement | null {
   return root;
 }
 
+/**
+ * The chat list that belongs to this composer: the one inside its nearest ancestor that has any.
+ * Paseo keeps other sessions mounted and hidden in sibling subtrees, so a document-wide query finds
+ * theirs too. A composer with no list of its own (the new-session screen) climbs up to one of those
+ * hidden lists; that is not its pane, so the answer is null.
+ */
+export function findChatPaneFor(composer: Element): Element | null {
+  let el: Element | null = composer.parentElement;
+  while (el) {
+    const scroll = el.querySelector(CHAT_SCROLL_SELECTOR);
+    if (scroll) return isVisible(scroll) ? scroll : null;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+/** Paseo's own send button for this composer, when it is rendered and enabled. */
+function findNativeSendButton(composer: HTMLTextAreaElement): HTMLElement | null {
+  const root = composer.closest(COMPOSER_ROOT_SELECTOR);
+  if (!root) return null;
+  for (const btn of Array.from(root.querySelectorAll<HTMLElement>("button, [role='button']"))) {
+    if (!isQuoteReplySendLabel(btn.getAttribute("aria-label"))) continue;
+    if (btn.getAttribute("aria-disabled") === "true" || (btn as HTMLButtonElement).disabled) continue;
+    return btn;
+  }
+  return null;
+}
+
 function describeSource(anchor: Element): QuoteSource {
   if (anchor.closest('[data-testid="assistant-message"]')) return { kind: "assistant" };
   if (anchor.closest('[data-testid="user-message"]')) return { kind: "user" };
@@ -569,6 +686,9 @@ const STYLE_TEXT = `
   all: unset; cursor: pointer; font-size: 11.5px; color: var(--paseo-finder-fg-muted, #71717a);
 }
 #${TRAY_ID} .qr-head button:hover { color: var(--paseo-finder-fg, #1a1a1e); }
+#${TRAY_ID} .qr-head button[data-act="send"] { color: var(--paseo-finder-fg, #1a1a1e); font-weight: 600; }
+/* Paseo's own send button is on screen: one send control is enough. */
+#${TRAY_ID}[data-native-send] .qr-head button[data-act="send"] { display: none; }
 #${TRAY_ID} .qr-item {
   display: flex; align-items: flex-start; gap: 8px; padding: 4px 2px 4px 9px;
   border-left: 2px solid var(--paseo-finder-border-accent, var(--paseo-finder-border, #d4d4d8));
@@ -617,13 +737,16 @@ let runtime: {
 export function getQuoteReplyStatus(): QuoteReplyStatus {
   const sessionKey = runtime?.getSessionKey() ?? "draft";
   const doc = runtime?.doc ?? (typeof document !== "undefined" ? document : null);
+  const composer = runtime?.findComposer() ?? null;
   return {
     installed,
     preferences: readQuoteReplyPreferences(),
     sessionKey,
     quotes: readQuoteTray(sessionKey),
-    composerFound: Boolean(runtime?.findComposer()),
+    composerFound: Boolean(composer),
     trayMounted: Boolean(doc?.getElementById(TRAY_ID)),
+    mountedChatPanes: doc?.querySelectorAll(CHAT_SCROLL_SELECTOR).length ?? 0,
+    paneResolved: Boolean(composer && findChatPaneFor(composer)),
     receipts: readQuoteReplyReceipts(),
   };
 }
@@ -655,6 +778,13 @@ export function runQuoteReplySelfTest(): QuoteReplySelfTestResult {
     { name: "format", ok: composed.text === expected },
     { name: "revert", ok: stripQuotedPrefix(composed.text, composed.prefix) === "Typed message" },
     { name: "fingerprint", ok: messageContainsQuote(composed.text, sample) },
+    {
+      // A foreign bubble must not read as a dropped send; the sent one must confirm it.
+      name: "verify",
+      ok:
+        judgeQuoteSend({ bubbles: [{ text: "another session", isNew: true }], quotes: sample, typed: "Typed message", settled: true }) === "pending" &&
+        judgeQuoteSend({ bubbles: [{ text: composed.text, isNew: true }], quotes: sample, typed: "Typed message", settled: true }) === "confirmed",
+    },
   ];
   const status = getQuoteReplyStatus();
   checks.push({ name: "installed", ok: status.installed });
@@ -663,8 +793,16 @@ export function runQuoteReplySelfTest(): QuoteReplySelfTestResult {
     ok: status.composerFound,
     detail: status.composerFound ? undefined : "open a chat so the composer is on screen, then re-run",
   });
+  // On a chat screen the composer's own list must be found; a new-session screen has none.
+  const onChat = status.composerFound && status.sessionKey.startsWith("ag:");
+  checks.push({
+    name: "pane",
+    ok: !onChat || status.paneResolved,
+    detail: `${status.mountedChatPanes} chat list(s) mounted; this composer's own ${status.paneResolved ? "found" : "not found"}`,
+  });
   const ok = checks.every((c) => c.ok || c.name === "composer");
-  const summary = checks.map((c) => `${c.name}=${c.ok ? "ok" : "fail"}`).join(" · ");
+  const summary =
+    checks.map((c) => `${c.name}=${c.ok ? "ok" : "fail"}`).join(" · ") + ` · panes=${status.mountedChatPanes}`;
   recordQuoteReplyReceipt({
     trigger: "self-test",
     sessionKey: status.sessionKey,
@@ -695,6 +833,9 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
 
   const copy = () => copyFor(options.getLocale?.());
   const getSessionKey = () => resolveQuoteSessionKey(win.location?.pathname);
+  const modEnterLabel = /Mac|iPhone|iPad|iPod/i.test(win.navigator?.platform ?? "")
+    ? "⌘+Enter"
+    : "Ctrl+Enter";
   let lastComposer: HTMLTextAreaElement | null = null;
   let pendingSelection: { text: string; source: QuoteSource } | null = null;
   let focusCommentId: string | null = null;
@@ -876,9 +1017,13 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
       head.className = "qr-head";
       head.innerHTML =
         `<span data-testid="quote-reply-count"></span><span class="qr-spacer"></span>` +
+        `<button type="button" data-act="send" data-testid="quote-reply-send"></button>` +
         `<button type="button" data-act="flush" data-testid="quote-reply-flush"></button>` +
         `<button type="button" data-act="clear" data-testid="quote-reply-clear"></button>`;
       (head.children[0] as HTMLElement).textContent = c.trayTitle(quotes.length);
+      const send = head.querySelector<HTMLElement>('[data-act="send"]')!;
+      send.textContent = c.send;
+      send.title = c.sendHint(modEnterLabel);
       const flush = head.querySelector<HTMLElement>('[data-act="flush"]')!;
       flush.textContent = c.insert;
       flush.title = c.insertHint;
@@ -919,6 +1064,8 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
         tray.appendChild(item);
       }
     }
+    // The tray's own Send shows only while Paseo's send button is absent (empty composer).
+    tray.toggleAttribute("data-native-send", Boolean(composer && findNativeSendButton(composer)));
     if (focusCommentId) {
       const input = tray.querySelector<HTMLInputElement>(`.qr-item[data-id="${focusCommentId}"] .qr-comment`);
       focusCommentId = null;
@@ -971,6 +1118,8 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
       findComposer(doc, lastComposer)?.focus();
     } else if (act === "flush") {
       flushIntoComposer();
+    } else if (act === "send") {
+      sendFromTray("tray-send");
     }
   };
 
@@ -984,8 +1133,16 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
   const onTrayKeyDown = (event: KeyboardEvent) => {
     const input = event.target as HTMLElement;
     if (!input.classList?.contains("qr-comment")) return;
-    // Enter or Escape in a comment returns to the message; it never sends by itself.
-    if ((event.key === "Enter" && !event.isComposing) || event.key === "Escape") {
+    const composing = event.isComposing || event.keyCode === 229;
+    // Cmd/Ctrl+Enter in a comment sends the quotes and comments as they are.
+    if (event.key === "Enter" && !composing && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      event.stopPropagation();
+      sendFromTray("comment-mod-enter");
+      return;
+    }
+    // Plain Enter or Escape returns to the message; it never sends by itself.
+    if ((event.key === "Enter" && !composing) || event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       findComposer(doc, lastComposer)?.focus();
@@ -996,6 +1153,22 @@ export function installQuoteReply(options: QuoteReplyInstallOptions = {}): () =>
   // ---- send folding -------------------------------------------------------
 
   let verifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const sendFromTray = (via: string) => {
+    const composer = findComposer(doc, lastComposer);
+    if (!composer || !readQuoteTray(getSessionKey()).length) return;
+    lastComposer = composer;
+    foldTrayIntoComposer(composer, via);
+    const clickSend = (attempt: number) => {
+      const btn = findNativeSendButton(composer);
+      if (btn) {
+        btn.click();
+        return;
+      }
+      if (attempt < 5) setTimeout(() => clickSend(attempt + 1), 16);
+    };
+    setTimeout(() => clickSend(0), 0);
+  };
 
   const foldTrayIntoComposer = (composer: HTMLTextAreaElement, via: string) => {
     const key = getSessionKey();

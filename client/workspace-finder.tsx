@@ -67,6 +67,12 @@ function FinderBrowserView({
           settingsState.values.enableInlineDoubleClickRename,
         enableQuickRenameAndLabelShortcuts:
           settingsState.values.enableQuickRenameAndLabelShortcuts,
+        enableLabelNumberShortcuts:
+          settingsState.values.enableLabelNumberShortcuts ?? true,
+        labelNumberShortcutMode:
+          settingsState.values.labelNumberShortcutMode ?? "empty-input",
+        labelShortcutCombo:
+          settingsState.values.labelShortcutCombo ?? "both",
         enableThreadNavigationShortcuts:
           settingsState.values.enableThreadNavigationShortcuts,
         enablePinWorkspaceShortcut:

@@ -661,6 +661,8 @@ test("Thread Shortcuts 7: Context menu annotation for Pin (sidebar-workspace-men
     {
       enablePinWorkspaceShortcut: true,
       enableQuickRenameAndLabelShortcuts: true,
+      enableLabelNumberShortcuts: true,
+      labelNumberShortcutMode: "empty-input",
       enableSidebarDeleteKeyArchive: true,
       labelShortcutCombo: "both",
       enableInlineDoubleClickRename: true,

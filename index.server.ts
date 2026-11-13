@@ -86,12 +86,18 @@ import {
 } from "./server/doc-preview-handlers";
 import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
 import { handleInspectAntigravityContext } from "./server/compaction-context-handlers";
+import { manageIntakeDecisionsRpc } from "./shared/intake-decisions-contracts";
+import { handleManageIntakeDecisions } from "./server/intake-decisions-handlers";
+import { withRpcTiming } from "./server/rpc-timing";
 
-export default function contribute(server: PluginServerContext) {
+export default function contribute(rawServer: PluginServerContext) {
+  // Slow RPCs are logged with their method name (server/rpc-timing.ts).
+  const server = withRpcTiming(rawServer);
   const settingsHandle = server.registerSettings(pluginSettings);
 
   server.handle(inspectFileRpc, handleInspectFile);
   server.handle(inspectAntigravityContextRpc, (input) => handleInspectAntigravityContext(input));
+  server.handle(manageIntakeDecisionsRpc, (input) => handleManageIntakeDecisions(input));
   server.handle(previewDocumentRpc, handlePreviewDocument);
   server.handle(listSiblingDocumentsRpc, handleListSiblingDocuments);
   server.handle(diagnoseDocPreviewRpc, handleDiagnoseDocPreview);
@@ -896,6 +902,34 @@ export default function contribute(server: PluginServerContext) {
     },
   });
 
+  const finderIntakeDecisionsTool = defineAgentTool({
+    name: "finder_manage_intake_decisions",
+    title: "Inspect or Answer Pending Intake Task Decisions",
+    description:
+      "List blocked intake tasks with extracted 1-click options, dry-run preview in-place Paseo session resumption (`preview_answer`), " +
+      "submit a human decision to resume the original Paseo agent (`answer`), or resolve an item directly (`resolve_done`).",
+    input: z.object({
+      action: z
+        .enum(["list", "preview_answer", "answer", "resolve_done"])
+        .default("list")
+        .describe("Action to perform (default: list)"),
+      refresh: z.boolean().optional().describe("Force fresh digest generation"),
+      taskId: z.string().optional().describe("8-char short task ID or Notion UUID"),
+      choice: z.number().int().min(1).max(12).optional().describe("1-based option index"),
+      text: z.string().max(2000).optional().describe("Custom instruction or decision note"),
+    }),
+    async execute(input) {
+      const res = await handleManageIntakeDecisions({
+        action: input.action,
+        refresh: input.refresh,
+        taskId: input.taskId,
+        choice: input.choice,
+        text: input.text,
+      });
+      return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -927,6 +961,7 @@ export default function contribute(server: PluginServerContext) {
         inspectSystemPromptTool,
         docPreviewTool,
         finderInspectContextTool,
+        finderIntakeDecisionsTool,
       ],
     };
   });

@@ -6034,6 +6034,104 @@ test("39. Subagent finished/archived status reconciliation: native pill shows Do
   assert.equal(readArchivedSubagentIds("other-agent-id", mockWin as never).has("sub-a"), true);
 });
 
+test("39b. Subagent UX anti-repetition & Paseo 0.15.4 (t, rows) pill signature, L2 prefix dedupe, inline badge clean-up, and L0 root-tab guard", async () => {
+  const {
+    cleanSubagentSecondaryText,
+    formatSubagentDisplayName,
+    resolveActiveSubagentNodeFromDom,
+  } = await import("../client/subagents-tree-web");
+
+  // 1) Paseo 0.15.4 calls buildSubagentPillPresentation(t, rows) with `t` FIRST and `rows` SECOND
+  const mod5397v0154: Record<string, any> = {
+    buildSubagentPillPresentation: (tFn: (k: string) => string, rows: Array<Record<string, any>>) => ({
+      segments: [
+        {
+          bucket: null as string | null,
+          text: rows.length === 1 ? tFn("subagents.pillLabelOne") : `${rows.length} subagents`,
+        },
+      ],
+    }),
+  };
+  const win0154 = {
+    navigator: { language: "en-US" },
+    __c: new Map([[5397, { isInitialized: true, publicModule: { exports: mod5397v0154 } }]]),
+  };
+  assert.equal(patchPaseoSubagentTrackModules(win0154 as never), true);
+  const pill0154 = mod5397v0154.buildSubagentPillPresentation(
+    () => "1 subagent",
+    [{ id: "ba8ff0bc", kind: "provider", status: "completed", title: "DeepInvestigator" }],
+  );
+  assert.deepEqual(pill0154.segments, [{ bucket: "done", text: "1 subagent \u00b7 Done" }]);
+
+  // 2) Triple-repeated inline tool-call-badge secondary text is collapsed into clean single-mention text
+  const noisy =
+    "L1 DeepInvestigator \u00b7 Ecommerce & Finance Pattern Investigator [Done \u00b7 16 steps \u00b7 2 subagents] \u2014 Ec...";
+  assert.equal(
+    cleanSubagentSecondaryText(
+      noisy,
+      "DeepInvestigator",
+      "Ecommerce & Finance Pattern Investigator",
+      1,
+    ),
+    "L1 \u00b7 Ecommerce & Finance Pattern Investigator",
+  );
+
+  // 3) L2 coordinator prefix is stripped even without parentSub so top tabs read `L2 WorkerL0` / `L2 ImprovementWorker` instead of colliding on `L2 DeepInvestiga...`
+  assert.equal(
+    formatSubagentDisplayName({ subAgentType: "DeepInvestigatorWorkerL0", depth: 2 }, null, 22),
+    "WorkerL0",
+  );
+  assert.equal(
+    formatSubagentDisplayName(
+      { subAgentType: "DeepInvestigatorImprovementWorker", depth: 2 },
+      null,
+      22,
+    ),
+    "ImprovementWorker",
+  );
+
+  // 4) When L0 Main Agent tab (`workspace-tab-agent_*`) has `aria-selected="true"`, kept-alive `provider-subagent-panel` from earlier visited tabs never falsely reports an active subagent
+  const rootTab = createInteractiveDomNode("div", {
+    "data-testid": "workspace-tab-agent_b175b47a-4121-4f63-8f8d-263d3aae832b",
+    "aria-selected": "true",
+  });
+  const staleSubPanel = createInteractiveDomNode("div", {
+    "data-testid": "provider-subagent-panel",
+  });
+  const staleSubtitle = createInteractiveDomNode("div", {
+    "data-testid": "provider-subagent-pane-subtitle",
+  });
+  staleSubtitle.textContent = "L1 DeepInvestigator";
+  const docOnMainTab = {
+    querySelector: () => null,
+    querySelectorAll: (sel: string) => {
+      if (sel.includes("workspace-tab-agent_")) return [rootTab];
+      if (sel.includes("provider-subagent-panel")) return [staleSubPanel];
+      if (sel.includes("provider-subagent-pane-subtitle")) return [staleSubtitle];
+      return [];
+    },
+  } as unknown as Document;
+  const activeNode = resolveActiveSubagentNodeFromDom(
+    {
+      agentId: "b175b47a-4121-4f63-8f8d-263d3aae832b",
+      workspaceId: "wks_c31ef60595de6846",
+      flatSubagents: [
+        {
+          conversationId: "ba8ff0bc-4259-4602-aa58-0cf502b75b51",
+          parentConversationId: "5d591e27-95fd-4165-9f1b-a380354ddefa",
+          depth: 1,
+          subAgentType: "DeepInvestigator",
+          role: "Investigator",
+          status: "completed",
+        },
+      ],
+    } as never,
+    docOnMainTab,
+    { location: { pathname: "/h/srv_1/workspace/wks_c31ef60595de6846" } } as unknown as Window,
+  );
+  assert.equal(activeNode, null);
+});
+
 test("49. Multi-level subagent penetration display & step-by-step bidirectional jump (Subagent 2 -> Subagent 1 -> Main Agent)", async () => {
   const {
     parseProviderSubagentTabTestId,
@@ -6769,6 +6867,8 @@ test("51. Sidebar Cadence Timer Badge: mounts SVG stopwatch on cadence workspace
       ...readInlineRenamePreferences(null),
       enableDesktopContextMenuHelper: true,
       enableQuickRenameAndLabelShortcuts: true,
+      enableLabelNumberShortcuts: true,
+      labelNumberShortcutMode: "empty-input",
       enableSidebarDeleteKeyArchive: true,
       enableInlineDoubleClickRename: true,
       inlineRenameCaretPosition: "start",
@@ -6820,6 +6920,8 @@ test("51. Sidebar Cadence Timer Badge: mounts SVG stopwatch on cadence workspace
       ...readInlineRenamePreferences(null),
       enableDesktopContextMenuHelper: true,
       enableQuickRenameAndLabelShortcuts: true,
+      enableLabelNumberShortcuts: true,
+      labelNumberShortcutMode: "empty-input",
       enableSidebarDeleteKeyArchive: true,
       enableInlineDoubleClickRename: true,
       inlineRenameCaretPosition: "start",
@@ -7385,6 +7487,8 @@ test("54. Thread Navigation (Cmd+; / Cmd+') and Pin Workspace (Cmd+Option+P) sho
       enablePinWorkspaceShortcut: true,
       enableThreadNavigationShortcuts: true,
       enableQuickRenameAndLabelShortcuts: true,
+      enableLabelNumberShortcuts: true,
+      labelNumberShortcutMode: "empty-input",
       enableSidebarDeleteKeyArchive: true,
       labelShortcutCombo: "both",
       enableInlineDoubleClickRename: true,

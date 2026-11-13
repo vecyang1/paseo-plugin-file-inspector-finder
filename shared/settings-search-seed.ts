@@ -574,7 +574,7 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
     },
     {
       "key": "plugin:file-inspector-finder/finder-settings",
-      "label": "file-inspector-finder · File Inspector & Finder",
+      "label": "file-inspector-finder · Paseo Powerpack",
       "entries": [
         {
           "title": "Behavior & Native Integration"
@@ -629,6 +629,14 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
         {
           "title": "Workspace label shortcut trigger",
           "hint": "Choose which keyboard shortcut opens the quick labels bar. Cmd+L provides fast 2-key access; Cmd+Shift+L avoids overriding Paseo's composer focus"
+        },
+        {
+          "title": "Select labels with 1–9 in labels bar",
+          "hint": "Show 1–9 key badges on the first nine labels after pressing Cmd+L or Cmd+Shift+L so you can toggle tags from the keyboard"
+        },
+        {
+          "title": "Plain 1–9 toggles when label input is empty",
+          "hint": "Off: only ⌘1–⌘9 toggle labels, and plain digits always type into the new-label field"
         },
         {
           "title": "Test open workspace labels bar",
@@ -869,6 +877,12 @@ export const SETTINGS_SEARCH_SEED: SettingsSearchSeed = {
         },
         {
           "title": "Remote Relay & Timeline Reconciler"
+        },
+        {
+          "title": "Task Decisions & In-Place Session Resume"
+        },
+        {
+          "title": "Open Decisions Queue (Ctrl+Cmd+D)"
         },
         {
           "title": "Session Finished Time & Local Timezone Reconciler"

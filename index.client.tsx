@@ -112,8 +112,13 @@ import {
   syncDocumentPanelAssociations,
 } from "./client/doc-preview-web";
 import { installCompactionAndContextEnhancer } from "./client/compaction-context-web";
+import {
+  installIntakeDecisionsEnhancer,
+  openIntakeDecisionsDrawer,
+} from "./client/intake-decisions-web";
 import { createKeyedSerialQueue } from "./client/keyed-serial";
 import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
+import { manageIntakeDecisionsRpc } from "./shared/intake-decisions-contracts";
 
 // One queue for every title write path (Option+D, /done, the Command Center action, F2, slash rename).
 // Each rename sends a native setTitle and then a plugin RPC that sets the title again; without
@@ -1835,6 +1840,27 @@ export default function contribute(client: PluginClientContext) {
     .then((res) => {
       if (res.status === "ready" && !lifetime.signal.aborted) {
         const v = res.values as Record<string, unknown>;
+        syncInlineRenamePreferences({
+          enableQuickRenameAndLabelShortcuts:
+            typeof v.enableQuickRenameAndLabelShortcuts === "boolean"
+              ? v.enableQuickRenameAndLabelShortcuts
+              : undefined,
+          enableLabelNumberShortcuts:
+            typeof v.enableLabelNumberShortcuts === "boolean"
+              ? v.enableLabelNumberShortcuts
+              : undefined,
+          labelNumberShortcutMode:
+            v.labelNumberShortcutMode === "modifier-only" ||
+            v.labelNumberShortcutMode === "empty-input"
+              ? v.labelNumberShortcutMode
+              : undefined,
+          labelShortcutCombo:
+            v.labelShortcutCombo === "cmd_l" ||
+            v.labelShortcutCombo === "cmd_shift_l" ||
+            v.labelShortcutCombo === "both"
+              ? v.labelShortcutCombo
+              : undefined,
+        });
         syncProjectPickerShortcutPrefs({
           enabled: typeof v.enableProjectPickerShortcut === "boolean" ? v.enableProjectPickerShortcut : undefined,
           preset:
@@ -1913,6 +1939,11 @@ export default function contribute(client: PluginClientContext) {
     call: (def, input) => client.rpc(def, input),
     getLocale: () => client.i18n.locale,
   });
+
+  const cleanupIntakeDecisionsEnhancer = installIntakeDecisionsEnhancer(
+    getWebWindow(),
+    (input) => client.rpc(manageIntakeDecisionsRpc, input),
+  );
 
   client.addCommandCenterItem({
     id: "refresh-context-window-meter",
@@ -2046,6 +2077,31 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  client.addCommandCenterItem({
+    id: "open-intake-decisions",
+    title: pluginTranslations.message("commands.openIntakeDecisions"),
+    icon: "CheckSquare",
+    keywords: ["decision", "decisions", "approve", "blocked", "intake", "queue", "resume"],
+    context: "global",
+    onSelect({ rpc }) {
+      void openIntakeDecisionsDrawer((input) => rpc(manageIntakeDecisionsRpc, input));
+    },
+  });
+
+  client.addSlashCommand({
+    name: "decisions",
+    description: pluginTranslations.message("commands.decisionsSlashDescription"),
+    argumentHint: pluginTranslations.message("commands.decisionsSlashHint"),
+    context: "workspace",
+    onSubmit({ args, rpc }) {
+      const taskQuery = args.trim() || undefined;
+      void openIntakeDecisionsDrawer(
+        (input) => rpc(manageIntakeDecisionsRpc, input),
+        taskQuery,
+      );
+    },
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -2072,6 +2128,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupSessionLineageEnhancer();
     cleanupDocPreviewEnhancer();
     cleanupCompactionAndContextEnhancer();
+    cleanupIntakeDecisionsEnhancer();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
     for (const btn of forkButtons.values()) btn.remove();

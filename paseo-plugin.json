@@ -1,7 +1,7 @@
 {
   "id": "file-inspector-finder",
-  "name": "File Inspector & Finder Reveal",
-  "description": "Custom Voice & STT Models (SiliconFlow Free SenseVoiceSmall / OpenWhispr Qwen3-ASR / Gemini 6-Key Pool), Schedule Runs History & 1-Click Session Drill-Down (⌘⇧H & inline Runs pills), Project Workspace Quick Switcher (Cmd+J / Cmd+Shift+O), zero-popup double-click & F2 inline workspace/tab rename, sidebar folder drag-and-drop workspace import (auto-dedupe), colored thread labels, Finder reveal, macOS Preview/Editor launch, and workspace media inspection.",
+  "name": "Paseo Powerpack",
+  "description": "Paseo Powerpack (formerly File Inspector & Finder Reveal): 28+ workbench & multi-agent enhancements including Multi-Document Preview & Compare (PDF/Office/EPUB/iWork), Task Decisions Queue (⌃⌘D), Schedule Runs History (⌘⇧H), Subagent Tree (⌘⇧B), Project Quick Switcher (⌘J), Zero-Popup Inline Rename (F2), Smart Dual-MIME Clipboard Copy (⌘C), Quote Reply, Model Quick Switch (⌘/), Custom STT Models, and Finder Reveal.",
   "media": [],
   "requirements": {
     "paseo": ">=0.15.3"

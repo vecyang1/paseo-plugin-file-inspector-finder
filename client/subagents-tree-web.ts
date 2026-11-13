@@ -53,7 +53,9 @@ const KNOWN_SUBAGENT_TYPES = new Set([
 
 const DRAWER_MODE_STORAGE_KEY = "paseo:finder-plugin:subagents-drawer-mode";
 const LEFT_SIDEBAR_COLLAPSED_KEY = "paseo:finder-plugin:left-sidebar-subagents-collapsed";
+const LEFT_SIDEBAR_COLLAPSED_MAP_KEY = "paseo:finder-plugin:left-sidebar-subagents-collapsed-by-ws-v1";
 export const ARCHIVED_SUBAGENTS_STORAGE_KEY = "paseo:finder-plugin:archived-subagents-v1";
+const SUBAGENTS_TRACK_PATCH_STAMP = `subagents-track:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
 function normalizeSubagentArchiveId(rawId: string | null | undefined): string {
   const trimmed = String(rawId ?? "").trim();
@@ -146,20 +148,32 @@ export function patchPaseoSubagentTrackModules(
     if (!exp || typeof exp !== "object") continue;
 
     // 1. Patch buildSubagentPillPresentation & buildSubagentRowPresentationData (Metro module 5397)
+    // Paseo 0.15.4 calls buildSubagentPillPresentation(t, rows), whereas 0.15.3 / tests call (rows, t).
+    // Stamp with SUBAGENTS_TRACK_PATCH_STAMP so `paseo plugin reload` hot-swaps closures without stacking.
     if (
       typeof exp.buildSubagentPillPresentation === "function" &&
-      !exp.__paseoSubagentPillDonePatched
+      exp.__paseoSubagentPillPatchStamp !== SUBAGENTS_TRACK_PATCH_STAMP
     ) {
-      const origBuildPill = exp.buildSubagentPillPresentation;
+      const origBuildPill =
+        typeof exp.__paseoSubagentPillOrig === "function"
+          ? exp.__paseoSubagentPillOrig
+          : exp.buildSubagentPillPresentation;
+      exp.__paseoSubagentPillOrig = origBuildPill;
       exp.buildSubagentPillPresentation = function patchedBuildSubagentPillPresentation(
-        rows: Array<Record<string, any>>,
-        t?: unknown,
+        arg0: unknown,
+        arg1?: unknown,
       ) {
-        const res = origBuildPill.call(this, rows, t);
-        if (!Array.isArray(rows) || rows.length === 0) return res;
+        const res = origBuildPill.call(this, arg0, arg1);
+        const rows = Array.isArray(arg0) ? arg0 : Array.isArray(arg1) ? arg1 : null;
+        if (!rows || rows.length === 0) return res;
         const zh = isChineseLocale(w?.navigator?.language);
         const total = rows.length;
-        const runningCount = rows.filter((r) => r && r.statusBucket === "running").length;
+        const runningCount = rows.filter((r) => {
+          if (!r || typeof r !== "object") return false;
+          if (r.statusBucket) return r.statusBucket === "running";
+          if (r.kind === "paseo") return r.turn?.phase === "open";
+          return r.status === "running";
+        }).length;
         const doneCount = total - runningCount;
         const baseSegText = String(
           res?.segments?.[0]?.text ??
@@ -199,39 +213,53 @@ export function patchPaseoSubagentTrackModules(
         return res;
       };
       exp.__paseoSubagentPillDonePatched = true;
+      exp.__paseoSubagentPillPatchStamp = SUBAGENTS_TRACK_PATCH_STAMP;
       patchedAny = true;
     }
 
     if (
       typeof exp.buildSubagentRowPresentationData === "function" &&
-      !exp.__paseoSubagentRowDonePatched
+      exp.__paseoSubagentRowPatchStamp !== SUBAGENTS_TRACK_PATCH_STAMP
     ) {
-      const origBuildRow = exp.buildSubagentRowPresentationData;
+      const origBuildRow =
+        typeof exp.__paseoSubagentRowOrig === "function"
+          ? exp.__paseoSubagentRowOrig
+          : exp.buildSubagentRowPresentationData;
+      exp.__paseoSubagentRowOrig = origBuildRow;
       exp.buildSubagentRowPresentationData = function patchedBuildSubagentRowPresentationData(
         row: Record<string, any>,
         t?: unknown,
       ) {
         const res = origBuildRow.call(this, row, t);
-        if (
+        const isRunning =
           row &&
-          row.statusBucket !== "running" &&
-          res &&
-          typeof res.detailText === "string"
-        ) {
-          res.detailText = res.detailText.replace(/\[Running\b/gi, "[Done");
+          (row.statusBucket === "running" ||
+            (row.statusBucket === undefined && row.status === "running"));
+        if (row && !isRunning && res) {
+          if (typeof res.detailText === "string") {
+            res.detailText = res.detailText.replace(/\[Running\b/gi, "[Done");
+          }
+          if (typeof res.label === "string") {
+            res.label = res.label.replace(/\[Running\b/gi, "[Done");
+          }
         }
         return res;
       };
       exp.__paseoSubagentRowDonePatched = true;
+      exp.__paseoSubagentRowPatchStamp = SUBAGENTS_TRACK_PATCH_STAMP;
       patchedAny = true;
     }
 
     // 2. Patch getStatusDotColor (Metro module 4303) so "done" bucket shows a green status dot on ComposerTrackPill
     if (
       typeof exp.getStatusDotColor === "function" &&
-      !exp.__paseoStatusDotDonePatched
+      exp.__paseoStatusDotPatchStamp !== SUBAGENTS_TRACK_PATCH_STAMP
     ) {
-      const origGetDot = exp.getStatusDotColor;
+      const origGetDot =
+        typeof exp.__paseoStatusDotOrig === "function"
+          ? exp.__paseoStatusDotOrig
+          : exp.getStatusDotColor;
+      exp.__paseoStatusDotOrig = origGetDot;
       exp.getStatusDotColor = function patchedGetStatusDotColor(
         theme: Record<string, any>,
         bucket: string | null | undefined,
@@ -243,18 +271,23 @@ export function patchPaseoSubagentTrackModules(
         return origGetDot.call(this, theme, bucket, opts);
       };
       exp.__paseoStatusDotDonePatched = true;
+      exp.__paseoStatusDotPatchStamp = SUBAGENTS_TRACK_PATCH_STAMP;
       patchedAny = true;
     }
 
     // 3. Patch useProviderSubagentStore (Metro module 4939) so archiving finished subagents persists & syncs
     if (
       typeof exp.useProviderSubagentStore?.getState === "function" &&
-      !exp.__paseoProviderSubagentStorePatched
+      exp.__paseoProviderSubagentStorePatchStamp !== SUBAGENTS_TRACK_PATCH_STAMP
     ) {
       try {
         const storeState = exp.useProviderSubagentStore.getState();
         if (storeState && typeof storeState.hideFromTrack === "function") {
-          const origHideFromTrack = storeState.hideFromTrack;
+          const origHideFromTrack =
+            typeof exp.__paseoProviderSubagentHideOrig === "function"
+              ? exp.__paseoProviderSubagentHideOrig
+              : storeState.hideFromTrack;
+          exp.__paseoProviderSubagentHideOrig = origHideFromTrack;
           const wrappedHideFromTrack = function (
             this: unknown,
             serverId: string,
@@ -272,6 +305,7 @@ export function patchPaseoSubagentTrackModules(
           }
         }
         exp.__paseoProviderSubagentStorePatched = true;
+        exp.__paseoProviderSubagentStorePatchStamp = SUBAGENTS_TRACK_PATCH_STAMP;
         patchedAny = true;
       } catch {
         // ignore store patch errors
@@ -281,9 +315,13 @@ export function patchPaseoSubagentTrackModules(
     // 4. Patch openExternalUrl (Metro module 3687) so `conversation://<uuid>` Markdown links open our subagent / session inspector instead of being ignored
     if (
       typeof exp.openExternalUrl === "function" &&
-      !exp.__paseoConversationUrlPatched
+      exp.__paseoConversationUrlPatchStamp !== SUBAGENTS_TRACK_PATCH_STAMP
     ) {
-      const origOpenExternalUrl = exp.openExternalUrl;
+      const origOpenExternalUrl =
+        typeof exp.__paseoOpenExternalUrlOrig === "function"
+          ? exp.__paseoOpenExternalUrlOrig
+          : exp.openExternalUrl;
+      exp.__paseoOpenExternalUrlOrig = origOpenExternalUrl;
       exp.openExternalUrl = async function patchedOpenExternalUrl(
         this: unknown,
         url: string,
@@ -307,6 +345,7 @@ export function patchPaseoSubagentTrackModules(
         return origOpenExternalUrl.call(this, url);
       };
       exp.__paseoConversationUrlPatched = true;
+      exp.__paseoConversationUrlPatchStamp = SUBAGENTS_TRACK_PATCH_STAMP;
       patchedAny = true;
     }
   }
@@ -323,8 +362,10 @@ const GENERIC_SUBAGENT_TYPES = new Set([
   "worker",
 ]);
 
+const KNOWN_COORDINATOR_PREFIXES = ["DeepInvestigator", "DeepCoder"];
+
 export function formatSubagentDisplayName(
-  sub: { subAgentType: string; role?: string | null },
+  sub: { subAgentType: string; role?: string | null; depth?: number },
   parentSub?: { subAgentType: string; role?: string | null } | null,
   maxLen = 28,
 ): string {
@@ -333,12 +374,18 @@ export function formatSubagentDisplayName(
   const isGenericType = !rawType || GENERIC_SUBAGENT_TYPES.has(rawType.toLowerCase());
   let chosen = isGenericType && rawRole ? rawRole : rawType || rawRole || "subagent";
 
-  if (!isGenericType && parentSub?.subAgentType) {
-    const parentType = parentSub.subAgentType.trim();
-    if (parentType && chosen.length > parentType.length && chosen.startsWith(parentType)) {
-      const rest = chosen.slice(parentType.length).replace(/^[-_\s]+/, "");
-      if (rest.length >= 3) {
-        chosen = rest;
+  if (!isGenericType) {
+    const candidatePrefixes = [
+      ...(parentSub?.subAgentType ? [parentSub.subAgentType.trim()] : []),
+      ...((sub.depth ?? 1) >= 2 ? KNOWN_COORDINATOR_PREFIXES : []),
+    ];
+    for (const prefix of candidatePrefixes) {
+      if (prefix && chosen.length > prefix.length && chosen.startsWith(prefix)) {
+        const rest = chosen.slice(prefix.length).replace(/^[-_\s]+/, "");
+        if (rest.length >= 3) {
+          chosen = rest;
+          break;
+        }
       }
     }
   }
@@ -347,6 +394,58 @@ export function formatSubagentDisplayName(
     return `${chosen.slice(0, Math.max(4, maxLen - 1)).trimEnd()}…`;
   }
   return chosen;
+}
+
+export function cleanSubagentSecondaryText(
+  rawSecondary: string,
+  subAgentType: string,
+  role?: string | null,
+  depth = 1,
+): string {
+  let s = (rawSecondary ?? "").trim();
+  if (!s) return "";
+  const cleanType = (subAgentType ?? "").trim();
+  const cleanRole = (role ?? "").trim();
+
+  // 1. Strip bracketed status summary (`[Done · 16 steps · 2 subagents]`) because the interactive pill renders it
+  s = s.replace(/\s*\[(?:Running|Done|Failed|Canceled|运行中|已完成|失败|已取消)[^\]]*\]/gi, "");
+
+  // 2. Strip leading repeated `L1 DeepInvestigator` (primary label already renders `DeepInvestigator`)
+  if (cleanType) {
+    const escapedType = cleanType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    s = s.replace(
+      new RegExp(`^L(\\d+)\\s+${escapedType}\\b(?:\\s*\\([^)]*\\))?\\s*(?:[·—:-]\\s*)?`, "i"),
+      (_m, lvl) => `L${lvl} · `,
+    );
+  }
+
+  // 3. Strip trailing ` — <duplicate role or truncated role prefix>` (`Ecommerce ... — Ec...`)
+  const dashIdx = s.indexOf(" — ");
+  if (dashIdx >= 0) {
+    const head = s.slice(0, dashIdx).trim();
+    const tail = s
+      .slice(dashIdx + 3)
+      .replace(/(?:\.{3}|…)$/, "")
+      .trim();
+    const headLower = head.toLowerCase();
+    const tailLower = tail.toLowerCase();
+    const roleLower = cleanRole.toLowerCase();
+    if (
+      !tailLower ||
+      (tailLower.length >= 2 &&
+        (headLower.includes(tailLower) ||
+          (roleLower && roleLower.startsWith(tailLower)) ||
+          cleanType.toLowerCase().startsWith(tailLower)))
+    ) {
+      s = head;
+    }
+  }
+
+  s = s.replace(/\s*[·—:-]\s*$/, "").trim();
+  if (/^L\d+$/i.test(s) && cleanRole && cleanRole.toLowerCase() !== cleanType.toLowerCase()) {
+    return `L${depth} · ${cleanRole}`;
+  }
+  return s;
 }
 
 export function decorateConversationLinksAndSubagentMentionsInDom(
@@ -734,14 +833,52 @@ export function resolveActiveSubagentNodeFromDom(
     if (matched) return matched;
   }
 
-  // 2. If provider-subagent-panel is mounted, check focused tab in useWorkspaceLayoutStore / localStorage or subtitle
-  const subPanel = d.querySelector<HTMLElement>('[data-testid="provider-subagent-panel"]');
-  if (!subPanel) return null;
-
+  // 1b. Consult Paseo's authoritative useWorkspaceLayoutStore first when available:
+  // if the focused tab in this workspace is `kind === "agent"`, we are definitively on L0 Main Agent.
   const focusedTarget = extractFocusedWorkspaceTabTarget(
     ctx.workspaceId ?? tree.workspaceId,
     w,
   );
+  if (focusedTarget?.kind === "agent") {
+    return null;
+  }
+
+  // If L0 Main Agent tab is explicitly selected (`aria-selected="true"`), we are on L0 Main Agent —
+  // never fall through to kept-alive hidden `provider-subagent-panel` nodes from earlier visited tabs.
+  const activeRootAgentTab = queryFirstVisible<HTMLElement>(
+    d,
+    '[data-testid^="workspace-tab-agent_"][aria-selected="true"]',
+    w,
+  );
+  if (activeRootAgentTab) {
+    return null;
+  }
+
+  // 2. Only inspect a VISIBLE `provider-subagent-panel` (kept-alive tabs stay hidden in the DOM)
+  let subPanel = queryFirstVisible<HTMLElement>(
+    d,
+    '[data-testid="provider-subagent-panel"]',
+    w,
+  );
+  if (!subPanel && typeof d.querySelector === "function") {
+    const singleCand = d.querySelector<HTMLElement>('[data-testid="provider-subagent-panel"]');
+    if (singleCand && !singleCand.hidden && singleCand.style?.display !== "none") {
+      // Allow synthetic test mocks where querySelectorAll returns [] while querySelector is stubbed,
+      // provided no ancestor is hidden (`display: none` / `[hidden]`).
+      let cur: HTMLElement | null = singleCand;
+      let hiddenAncestor = false;
+      while (cur) {
+        if (cur.hidden || cur.style?.display === "none" || cur.getAttribute?.("aria-hidden") === "true") {
+          hiddenAncestor = true;
+          break;
+        }
+        cur = cur.parentElement;
+      }
+      if (!hiddenAncestor) subPanel = singleCand;
+    }
+  }
+  if (!subPanel) return null;
+
   if (focusedTarget?.subagentId) {
     const norm = normalizeSubagentArchiveId(focusedTarget.subagentId);
     const matched = tree.flatSubagents.find(
@@ -752,15 +889,26 @@ export function resolveActiveSubagentNodeFromDom(
     if (matched) return matched;
   }
 
-  // 3. Fallback: match `[data-testid="provider-subagent-pane-subtitle"]` text against subAgentType / role / description
-  const subtitleEl = d.querySelector<HTMLElement>(
-    '[data-testid="provider-subagent-pane-subtitle"]',
-  );
+  // 3. Fallback: match visible `[data-testid="provider-subagent-pane-subtitle"]` text
+  const subtitleEl =
+    queryFirstVisible<HTMLElement>(
+      subPanel,
+      '[data-testid="provider-subagent-pane-subtitle"]',
+      w,
+    ) ??
+    queryFirstVisible<HTMLElement>(
+      d,
+      '[data-testid="provider-subagent-pane-subtitle"]',
+      w,
+    );
   const subtitleText = (subtitleEl?.textContent ?? "").trim();
   if (subtitleText) {
     const exactMatch = tree.flatSubagents.find(
       (s) =>
         subtitleText.includes(`L${s.depth} ${s.subAgentType}`) ||
+        subtitleText.includes(
+          `L${s.depth} ${formatSubagentDisplayName(s, null, 40)}`,
+        ) ||
         subtitleText.includes(s.conversationId.slice(0, 8)),
     );
     if (exactMatch) return exactMatch;
@@ -909,19 +1057,44 @@ export function installDesktopSubagentsTreeEnhancer(
   let activeDrawerSelectSessionFn: ((cid: string) => void) | null = null;
   let pollIntervalId: ReturnType<typeof setInterval> | null = null;
   let rafId: number | null = null;
-  let leftSidebarCollapsed = true;
   try {
-    const saved = window.localStorage?.getItem(LEFT_SIDEBAR_COLLAPSED_KEY);
-    leftSidebarCollapsed = saved === null ? true : saved === "true";
+    const savedMapRaw = window.localStorage?.getItem(LEFT_SIDEBAR_COLLAPSED_MAP_KEY);
+    if (savedMapRaw) {
+      const parsedMap = JSON.parse(savedMapRaw) as Record<string, unknown>;
+      if (parsedMap && typeof parsedMap === "object") {
+        for (const [wsK, val] of Object.entries(parsedMap)) {
+          if (typeof val === "boolean" && wsK) {
+            collapsedByWorkspaceId.set(wsK, val);
+          }
+        }
+      }
+    }
   } catch {
-    leftSidebarCollapsed = true;
+    // ignore storage errors
   }
 
-  const isWorkspaceSidebarTreeCollapsed = (normWs: string): boolean => {
+  const persistWorkspaceCollapsedMap = () => {
+    try {
+      const serialized: Record<string, boolean> = {};
+      for (const [k, v] of collapsedByWorkspaceId.entries()) {
+        serialized[k] = v;
+      }
+      window.localStorage?.setItem(LEFT_SIDEBAR_COLLAPSED_MAP_KEY, JSON.stringify(serialized));
+    } catch {
+      // ignore
+    }
+  };
+
+  const isWorkspaceSidebarTreeCollapsed = (
+    normWs: string,
+    tree?: SubagentAgentTree | null,
+  ): boolean => {
     if (collapsedByWorkspaceId.has(normWs)) {
       return collapsedByWorkspaceId.get(normWs)!;
     }
-    return leftSidebarCollapsed;
+    // Smart default: auto-expand while subagents are running; auto-collapse once all subagents finish
+    const running = tree?.subagentSummary?.running ?? workspaceTreesByWsId.get(normWs)?.subagentSummary?.running ?? 0;
+    return running === 0;
   };
 
   const isZh = (): boolean => isChineseLocale(client.getLocale?.() ?? window.navigator?.language);
@@ -1026,7 +1199,10 @@ export function installDesktopSubagentsTreeEnhancer(
 
   const prefetchAllWorkspaceSubagentTrees = (force = false): Promise<void> => {
     const now = Date.now();
-    if (!force && now - lastBatchPrefetchMs < 4_000) {
+    if (!force && now - lastBatchPrefetchMs < 8_000) {
+      return batchPrefetchInFlight ?? Promise.resolve();
+    }
+    if (force && now - lastBatchPrefetchMs < 8_000 && lastBatchPrefetchMs > 0) {
       return batchPrefetchInFlight ?? Promise.resolve();
     }
     if (batchPrefetchInFlight) {
@@ -1042,9 +1218,11 @@ export function installDesktopSubagentsTreeEnhancer(
       })
       .then((res) => {
         const fetchedAt = Date.now();
+        const freshWorkspaces = new Set<string>();
         for (const tr of res.trees ?? []) {
           if (tr.subagentSummary.total > 0 && tr.flatSubagents.length > 0) {
             const normWs = normalizeWorkspaceKey(tr.workspaceId);
+            if (normWs) freshWorkspaces.add(normWs);
             cacheTreeUnderAllKeys(tr, normWs ? `ws:${normWs}` : `ag:${tr.agentId}`, {
               scopeKey: normWs
                 ? tr.agentId
@@ -1053,6 +1231,19 @@ export function installDesktopSubagentsTreeEnhancer(
                 : `ag:${tr.agentId}`,
               agentId: tr.agentId || null,
               workspaceId: normWs,
+            });
+          }
+        }
+        // Clear stale `running > 0` flags on workspaces that aged out of the top-20 window so
+        // `anySidebarWorkspaceRunning` never gets stuck true forever.
+        for (const [wsKey, prevTree] of workspaceTreesByWsId.entries()) {
+          if (!freshWorkspaces.has(wsKey) && prevTree.subagentSummary.running > 0) {
+            workspaceTreesByWsId.set(wsKey, {
+              ...prevTree,
+              subagentSummary: {
+                ...prevTree.subagentSummary,
+                running: 0,
+              },
             });
           }
         }
@@ -2644,7 +2835,7 @@ export function installDesktopSubagentsTreeEnhancer(
     const activeSubCid = activeSub?.conversationId ?? "";
     const allDone = tree.subagentSummary.running === 0;
     const allArchived = allDone && isAllSubagentsArchivedForTree(tree, window);
-    const wsCollapsed = isWorkspaceSidebarTreeCollapsed(normWs);
+    const wsCollapsed = isWorkspaceSidebarTreeCollapsed(normWs, tree);
     const sig = `${normWs}:${tree.agentId}:${activeSubCid}:${tree.subagentSummary.total}:${tree.subagentSummary.running}:${tree.subagentSummary.totalSubagentSteps}:${totalTimers}:${allArchived}:${wsCollapsed}:${zh}`;
 
     let container = existingForWs;
@@ -2731,14 +2922,9 @@ export function installDesktopSubagentsTreeEnhancer(
     headerRow.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      const nextCollapsed = !isWorkspaceSidebarTreeCollapsed(normWs);
+      const nextCollapsed = !isWorkspaceSidebarTreeCollapsed(normWs, tree);
       collapsedByWorkspaceId.set(normWs, nextCollapsed);
-      leftSidebarCollapsed = nextCollapsed;
-      try {
-        window.localStorage?.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, String(nextCollapsed));
-      } catch {
-        // ignore
-      }
+      persistWorkspaceCollapsedMap();
       const curScope = resolveActiveScope();
       renderLeftSidebarSubagentsTree(getCachedTreeForScope(curScope), curScope);
     });
@@ -2748,14 +2934,16 @@ export function installDesktopSubagentsTreeEnhancer(
       return container;
     }
 
-    // Root L0 row inside Left Sidebar Subagents Tree (hidden when already on Main Agent so it doesn't duplicate workspace row)
-    const isRootActive = isActiveWorkspace && !activeSub;
+    // Root L0 row inside Left Sidebar Subagents Tree:
+    // Show ONLY when the user is actively viewing an L1/L2+ subagent inside this workspace so it never
+    // duplicates the parent workspace row on L0 Main Agent or on inactive background workspaces.
+    const showReturnToRoot = isActiveWorkspace && Boolean(activeSub);
     const rootBtn = document.createElement("button");
     rootBtn.type = "button";
     rootBtn.setAttribute("data-testid", "paseo-finder-left-sidebar-subagent-root");
-    rootBtn.setAttribute("aria-current", isRootActive ? "true" : "false");
+    rootBtn.setAttribute("aria-current", !showReturnToRoot ? "true" : "false");
     Object.assign(rootBtn.style, {
-      display: isRootActive ? "none" : "flex",
+      display: showReturnToRoot ? "flex" : "none",
       alignItems: "center",
       justifyContent: "space-between",
       gap: "6px",
@@ -2969,8 +3157,10 @@ export function installDesktopSubagentsTreeEnhancer(
     markSubagentsArchivedForAgent(tree.agentId, finishedIds, window);
 
     // Also invoke Paseo's native useProviderSubagentStore.hideFromTrack or click the native Archive button if mounted
-    const nativeArchiveBtn = document.querySelector<HTMLElement>(
+    const nativeArchiveBtn = queryFirstVisible<HTMLElement>(
+      document,
       '[data-testid="subagents-track-archive-finished"]',
+      window,
     );
     if (nativeArchiveBtn) {
       nativeArchiveBtn.click();
@@ -2990,13 +3180,92 @@ export function installDesktopSubagentsTreeEnhancer(
         }
       }
     }
-    leftSidebarCollapsed = true;
-    try {
-      window.localStorage?.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, "true");
-    } catch {
-      // ignore
+    const normTreeWs = normalizeWorkspaceKey(tree.workspaceId);
+    if (normTreeWs) {
+      collapsedByWorkspaceId.set(normTreeWs, true);
+      persistWorkspaceCollapsedMap();
     }
     decorateActiveAgentSubagentsDom(tree);
+  };
+
+  const syncOpenSubagentWorkspaceTabsDom = (tree: SubagentAgentTree | null) => {
+    if (!tree || tree.flatSubagents.length === 0) return;
+    const allSubTabs = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid^="workspace-tab-provider_subagent_"]'),
+    );
+    for (const tabEl of allSubTabs) {
+      const parsed = parseProviderSubagentTabTestId(tabEl.getAttribute("data-testid"));
+      if (!parsed) continue;
+      if (
+        tree.agentId &&
+        parsed.parentAgentId !== tree.agentId &&
+        !tree.agentId.startsWith(parsed.parentAgentId)
+      ) {
+        continue;
+      }
+      const cleanSubId = normalizeSubagentArchiveId(parsed.subagentId);
+      const matchedSub = tree.flatSubagents.find(
+        (s) =>
+          normalizeSubagentArchiveId(s.conversationId) === cleanSubId ||
+          s.conversationId.startsWith(cleanSubId),
+      );
+      if (!matchedSub) continue;
+      const parentSub =
+        matchedSub.depth >= 2
+          ? tree.flatSubagents.find(
+              (p) =>
+                normalizeSubagentArchiveId(p.conversationId) ===
+                normalizeSubagentArchiveId(matchedSub.parentConversationId),
+            )
+          : null;
+      const conciseLabel = `L${matchedSub.depth} ${formatSubagentDisplayName(matchedSub, parentSub, 22)}`;
+      const fullTooltip = `L${matchedSub.depth} ${formatSubagentDisplayName(matchedSub, null, 60)}${
+        matchedSub.role && matchedSub.role.toLowerCase() !== matchedSub.subAgentType.toLowerCase()
+          ? ` · ${matchedSub.role}`
+          : ""
+      }`;
+      if (tabEl.title !== fullTooltip) {
+        tabEl.title = fullTooltip;
+      }
+      if (typeof document.createTreeWalker === "function") {
+        const walker = document.createTreeWalker(tabEl, 4 /* NodeFilter.SHOW_TEXT */);
+        let bestNode: Node | null = null;
+        let cur = walker.nextNode();
+        while (cur) {
+          const pEl = cur.parentElement;
+          const val = (cur.nodeValue ?? "").trim();
+          if (
+            val.length >= 2 &&
+            pEl &&
+            !pEl.closest('[aria-label*="Close"], [aria-label*="关闭"], [data-testid*="close"], svg')
+          ) {
+            if (/^(?:Main\s*›\s*)?L\d+\s+/i.test(val)) {
+              bestNode = cur;
+              break;
+            }
+            if (!bestNode) bestNode = cur;
+          }
+          cur = walker.nextNode();
+        }
+        if (bestNode && bestNode.nodeValue !== conciseLabel) {
+          bestNode.nodeValue = conciseLabel;
+        }
+      } else {
+        const leaves = Array.from(tabEl.querySelectorAll<HTMLElement>("div, span")).filter(
+          (el) =>
+            el.children.length === 0 &&
+            !el.closest('[aria-label*="Close"], [aria-label*="关闭"], [data-testid*="close"], svg') &&
+            (el.textContent ?? "").trim().length >= 2,
+        );
+        const labelLeaf =
+          leaves.find((el) => /^(?:Main\s*›\s*)?L\d+\s+/i.test((el.textContent ?? "").trim())) ??
+          leaves[0];
+        if (labelLeaf && labelLeaf.textContent !== conciseLabel) {
+          labelLeaf.textContent = conciseLabel;
+        }
+      }
+      tabEl.setAttribute("data-vec-tab-label", conciseLabel);
+    }
   };
 
   const enhanceNativeSubagentTrackDom = (
@@ -3004,11 +3273,15 @@ export function installDesktopSubagentsTreeEnhancer(
     zh: boolean,
     tokens: ReturnType<typeof syncPaseoThemeCssVariables>,
   ) => {
-    const nativeHeader = document.querySelector<HTMLElement>(
+    const nativeHeader = queryFirstVisible<HTMLElement>(
+      document,
       '[data-testid="subagents-track-header"]',
+      window,
     );
-    const nativeArchiveBtn = document.querySelector<HTMLElement>(
+    const nativeArchiveBtn = queryFirstVisible<HTMLElement>(
+      document,
       '[data-testid="subagents-track-archive-finished"]',
+      window,
     );
 
     if (nativeArchiveBtn && nativeArchiveBtn.getAttribute("data-vec-archive-hooked") !== "1") {
@@ -3021,7 +3294,11 @@ export function installDesktopSubagentsTreeEnhancer(
             .filter((s) => s.status !== "running")
             .map((s) => s.conversationId);
           markSubagentsArchivedForAgent(curTree.agentId, finishedIds, window);
-          leftSidebarCollapsed = true;
+          const normCurWs = normalizeWorkspaceKey(curTree.workspaceId);
+          if (normCurWs) {
+            collapsedByWorkspaceId.set(normCurWs, true);
+            persistWorkspaceCollapsedMap();
+          }
           setTimeout(() => {
             decorateActiveAgentSubagentsDom(curTree);
           }, 40);
@@ -3135,11 +3412,16 @@ export function installDesktopSubagentsTreeEnhancer(
       const curScope = resolveActiveScope();
       const curTree = getCachedTreeForScope(curScope);
       if (curTree && (!parentAgentId || curTree.agentId.startsWith(parentAgentId))) {
-        leftSidebarCollapsed = true;
+        const normCurWs = normalizeWorkspaceKey(curTree.workspaceId);
+        if (normCurWs) {
+          collapsedByWorkspaceId.set(normCurWs, true);
+          persistWorkspaceCollapsedMap();
+        }
         decorateActiveAgentSubagentsDom(curTree);
       }
     });
     enhanceNativeSubagentTrackDom(tree, zh, tokens);
+    syncOpenSubagentWorkspaceTabsDom(tree);
 
     // 1. Left Sidebar Subagents Tree under the active workspace row
     renderLeftSidebarSubagentsTree(tree, scope);
@@ -3149,30 +3431,38 @@ export function installDesktopSubagentsTreeEnhancer(
 
     // 1b. Upgrade Paseo's bottom `[data-testid="parent-agent-callout"]` inside `[data-testid="provider-subagent-panel"]`
     // so Subagent 2 (L2+) clearly shows its immediate parent Subagent 1 (L1) and jumps L2 -> L1 -> Main Agent step by step!
-    const parentCallout = document.querySelector<HTMLElement>(
+    const parentCallout = queryFirstVisible<HTMLElement>(
+      document,
       '[data-testid="parent-agent-callout"]',
+      window,
     );
-    const parentCalloutOpenBtn = document.querySelector<HTMLElement>(
+    const parentCalloutOpenBtn = queryFirstVisible<HTMLElement>(
+      document,
       '[data-testid="parent-agent-callout-open"]',
+      window,
     );
     if (parentCallout && parentCalloutOpenBtn && tree && activeSub) {
       const immediateParent = lineageInfo.immediateParentSubagent;
       const chainLabels = [
         zh ? "L0 主会话" : "L0 Main",
-        ...lineageInfo.ancestorChain.map((n) => `L${n.depth} ${n.subAgentType}`),
+        ...lineageInfo.ancestorChain.map(
+          (n) => `L${n.depth} ${formatSubagentDisplayName(n, null, 24)}`,
+        ),
       ];
       const chainText = chainLabels.join(" › ");
 
       if (immediateParent && activeSub.depth >= 2) {
+        const parentShort = formatSubagentDisplayName(immediateParent, null, 24);
         parentCalloutOpenBtn.setAttribute(
           "data-vec-parent-subagent-cid",
           immediateParent.conversationId,
         );
         parentCalloutOpenBtn.setAttribute("data-vec-parent-agent-id", tree.agentId);
         parentCalloutOpenBtn.setAttribute("data-vec-workspace-id", tree.workspaceId);
+        // Paseo's native button already renders a leading return-arrow SVG icon (`↶`), so omit `↩ ` text prefix.
         const btnLabel = zh
-          ? `↩ 返回上一级 L${immediateParent.depth} ${immediateParent.subAgentType}`
-          : `↩ Back to L${immediateParent.depth} ${immediateParent.subAgentType}`;
+          ? `返回 L${immediateParent.depth} ${parentShort}`
+          : `Back to L${immediateParent.depth} ${parentShort}`;
         const btnTextLeaf =
           Array.from(parentCalloutOpenBtn.querySelectorAll<HTMLElement>("div, span")).find(
             (el) => el.children.length === 0 && (el.textContent ?? "").trim().length > 0,
@@ -3181,10 +3471,10 @@ export function installDesktopSubagentsTreeEnhancer(
           btnTextLeaf.textContent = btnLabel;
         }
         parentCalloutOpenBtn.title = zh
-          ? `逐级返回上一级子会话: L${immediateParent.depth} ${immediateParent.subAgentType} (${immediateParent.conversationId.slice(0, 8)})`
-          : `Jump one level up to parent subagent: L${immediateParent.depth} ${immediateParent.subAgentType} (${immediateParent.conversationId.slice(0, 8)})`;
+          ? `逐级返回上一级子会话: L${immediateParent.depth} ${parentShort} (${immediateParent.conversationId.slice(0, 8)})`
+          : `Jump one level up to parent subagent: L${immediateParent.depth} ${parentShort} (${immediateParent.conversationId.slice(0, 8)})`;
 
-        // Also update the callout description text on the left so it doesn't mislead with Main Agent's title alone
+        // Render clean, non-duplicated lineage path (`L0 Main › L1 DeepInvestigator › L2 WorkerL0`) on the left
         const calloutLeaves = Array.from(
           parentCallout.querySelectorAll<HTMLElement>("div, span"),
         ).filter(
@@ -3196,15 +3486,12 @@ export function installDesktopSubagentsTreeEnhancer(
         );
         const titleLeaf = calloutLeaves[calloutLeaves.length - 1];
         if (titleLeaf) {
-          const expectedCalloutTitle = zh
-            ? `上级: L${immediateParent.depth} ${immediateParent.subAgentType} (${chainText})`
-            : `Parent: L${immediateParent.depth} ${immediateParent.subAgentType} (${chainText})`;
-          if (titleLeaf.textContent !== expectedCalloutTitle) {
-            titleLeaf.textContent = expectedCalloutTitle;
+          if (titleLeaf.textContent !== chainText) {
+            titleLeaf.textContent = chainText;
           }
         }
 
-        // Mount a secondary `[⇈ 主会话]` button right next to `parent-agent-callout-open` for direct root jump
+        // Mount a secondary `[Main Agent]` button right next to `parent-agent-callout-open` for direct root jump
         let rootJumpBtn = parentCallout.querySelector<HTMLButtonElement>(
           '[data-testid="paseo-finder-callout-open-root"]',
         );
@@ -3228,7 +3515,7 @@ export function installDesktopSubagentsTreeEnhancer(
           });
         }
         if (rootJumpBtn) {
-          rootJumpBtn.textContent = zh ? "⇈ 直达主会话" : "⇈ Main Agent";
+          rootJumpBtn.textContent = zh ? "主会话" : "Main Agent";
           rootJumpBtn.title = zh
             ? `跳过中间层级直接返回 L0 主会话 (${tree.title || tree.agentId.slice(0, 8)})`
             : `Jump directly to L0 Main Agent (${tree.title || tree.agentId.slice(0, 8)})`;
@@ -3248,7 +3535,7 @@ export function installDesktopSubagentsTreeEnhancer(
       } else {
         parentCalloutOpenBtn.removeAttribute("data-vec-parent-subagent-cid");
         parentCallout.querySelector('[data-testid="paseo-finder-callout-open-root"]')?.remove();
-        const btnLabel = zh ? "↩ 返回 L0 主会话" : "↩ Back to L0 Main Agent";
+        const btnLabel = zh ? "返回 L0 主会话" : "Back to L0 Main Agent";
         const btnTextLeaf =
           Array.from(parentCalloutOpenBtn.querySelectorAll<HTMLElement>("div, span")).find(
             (el) => el.children.length === 0 && (el.textContent ?? "").trim().length > 0,
@@ -3273,8 +3560,21 @@ export function installDesktopSubagentsTreeEnhancer(
     const isArchivedDone = Boolean(
       !activeSub && tree && isAllSubagentsArchivedForTree(tree, window),
     );
+    const restoreSuppressedNativeTracks = () => {
+      const suppressed = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-vec-suppressed-by-unified-bar="1"]'),
+      );
+      for (const el of suppressed) {
+        el.removeAttribute("data-vec-suppressed-by-unified-bar");
+        el.style.display = "";
+      }
+    };
+
     if (!hasSubagents || !tree || isArchivedDone) {
       for (const b of allExistingBars) b.remove();
+      if (!isArchivedDone) {
+        restoreSuppressedNativeTracks();
+      }
     } else {
       const composer = queryFirstVisible<HTMLElement>(
         document,
@@ -3295,6 +3595,15 @@ export function installDesktopSubagentsTreeEnhancer(
       const hostParent = anchorEl?.parentElement ?? subPanel ?? null;
 
       if (hostParent) {
+        // Prevent double-surface visual echo: when the unified L1+L2 bar is mounted above the L0 composer,
+        // hide Paseo's L1-only `[1 subagent]` ComposerTrackPill right above it so counts/rows never clash.
+        const visibleNativeHeader = !activeSub
+          ? queryFirstVisible<HTMLElement>(document, '[data-testid="subagents-track-header"]', window)
+          : null;
+        if (visibleNativeHeader) {
+          visibleNativeHeader.setAttribute("data-vec-suppressed-by-unified-bar", "1");
+          visibleNativeHeader.style.display = "none";
+        }
         let bar = allExistingBars.find((b) => b.parentElement === hostParent) ?? null;
         for (const b of allExistingBars) {
           if (b !== bar) b.remove();
@@ -3337,11 +3646,12 @@ export function installDesktopSubagentsTreeEnhancer(
             return trimmed;
           };
 
-          // Row A: Active Lineage Breadcrumb (visible when inside an L1/L2+ subagent tab; hidden on L0 Main Agent to keep single-row minimalism)
+          // Row A: Active Lineage Breadcrumb — hidden on L0 AND hidden whenever Paseo's bottom `parent-agent-callout`
+          // is already showing the lineage path & Back/Main buttons right below `pillsRow` (zero 3-row pile-up!).
           const topRow = document.createElement("div");
           topRow.setAttribute("data-testid", "paseo-finder-subagents-lineage-row");
           Object.assign(topRow.style, {
-            display: activeSub ? "flex" : "none",
+            display: activeSub && !calloutAnchor ? "flex" : "none",
             alignItems: "center",
             justifyContent: "space-between",
             gap: "6px",
@@ -3806,6 +4116,30 @@ export function installDesktopSubagentsTreeEnhancer(
       badge.setAttribute("data-paseo-finder-subagent-kind", classified.kind);
       if (matchedSub) {
         badge.setAttribute("data-paseo-finder-subagent-cid", matchedSub.conversationId);
+        // Deduplicate inline secondary summary text (`L1 DeepInvestigator · Role [Done · 16 steps] — Role...`)
+        const secLeaves = Array.from(badge.querySelectorAll<HTMLElement>("div, span")).filter(
+          (el) =>
+            el.children.length === 0 &&
+            !el.closest('[data-testid="paseo-finder-inline-subagent-chip"]') &&
+            (el.textContent ?? "").trim().length > 0,
+        );
+        if (secLeaves.length >= 2) {
+          const secEl = secLeaves[secLeaves.length - 1]!;
+          const rawSec =
+            secEl.getAttribute("data-vec-orig-sec") ?? (secEl.textContent ?? "").trim();
+          if (!secEl.hasAttribute("data-vec-orig-sec")) {
+            secEl.setAttribute("data-vec-orig-sec", rawSec);
+          }
+          const cleanedSec = cleanSubagentSecondaryText(
+            rawSec,
+            matchedSub.subAgentType,
+            matchedSub.role,
+            matchedSub.depth,
+          );
+          if ((secEl.textContent ?? "") !== cleanedSec) {
+            secEl.textContent = cleanedSec;
+          }
+        }
       }
 
       const directNestedChildren =
@@ -4208,11 +4542,6 @@ export function installDesktopSubagentsTreeEnhancer(
           decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
         });
       }, 800);
-    } else {
-      void prefetchAllWorkspaceSubagentTrees(false).then(() => {
-        const latestScope = resolveActiveScope();
-        decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
-      });
     }
     const scope = resolveActiveScope();
     if (!scope.scopeKey) {
@@ -4220,15 +4549,18 @@ export function installDesktopSubagentsTreeEnhancer(
       decorateActiveAgentSubagentsDom(null);
       return;
     }
+    const scopeChanged = lastScopeKey !== scope.scopeKey;
     lastScopeKey = scope.scopeKey;
     const cached = getCachedTreeForScope(scope);
     decorateActiveAgentSubagentsDom(cached);
-    void fetchScopeTree(scope, false, false).then((tree) => {
-      const latestScope = resolveActiveScope();
-      if (latestScope.scopeKey === scope.scopeKey) {
-        decorateActiveAgentSubagentsDom(tree);
-      }
-    });
+    if (scopeChanged || (!cached && Boolean(document.querySelector('[data-testid="tool-call-badge"]')))) {
+      void fetchScopeTree(scope, false, false).then((tree) => {
+        const latestScope = resolveActiveScope();
+        if (latestScope.scopeKey === scope.scopeKey) {
+          decorateActiveAgentSubagentsDom(tree);
+        }
+      });
+    }
   };
 
   const observer = new MutationObserver(() => {
@@ -4243,28 +4575,45 @@ export function installDesktopSubagentsTreeEnhancer(
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
+  let idleTicksSinceBatchPrefetch = 0;
   pollIntervalId = setInterval(() => {
     const scope = resolveActiveScope();
     const anySidebarWorkspaceRunning = Array.from(workspaceTreesByWsId.values()).some(
       (t) => t.subagentSummary.running > 0,
     );
-    if (anySidebarWorkspaceRunning) {
-      void prefetchAllWorkspaceSubagentTrees(true).then(() => {
+    idleTicksSinceBatchPrefetch += 1;
+    if (anySidebarWorkspaceRunning || idleTicksSinceBatchPrefetch >= 12) {
+      idleTicksSinceBatchPrefetch = 0;
+      void prefetchAllWorkspaceSubagentTrees(anySidebarWorkspaceRunning).then(() => {
         const latestScope = resolveActiveScope();
         decorateActiveAgentSubagentsDom(getCachedTreeForScope(latestScope));
       });
     }
     if (!scope.scopeKey) return;
     const cached = getCachedTreeForScope(scope);
-    const hasBadgeInDom = Boolean(document.querySelector('[data-testid="tool-call-badge"]'));
-    if (cached?.subagentSummary.running || (hasBadgeInDom && !cached) || activeDrawerOverlayEl) {
-      void fetchScopeTree(scope, true, false).then((tree) => {
+    const hasFetchedScope = Boolean(
+      treeCacheByKey.has(scope.scopeKey) ||
+        (scope.workspaceId && treeCacheByKey.has(`ws:${scope.workspaceId}`)) ||
+        (scope.agentId && treeCacheByKey.has(`ag:${scope.agentId}`)),
+    );
+    const hasSubagentBadgeInDom =
+      Boolean(
+        document.querySelector(
+          '[data-testid="subagents-track-header"], [data-testid^="subagents-track-row-"]',
+        ),
+      ) ||
+      Array.from(document.querySelectorAll<HTMLElement>('[data-testid="tool-call-badge"]')).some(
+        (el) => /subagent/i.test(el.textContent ?? ""),
+      );
+    const isRunningScope = Boolean(cached?.subagentSummary.running);
+    if (isRunningScope || (hasSubagentBadgeInDom && !hasFetchedScope)) {
+      void fetchScopeTree(scope, isRunningScope, false).then((tree) => {
         const latestScope = resolveActiveScope();
         if (latestScope.scopeKey === scope.scopeKey) {
           decorateActiveAgentSubagentsDom(tree);
         }
       });
-      if (activeDrawerOverlayEl && activeDrawerRefreshFn && cached?.subagentSummary.running) {
+      if (activeDrawerOverlayEl && activeDrawerRefreshFn && isRunningScope) {
         void activeDrawerRefreshFn();
       }
     }
