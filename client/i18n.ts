@@ -60,6 +60,7 @@ export const enMessages = {
     decisionsSlashDescription:
       "Open the Task Decisions Queue to approve options and resume paused Paseo sessions in-place",
     decisionsSlashHint: "[optional task short id]",
+    syncPinPrefixes: "Finder: Sync [pin] Prefix on Pinned Sessions",
   },
   actions: {
     revealInFinder: "Reveal in Finder",
@@ -232,6 +233,15 @@ export const enMessages = {
     pinWorkspaceShortcutHint:
       "Press Cmd+Option+P (Ctrl+Alt+P) to pin or unpin current workspace. Injects ⌘⌥P shortcut hint into sidebar context menu next to 'Pin to top'.",
     testPinWorkspaceBtn: "Test Pin (⌘⌥P)",
+    pinTitlePrefixLabel: "Add [pin] prefix to pinned session titles",
+    pinTitlePrefixHint:
+      "Automatically prepends [pin] to the session title when pinned and strips it when unpinned, so pinned status is directly readable in the header, tabs, and Cmd+K.",
+    pinTitlePrefixValueLabel: "Pin title prefix",
+    pinTitlePrefixValueHint: "Default is [pin]. Saved with a trailing space before the session title.",
+    pinTitlePrefixApplyBtn: "Apply",
+    pinTitlePrefixResetBtn: "Reset",
+    pinTitlePrefixInspectBtn: "Inspect pinned",
+    pinTitlePrefixSyncBtn: "Sync all pinned",
     markDoneShortcutLabel: "Enable mark session done shortcut (Option+D / ⌥D)",
     markDoneShortcutHint:
       "Press Option+D or Option+Shift+D to toggle the 'd ' prefix on the current session. The sidebar row flashes in place and the sidebar does not scroll",
@@ -515,6 +525,7 @@ export const zhMessages: PluginMessageCatalog = {
     openIntakeDecisions: "Finder：打开待拍板任务队列 (Ctrl+Cmd+D)",
     decisionsSlashDescription: "打开待拍板任务队列，选择方案并直接唤醒原 Paseo 会话续跑",
     decisionsSlashHint: "[可选任务短编号]",
+    syncPinPrefixes: "Finder：为已置顶会话同步 [pin] 标题前缀",
   },
   actions: {
     revealInFinder: "在 Finder 中显示",
@@ -684,6 +695,15 @@ export const zhMessages: PluginMessageCatalog = {
     pinWorkspaceShortcutHint:
       "按 Cmd+Option+P（Windows/Linux 为 Ctrl+Alt+P）快速置顶或取消置顶当前工作区。并在左侧边栏右键菜单「置顶 / Pin to top」旁展示 ⌘⌥P 快捷键提示。",
     testPinWorkspaceBtn: "测试置顶切换 (⌘⌥P)",
+    pinTitlePrefixLabel: "置顶会话时自动在标题前添加 [pin] 前缀",
+    pinTitlePrefixHint:
+      "置顶会话时自动在标题前添加 [pin] 前缀，取消置顶时自动移除，无需对照侧边栏即可在顶部标题栏与搜索中直接识别置顶状态。",
+    pinTitlePrefixValueLabel: "置顶标题前缀",
+    pinTitlePrefixValueHint: "默认为 [pin]，保存时自动保留标题分隔空格。",
+    pinTitlePrefixApplyBtn: "应用",
+    pinTitlePrefixResetBtn: "恢复默认",
+    pinTitlePrefixInspectBtn: "检查已置顶",
+    pinTitlePrefixSyncBtn: "同步已置顶",
     markDoneShortcutLabel: "启用快捷键一键标记会话已完成 (Option+D / ⌥D)",
     markDoneShortcutHint:
       "按 Option+D 或 Option+Shift+D 为当前会话名称切换「d 」前缀，左侧边栏该行原位闪烁，不滚动、不居中",

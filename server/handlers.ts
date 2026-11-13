@@ -18,6 +18,7 @@ import {
   type WorkspaceLabelEntry,
   type archiveWorkspaceRpc,
   type toggleWorkspacePinRpc,
+  type managePinPrefixRpc,
   type diagnosePathRpc,
   type importFolderWorkspaceRpc,
   type inspectFileRpc,
@@ -28,6 +29,11 @@ import {
   type renameWorkspaceOrAgentRpc,
   scoreProjectJumpQuery,
 } from "../shared/contracts";
+import {
+  computePinSyncedTitle,
+  hasPinPrefix,
+  normalizePinPrefix,
+} from "../shared/pin-prefix";
 
 const IMAGE_EXT_SET = new Set<string>(SUPPORTED_IMAGE_EXTENSIONS);
 const IGNORED_DIRS = new Set([
@@ -2236,6 +2242,120 @@ export async function handleQuickJumpWorkspace(
     durationMs,
     recentActions: getRecentActionLogs().slice(0, 8),
   };
+}
+
+export async function handleManagePinPrefix(
+  input: RpcInput<typeof managePinPrefixRpc>,
+  context: PluginHandlerContext,
+  options?: {
+    readSettings?: () => Promise<{
+      status: string;
+      values?: { enablePinTitlePrefix?: boolean; pinTitlePrefix?: string };
+    }>;
+  },
+): Promise<RpcOutput<typeof managePinPrefixRpc>> {
+  const startMs = Date.now();
+  const action = input.action ?? "status";
+  let configuredPrefix = "[pin] ";
+  if (options?.readSettings) {
+    try {
+      const s = await options.readSettings();
+      if (s.status === "ready" && s.values?.pinTitlePrefix) {
+        configuredPrefix = s.values.pinTitlePrefix;
+      }
+    } catch {
+      // Fallback to default
+    }
+  }
+  const prefix = normalizePinPrefix(input.prefix ?? configuredPrefix);
+  const targetWsId = stripWorkspaceServerPrefix(input.workspaceId);
+
+  try {
+    const list = await context.paseo.workspaces?.list?.();
+    const entries = Array.isArray(list?.entries) ? list.entries : [];
+    const items: RpcOutput<typeof managePinPrefixRpc>["items"] = [];
+    let withPrefixCount = 0;
+    let missingPrefixCount = 0;
+    let updatedCount = 0;
+
+    for (const entry of entries) {
+      const wsId = stripWorkspaceServerPrefix(entry.id);
+      if (!wsId) continue;
+      if (targetWsId && wsId !== targetWsId) continue;
+      const pinned = Boolean((entry as { pinnedAt?: unknown }).pinnedAt);
+      if (!pinned && !targetWsId) continue;
+
+      const rawTitle =
+        (typeof entry.title === "string" && entry.title.trim()) ||
+        (typeof entry.name === "string" && entry.name.trim() && entry.name.trim() !== "main"
+          ? entry.name.trim()
+          : "");
+      const has = hasPinPrefix(rawTitle, prefix);
+      if (pinned) {
+        if (has) withPrefixCount += 1;
+        else missingPrefixCount += 1;
+      }
+
+      const sync = computePinSyncedTitle(rawTitle, pinned, prefix);
+      let updated = false;
+      if (action === "sync" && !input.dryRun && sync.changed) {
+        const ref = context.paseo.workspaces.ref(wsId);
+        await ref.setTitle(sync.nextTitle);
+        updated = true;
+        updatedCount += 1;
+        recordActionLog({
+          target: "workspace-meta",
+          resolvedPath: wsId,
+          ok: true,
+          durationMs: Date.now() - startMs,
+          message: `Synced pin prefix on ${wsId}: "${rawTitle}" -> "${sync.nextTitle ?? ""}"`,
+        });
+      }
+
+      items.push({
+        workspaceId: wsId,
+        title: rawTitle,
+        pinned,
+        hasPrefix: has,
+        proposedTitle: sync.changed ? sync.nextTitle : rawTitle || null,
+        updated,
+      });
+    }
+
+    const pinnedCount = items.filter((i) => i.pinned).length;
+    const message =
+      action === "sync"
+        ? input.dryRun
+          ? `Dry-run: ${missingPrefixCount} pinned session(s) would receive "${prefix.trim()}"`
+          : `Synced "${prefix.trim()}" prefix on ${updatedCount} pinned session(s) (${pinnedCount} pinned total)`
+        : `Pinned sessions: ${pinnedCount} (${withPrefixCount} with prefix, ${missingPrefixCount} missing)`;
+
+    return {
+      ok: true,
+      action,
+      prefix,
+      pinnedCount,
+      withPrefixCount,
+      missingPrefixCount,
+      updatedCount,
+      items,
+      message,
+      durationMs: Date.now() - startMs,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      action,
+      prefix,
+      pinnedCount: 0,
+      withPrefixCount: 0,
+      missingPrefixCount: 0,
+      updatedCount: 0,
+      items: [],
+      message: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - startMs,
+    };
+  }
 }
 
 export * from "./schedule-runs-handlers";

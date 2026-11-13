@@ -1,7 +1,8 @@
 import { settingsRpc } from "@getpaseo/plugin";
-import type {
-  PluginButtonRegistration,
-  PluginClientContext,
+import {
+  type PluginButtonRegistration,
+  type PluginClientContext,
+  getPaseoClient,
 } from "@getpaseo/plugin/client";
 import { copyText } from "@getpaseo/plugin/client/ui";
 import {
@@ -117,6 +118,11 @@ import {
   installIntakeDecisionsEnhancer,
   openIntakeDecisionsDrawer,
 } from "./client/intake-decisions-web";
+import {
+  installPinTitlePrefixSync,
+  reconcileAllPinnedNow,
+  syncPinPrefixPrefs,
+} from "./client/pin-prefix-web";
 import { createKeyedSerialQueue } from "./client/keyed-serial";
 import { inspectAntigravityContextRpc } from "./shared/compaction-context-contracts";
 import { manageIntakeDecisionsRpc } from "./shared/intake-decisions-contracts";
@@ -1895,9 +1901,52 @@ export default function contribute(client: PluginClientContext) {
               ? v.sidebarGroupingToggleOnRePress
               : undefined,
         });
+        syncPinPrefixPrefs({
+          enabled:
+            typeof v.enablePinTitlePrefix === "boolean"
+              ? v.enablePinTitlePrefix
+              : undefined,
+          prefix:
+            typeof v.pinTitlePrefix === "string"
+              ? v.pinTitlePrefix
+              : undefined,
+        });
       }
     })
     .catch(() => {});
+
+  const cleanupPinTitlePrefixSync = installPinTitlePrefixSync({
+    win: getWebWindow() as Window | null,
+    onApplyTitle: async (ctx) => {
+      const win = getWebWindow();
+      const doc = win?.document ?? null;
+      if (doc && ctx.nextTitle) {
+        synchronizeWorkspaceTitleDom(doc, win, ctx.workspaceId, ctx.nextTitle);
+      }
+      await workspaceTitleWrites.run(ctx.workspaceId, async () => {
+        let updated = false;
+        try {
+          const hostApi = ctx.serverId ? getPaseoClient(ctx.serverId) : client.paseo;
+          await hostApi.workspaces.ref(ctx.workspaceId).setTitle(ctx.nextTitle);
+          updated = true;
+        } catch {
+          try {
+            await client.paseo.workspaces.ref(ctx.workspaceId).setTitle(ctx.nextTitle);
+            updated = true;
+          } catch {
+            // Fallback to RPC below
+          }
+        }
+        if (!updated) {
+          await client.rpc(renameWorkspaceOrAgentRpc, {
+            workspaceId: ctx.workspaceId,
+            title: ctx.nextTitle,
+            source: "pin-prefix",
+          });
+        }
+      });
+    },
+  });
 
   const cleanupSidebarDefaultCollapse = installSidebarDefaultCollapse();
 
@@ -2139,6 +2188,17 @@ export default function contribute(client: PluginClientContext) {
     },
   });
 
+  client.addCommandCenterItem({
+    id: "sync-pin-prefixes",
+    title: pluginTranslations.message("commands.syncPinPrefixes"),
+    icon: "Pin",
+    keywords: ["pin", "prefix", "title", "pinned", "置顶", "前缀"],
+    context: "global",
+    async onSelect() {
+      await reconcileAllPinnedNow();
+    },
+  });
+
   return () => {
     lifetime.abort();
     if (syncProjectsTimer) {
@@ -2166,6 +2226,7 @@ export default function contribute(client: PluginClientContext) {
     cleanupDocPreviewEnhancer();
     cleanupCompactionAndContextEnhancer();
     cleanupIntakeDecisionsEnhancer();
+    cleanupPinTitlePrefixSync();
     for (const btn of headerButtons.values()) btn.remove();
     headerButtons.clear();
     for (const btn of forkButtons.values()) btn.remove();

@@ -38,6 +38,7 @@ import {
   inspectScheduleRunsRpc,
   manageAgentHistoryRpc,
   managePeerAgentsRpc,
+  managePinPrefixRpc,
   manageSlashSkillsRpc,
   manageVoiceSttRpc,
   manageWorkspaceLabelsRpc,
@@ -72,6 +73,15 @@ import {
   triggerScheduleRunsDrawer,
 } from "./schedule-runs-web";
 import { syncVoiceCustomModelPreferences } from "./voice-stt-web";
+import {
+  PIN_PREFIX_EVENT,
+  type PinPrefixStatusSnapshot,
+  getPinPrefixStatus,
+  inspectPinnedWorkspacesNow,
+  reconcileAllPinnedNow,
+  syncPinPrefixPrefs,
+} from "./pin-prefix-web";
+import { DEFAULT_PIN_PREFIX, normalizePinPrefix } from "../shared/pin-prefix";
 import {
   DICTATION_GUARD_EVENT,
   type DictationGuardStatus,
@@ -205,6 +215,7 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const openScheduleRunSession = useRpc(openScheduleRunSessionRpc);
   const manageVoiceStt = useRpc(manageVoiceSttRpc);
   const manageAgentHistory = useRpc(manageAgentHistoryRpc);
+  const managePinPrefix = useRpc(managePinPrefixRpc);
   const manageSlashSkills = useRpc(manageSlashSkillsRpc);
   const manageWritebackHook = useRpc(manageWritebackHookRpc);
   const reconcilePaseoRecovery = useRpc(reconcilePaseoRecoveryRpc);
@@ -233,6 +244,18 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
   const [labelsBarTestResult, setLabelsBarTestResult] = useState<string | null>(null);
   const [threadNavTestResult, setThreadNavTestResult] = useState<string | null>(null);
   const [pinWorkspaceTestResult, setPinWorkspaceTestResult] = useState<string | null>(null);
+  const [pinPrefixStatus, setPinPrefixStatus] = useState<PinPrefixStatusSnapshot | null>(null);
+  const [pinPrefixInput, setPinPrefixInput] = useState(DEFAULT_PIN_PREFIX);
+  const lastSyncedPinPrefixRef = useRef<string | null>(null);
+  const [pinPrefixInspectLines, setPinPrefixInspectLines] = useState<string[] | null>(null);
+  const [pinPrefixActionMsg, setPinPrefixActionMsg] = useState<string | null>(null);
+  useEffect(() => {
+    setPinPrefixStatus(getPinPrefixStatus());
+    if (typeof window === "undefined") return;
+    const onPinEvent = () => setPinPrefixStatus(getPinPrefixStatus());
+    window.addEventListener(PIN_PREFIX_EVENT, onPinEvent);
+    return () => window.removeEventListener(PIN_PREFIX_EVENT, onPinEvent);
+  }, []);
   const [quickJumpQueryInput, setQuickJumpQueryInput] = useState("");
   const [scheduleRunsQueryInput, setScheduleRunsQueryInput] = useState("");
   const [scheduleRunsDiagData, setScheduleRunsDiagData] = useState<
@@ -674,6 +697,16 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
         "plugin-settings",
       );
       setSessionTimeHealth(getSessionTimeHealthSnapshot());
+      syncPinPrefixPrefs({
+        enabled: settings.values.enablePinTitlePrefix ?? true,
+        prefix: settings.values.pinTitlePrefix ?? DEFAULT_PIN_PREFIX,
+      });
+      const savedPinPrefix = settings.values.pinTitlePrefix ?? DEFAULT_PIN_PREFIX;
+      if (lastSyncedPinPrefixRef.current !== savedPinPrefix) {
+        lastSyncedPinPrefixRef.current = savedPinPrefix;
+        setPinPrefixInput(savedPinPrefix);
+      }
+      setPinPrefixStatus(getPinPrefixStatus());
     }
   }, [settings]);
 
@@ -1521,6 +1554,160 @@ export function FinderPluginSettingsScreen({ theme, layout }: PluginSurfaceProps
               }}
             />
           )}
+
+          <SettingsSwitch
+            label={t("settings.pinTitlePrefixLabel")}
+            hint={t("settings.pinTitlePrefixHint")}
+            value={values.enablePinTitlePrefix ?? true}
+            onValueChange={(next) => {
+              syncPinPrefixPrefs({
+                enabled: next,
+                prefix: values.pinTitlePrefix ?? DEFAULT_PIN_PREFIX,
+              });
+              setPinPrefixStatus(getPinPrefixStatus());
+              void save({ ...values, enablePinTitlePrefix: next }, revision);
+            }}
+          />
+
+          <View style={styles.diagBox}>
+            <Text style={styles.label}>{t("settings.pinTitlePrefixValueLabel")}</Text>
+            <Text style={styles.detail}>{t("settings.pinTitlePrefixValueHint")}</Text>
+            <View style={styles.row}>
+              <TextInput
+                value={pinPrefixInput}
+                onChangeText={setPinPrefixInput}
+                placeholder={DEFAULT_PIN_PREFIX}
+                placeholderTextColor={theme.colors.foregroundMuted}
+                style={styles.input}
+                accessibilityLabel={t("settings.pinTitlePrefixValueLabel")}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("settings.pinTitlePrefixApplyBtn")}
+                onPress={() => {
+                  const normalized = normalizePinPrefix(pinPrefixInput);
+                  lastSyncedPinPrefixRef.current = normalized;
+                  setPinPrefixInput(normalized);
+                  syncPinPrefixPrefs({ prefix: normalized });
+                  setPinPrefixStatus(getPinPrefixStatus());
+                  void save({ ...values, pinTitlePrefix: normalized }, revision);
+                  const msg = isZh
+                    ? `已更新置顶前缀为 "${normalized.trim()}"`
+                    : `Updated pin prefix to "${normalized.trim()}"`;
+                  setPinPrefixActionMsg(msg);
+                  toast.show(msg);
+                }}
+                style={styles.btn}
+              >
+                <Text style={styles.btnText}>{t("settings.pinTitlePrefixApplyBtn")}</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("settings.pinTitlePrefixResetBtn")}
+                onPress={() => {
+                  lastSyncedPinPrefixRef.current = DEFAULT_PIN_PREFIX;
+                  setPinPrefixInput(DEFAULT_PIN_PREFIX);
+                  syncPinPrefixPrefs({ enabled: true, prefix: DEFAULT_PIN_PREFIX });
+                  setPinPrefixStatus(getPinPrefixStatus());
+                  void save(
+                    {
+                      ...values,
+                      enablePinTitlePrefix: true,
+                      pinTitlePrefix: DEFAULT_PIN_PREFIX,
+                    },
+                    revision,
+                  );
+                  const msg = isZh ? "已恢复默认前缀 [pin]" : "Reset pin prefix to [pin]";
+                  setPinPrefixActionMsg(msg);
+                  toast.show(msg);
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryBtnText}>
+                  {t("settings.pinTitlePrefixResetBtn")}
+                </Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.detail}>
+              {isZh
+                ? `当前置顶会话: ${pinPrefixStatus?.pinnedCount ?? 0} 个 · 已含前缀: ${pinPrefixStatus?.withPrefixCount ?? 0} · 待补充: ${pinPrefixStatus?.missingPrefixCount ?? 0} · 状态监听: ${pinPrefixStatus?.storeAvailable ? "已连接" : "等待加载"}`
+                : `Pinned: ${pinPrefixStatus?.pinnedCount ?? 0} · With prefix: ${pinPrefixStatus?.withPrefixCount ?? 0} · Missing: ${pinPrefixStatus?.missingPrefixCount ?? 0} · Store: ${pinPrefixStatus?.storeAvailable ? "Ready" : "Pending"}`}
+            </Text>
+
+            <View style={styles.row}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("settings.pinTitlePrefixInspectBtn")}
+                onPress={async () => {
+                  const local = inspectPinnedWorkspacesNow();
+                  if (local.pinnedCount > 0 || pinPrefixStatus?.storeAvailable) {
+                    const lines = local.items.slice(0, 8).map((item) =>
+                      item.hasPrefix
+                        ? `[ok] ${item.title}`
+                        : `[missing] ${item.title || item.workspaceId} -> ${item.proposedTitle ?? ""}`,
+                    );
+                    setPinPrefixInspectLines(lines);
+                    setPinPrefixActionMsg(
+                      isZh
+                        ? `检查完成：共 ${local.pinnedCount} 个置顶会话（${local.withPrefixCount} 已带前缀，${local.missingPrefixCount} 待补充）`
+                        : `Inspected ${local.pinnedCount} pinned session(s): ${local.withPrefixCount} with prefix, ${local.missingPrefixCount} missing`,
+                    );
+                    setPinPrefixStatus(getPinPrefixStatus());
+                    return;
+                  }
+                  const res = await managePinPrefix({
+                    action: "inspect",
+                    prefix: values.pinTitlePrefix ?? DEFAULT_PIN_PREFIX,
+                  });
+                  setPinPrefixInspectLines(
+                    res.items.slice(0, 8).map((item) =>
+                      item.hasPrefix
+                        ? `[ok] ${item.title}`
+                        : `[missing] ${item.title || item.workspaceId} -> ${item.proposedTitle ?? ""}`,
+                    ),
+                  );
+                  setPinPrefixActionMsg(res.message);
+                }}
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryBtnText}>
+                  {t("settings.pinTitlePrefixInspectBtn")}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("settings.pinTitlePrefixSyncBtn")}
+                onPress={async () => {
+                  const localRes = await reconcileAllPinnedNow();
+                  let msg = isZh
+                    ? `客户端同步完成：更新 ${localRes.updated} 个会话`
+                    : `Synced ${localRes.updated} pinned session(s)`;
+                  if (localRes.checked === 0) {
+                    const rpcRes = await managePinPrefix({
+                      action: "sync",
+                      prefix: values.pinTitlePrefix ?? DEFAULT_PIN_PREFIX,
+                    });
+                    msg = rpcRes.message;
+                  }
+                  setPinPrefixStatus(getPinPrefixStatus());
+                  setPinPrefixActionMsg(msg);
+                  toast.show(msg);
+                }}
+                style={styles.btn}
+              >
+                <Text style={styles.btnText}>{t("settings.pinTitlePrefixSyncBtn")}</Text>
+              </Pressable>
+            </View>
+
+            {pinPrefixActionMsg && <Text style={styles.detail}>{pinPrefixActionMsg}</Text>}
+            {pinPrefixInspectLines &&
+              pinPrefixInspectLines.map((line, idx) => (
+                <Text key={`pin-inspect-${idx}`} style={styles.detail}>
+                  {line}
+                </Text>
+              ))}
+          </View>
 
           <SettingsSwitch
             label={t("settings.markDoneShortcutLabel")}

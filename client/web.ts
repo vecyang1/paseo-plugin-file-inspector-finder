@@ -14,6 +14,7 @@ import {
   scoreProjectJumpQuery,
 } from "../shared/contracts";
 import { PASEO_IDENTITY_BG_HEX } from "../shared/paseo-theme";
+import { splitPinPrefix } from "../shared/pin-prefix";
 import { getCatalogForLocale, isChineseLocale } from "./i18n";
 import { createKeyedSerialQueue } from "./keyed-serial";
 import {
@@ -2655,26 +2656,32 @@ export function computeDoneToggledTitle(
   action: "marked" | "unmarked";
 } {
   const trimmed = (currentTitle ?? "").trim();
-  if (/^d\s+/i.test(trimmed)) {
+  const pinSplit = splitPinPrefix(trimmed);
+  const pinHead = pinSplit.hasPin ? pinSplit.pinPrefix : "";
+  const body = pinSplit.hasPin ? pinSplit.rest.trim() : trimmed;
+
+  if (/^d\s+/i.test(body)) {
+    const rest = body.replace(/^d\s+/i, "");
     return {
-      newTitle: trimmed.replace(/^d\s+/i, ""),
+      newTitle: pinHead ? `${pinHead}${rest}`.trim() : rest,
       action: "unmarked",
     };
   }
-  if (/^d[-_:]\s*/i.test(trimmed)) {
+  if (/^d[-_:]\s*/i.test(body)) {
+    const rest = body.replace(/^d[-_:]\s*/i, "");
     return {
-      newTitle: trimmed.replace(/^d[-_:]\s*/i, ""),
+      newTitle: pinHead ? `${pinHead}${rest}`.trim() : rest,
       action: "unmarked",
     };
   }
-  if (trimmed.toLowerCase() === "d") {
+  if (body.toLowerCase() === "d") {
     return {
-      newTitle: "",
+      newTitle: pinHead ? pinHead.trim() : "",
       action: "unmarked",
     };
   }
   return {
-    newTitle: `${prefix}${trimmed}`,
+    newTitle: `${pinHead}${prefix}${body}`.trim(),
     action: "marked",
   };
 }

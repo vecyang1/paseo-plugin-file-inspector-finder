@@ -23,6 +23,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { splitPinPrefix } from "../shared/pin-prefix";
 
 export interface LinkRetitleConfig {
   enabled: boolean;
@@ -138,7 +139,9 @@ const ID_TOKEN = /^(?=.*\d)[a-z0-9_-]{6,}$/i;
 export const DONE_PREFIX = "d ";
 
 function stripDonePrefix(title: string): string {
-  return title.startsWith(DONE_PREFIX) ? title.slice(DONE_PREFIX.length) : title;
+  const pinSplit = splitPinPrefix(title);
+  const body = pinSplit.hasPin ? pinSplit.rest : title;
+  return body.startsWith(DONE_PREFIX) ? body.slice(DONE_PREFIX.length) : body;
 }
 
 /**
@@ -333,7 +336,10 @@ export async function runLinkFirstRetitle(input: RetitleInput, deps: RetitleDeps
   }
   if (!title) return logged(skip("empty_generation", currentTitle));
 
-  if (currentTitle?.startsWith(DONE_PREFIX)) title = `${DONE_PREFIX}${title}`;
+  const pinSplit = splitPinPrefix(currentTitle);
+  const bodyBeforeDone = pinSplit.hasPin ? pinSplit.rest : (currentTitle ?? "");
+  if (bodyBeforeDone.startsWith(DONE_PREFIX)) title = `${DONE_PREFIX}${title}`;
+  if (pinSplit.hasPin) title = `${pinSplit.pinPrefix}${title}`;
   if (input.dryRun) return { ...base, workspaceId, from: currentTitle, to: title, ok: true, reason: "dry_run" };
 
   const res = await deps.rename({ workspaceId, agentId: input.agentId, title, source: "link-first-retitle" });

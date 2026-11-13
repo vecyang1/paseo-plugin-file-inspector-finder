@@ -16,6 +16,7 @@ import {
   renameWorkspaceOrAgentRpc,
   archiveWorkspaceRpc,
   toggleWorkspacePinRpc,
+  managePinPrefixRpc,
   inspectScheduleRunsRpc,
   openScheduleRunSessionRpc,
   manageVoiceSttRpc,
@@ -36,6 +37,7 @@ import { handleInspectSystemPrompt } from "./server/system-prompt-handlers";
 import {
   handleArchiveWorkspace,
   handleToggleWorkspacePin,
+  handleManagePinPrefix,
   handleDiagnosePath,
   handleImportFolderWorkspace,
   handleInspectFile,
@@ -109,6 +111,11 @@ export default function contribute(rawServer: PluginServerContext) {
   server.handle(renameWorkspaceOrAgentRpc, handleRenameThread);
   server.handle(archiveWorkspaceRpc, handleArchiveWorkspace);
   server.handle(toggleWorkspacePinRpc, handleToggleWorkspacePin);
+  server.handle(managePinPrefixRpc, (input, context) =>
+    handleManagePinPrefix(input, context, {
+      readSettings: () => settingsHandle.read(),
+    }),
+  );
   server.handle(manageWorkspaceLabelsRpc, handleManageWorkspaceLabels);
   server.handle(importFolderWorkspaceRpc, (input, context) =>
     handleImportFolderWorkspace(input, context, {
@@ -950,6 +957,32 @@ export default function contribute(rawServer: PluginServerContext) {
     },
   });
 
+  const finderManagePinPrefixTool = defineAgentTool({
+    name: "finder_manage_pin_prefix",
+    title: "Inspect or Sync [pin] Title Prefix on Pinned Workspaces",
+    description:
+      "Inspect pinned Paseo workspaces to see which titles carry the [pin] prefix (status/inspect) or sync missing [pin] prefixes onto pinned workspace titles (sync).",
+    input: z.object({
+      action: z.enum(["status", "inspect", "sync"]).optional().default("status"),
+      workspaceId: z.string().optional(),
+      prefix: z.string().optional(),
+      dryRun: z.boolean().optional(),
+    }),
+    async execute(input, { paseo }) {
+      const res = await handleManagePinPrefix(
+        {
+          action: input.action ?? "status",
+          workspaceId: input.workspaceId,
+          prefix: input.prefix,
+          dryRun: input.dryRun,
+        },
+        { paseo } as never,
+        { readSettings: () => settingsHandle.read() },
+      );
+      return { text: JSON.stringify(res, null, 2), structuredContent: res, isError: !res.ok };
+    },
+  });
+
   // No `archive_workspace` agent tool here on purpose. Paseo ships a built-in
   // tool of that name, and Paseo 0.15.3 throws in registerPluginTools when a
   // plugin tool reuses a built-in name, which fails every agent create and
@@ -983,6 +1016,7 @@ export default function contribute(rawServer: PluginServerContext) {
         finderInspectContextTool,
         finderIntakeDecisionsTool,
         finderHarnessCatalogsTool,
+        finderManagePinPrefixTool,
       ],
     };
   });

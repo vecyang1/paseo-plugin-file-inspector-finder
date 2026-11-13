@@ -85,6 +85,7 @@ export const InlineRenameSourceSchema = z.enum([
   "f2-inline",
   "slash-command",
   "mark-done-shortcut",
+  "pin-prefix",
   "ui",
   "agent-tool",
 ]);
@@ -167,6 +168,8 @@ export const pluginSettings = defineSettings({
     labelNumberShortcutMode: LabelNumberShortcutModeSchema.default("empty-input"),
     enableThreadNavigationShortcuts: z.boolean().default(true),
     enablePinWorkspaceShortcut: z.boolean().default(true),
+    enablePinTitlePrefix: z.boolean().default(true),
+    pinTitlePrefix: z.string().default("[pin] "),
     labelShortcutCombo: LabelShortcutComboSchema.default("both"),
     enableMarkDoneShortcut: z.boolean().default(true),
     markDonePrefix: z.string().default("d "),
@@ -1577,6 +1580,37 @@ export const manageHarnessCatalogsRpc = defineRpc({
     harnesses: z.array(HarnessCatalogItemSchema),
     actions: z.array(z.string()),
     issues: z.array(z.string()),
+    message: z.string(),
+    durationMs: z.number(),
+  }),
+});
+
+export const PinPrefixWorkspaceItemSchema = z.object({
+  workspaceId: z.string(),
+  title: z.string(),
+  pinned: z.boolean(),
+  hasPrefix: z.boolean(),
+  proposedTitle: z.string().nullable(),
+  updated: z.boolean(),
+});
+
+export const managePinPrefixRpc = defineRpc({
+  name: "finder.manage_pin_prefix",
+  input: z.object({
+    action: z.enum(["status", "inspect", "sync"]).default("status"),
+    workspaceId: z.string().optional(),
+    prefix: z.string().optional(),
+    dryRun: z.boolean().optional(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    action: z.enum(["status", "inspect", "sync"]),
+    prefix: z.string(),
+    pinnedCount: z.number(),
+    withPrefixCount: z.number(),
+    missingPrefixCount: z.number(),
+    updatedCount: z.number(),
+    items: z.array(PinPrefixWorkspaceItemSchema),
     message: z.string(),
     durationMs: z.number(),
   }),
