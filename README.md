@@ -92,7 +92,7 @@ node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs sc
 node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/sidebar-child-sessions-plan.mts [--agent <id>] [--json]
 ```
 
-Quote Reply against the real app. It sends four real messages, so `--agent` must be a fixture session whose first message says every later one is test data (`--print-fixture` prints the command that creates one); the script refuses any other session. `--other` opens sessions you own first, so several chat panes are mounted at once, which is the case a single-session run cannot reach. `--no-send` stops before sending:
+Quote Reply against the real app. It sends five real messages, so `--agent` must be a fixture session whose first message says every later one is test data (`--print-fixture` prints the command that creates one); the script refuses any other session. `--other` opens sessions you own first, so several chat panes are mounted at once, which is the case a single-session run cannot reach. `--no-send` stops before sending:
 
 ```bash
 node --experimental-strip-types --no-warnings --import ./test/register-ts.mjs scripts/quote-reply-e2e.mts --agent <fixture-agent-id> [--other <agent-id>]... [--server srv_x] [--no-send]

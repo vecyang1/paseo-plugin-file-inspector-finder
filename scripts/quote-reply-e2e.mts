@@ -8,7 +8,7 @@
  *     [--server srv_x] [--port 6796] [--shots <dir>] [--no-send]
  *
  * --agent must be a FIXTURE session, created with the prompt printed by `--print-fixture`. The
- * script sends four real messages to it. A fixture is told up front that every later message is
+ * script sends five real messages to it. A fixture is told up front that every later message is
  * test data, and its text is pangrams, so nothing it receives reads as a task. Do not point this at
  * a working session and do not make the quotes or comments look like instructions: on 2026-11-13 a
  * probe that reused a real request as its test text had a full-access agent act on it and rewrite
@@ -323,6 +323,21 @@ async function run(page: Page, shots: string): Promise<void> {
   await page.locator(VISIBLE_COMPOSER).click();
   await page.keyboard.press("Enter");
   await expectSent(page, "Enter, no message", beforeEnter.myBubbles, ["Bravo", "任务含义"], "enter");
+
+  // 10. A real mouse press on Paseo's own send button: the tray is folded on pointerdown, and the
+  // button must still be under the pointer when it is released.
+  await settleAgent(page);
+  await addQuote(page, "Charlie line", "judge my vow");
+  await page.locator(VISIBLE_COMPOSER).click();
+  await page.keyboard.type(TYPED);
+  await sleep(300);
+  const beforeClick = await snapshot(page);
+  await page
+    .locator('[data-testid="message-input-root"]:visible')
+    .locator('[aria-label="Send message"], [aria-label="Queue message"], [aria-label="Send and interrupt"], [aria-label="Send and steer"]')
+    .first()
+    .click();
+  await expectSent(page, "Paseo's send button", beforeClick.myBubbles, ["Charlie line", TYPED], "send-button");
   await page.screenshot({ path: path.join(shots, "5-done.png") });
 }
 
